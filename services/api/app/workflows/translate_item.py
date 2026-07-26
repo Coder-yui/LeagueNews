@@ -123,7 +123,9 @@ async def build_translation(
         translated_text="\n\n".join(translated_text_parts),
         translated_content_blocks=translated_blocks,
         translated_summary=result.translated_summary,
-        translated_entities=result.translated_entities,
+        translated_entities=[
+            entity.model_dump(mode="json") for entity in result.translated_entities
+        ],
         translated_media_extractions=[
             extraction.model_dump(mode="json")
             for extraction in result.translated_media_extractions

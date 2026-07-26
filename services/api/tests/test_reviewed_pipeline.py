@@ -661,7 +661,7 @@ def test_approved_item_persists_translated_patch_data_as_relational_link() -> No
                 "normalized_text": "Patch preview",
                 "summary": "设计师发布版本预览。",
                 "category": "版本更新",
-                "entities": [{"name": "26.15", "type": "patch"}],
+                "entities": [{"英雄": "暗裔剑魔"}],
                 "importance_score": 0.8,
                 "credibility": "official",
                 "credibility_score": 0.98,
@@ -695,6 +695,7 @@ def test_approved_item_persists_translated_patch_data_as_relational_link() -> No
         item = db.scalar(select(NormalizedItem))
         assert result.status == "completed"
         assert result.outcome == "approved"
+        assert item.entities == [{"name": "暗裔剑魔", "type": "champion"}]
         assert item.approved_media_extraction_ids == [extraction.id]
         assert item.translated_media_extractions[0]["translated_data"]["sections"][0][
             "entries"

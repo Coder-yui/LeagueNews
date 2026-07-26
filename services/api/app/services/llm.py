@@ -16,11 +16,17 @@ class LLMAnalysisError(RuntimeError):
     """Raised when a provider response cannot be used as a news analysis."""
 
 
+class ExtractedEntity(BaseModel):
+    name: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    canonical_name: str | None = None
+
+
 class AnalysisResult(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     summary: str = Field(min_length=1)
     category: str = Field(min_length=1, max_length=60)
-    entities: list[dict[str, str]]
+    entities: list[ExtractedEntity]
     importance_score: float = Field(ge=0, le=1)
     credibility: Literal["official", "corroborated", "unverified", "rumor"]
     credibility_score: float = Field(ge=0, le=1)
@@ -80,7 +86,7 @@ class TranslationResult(BaseModel):
     translated_title: str = Field(min_length=1, max_length=500)
     translated_blocks: list[TranslatedTextBlock] = Field(default_factory=list)
     translated_summary: str = Field(min_length=1)
-    translated_entities: list[dict[str, str]]
+    translated_entities: list[ExtractedEntity]
     translated_media_extractions: list[TranslatedMediaExtraction] = Field(default_factory=list)
 
 
@@ -144,6 +150,8 @@ class LLMClient:
             "不要输出 Markdown。必须包含 title、summary、category、entities、"
             "importance_score、credibility、credibility_score、credibility_evidence。"
             "title、summary、category 和实体的展示名称必须使用简体中文；"
+            "entities 必须是对象数组，每个对象严格使用 name、type、canonical_name "
+            "三个键，禁止使用“英雄”“物品”等动态键；type 使用稳定英文类型；"
             "事实、专有名词原文和数值不得丢失。category 使用简短中文分类；"
             "importance_score 必须为 0 到 1；credibility 只能是 official、"
             "corroborated、unverified、rumor；credibility_score 必须为 0 到 1；"

@@ -381,11 +381,14 @@ async def _build_item_proposal(
         source_context=_source_context(raw_item),
         knowledge_rules=rules,
     )
+    analysis_entities = [
+        entity.model_dump(mode="json") for entity in analysis.entities
+    ]
     translation = await build_translation(
         raw_item,
         canonical_title=analysis.title,
         summary=analysis.summary,
-        entities=analysis.entities,
+        entities=analysis_entities,
         media_extractions=media_extractions,
         glossary=glossary,
     )
@@ -394,7 +397,7 @@ async def _build_item_proposal(
         "normalized_text": source_text,
         "summary": translation.translated_summary,
         "category": analysis.category,
-        "entities": translation.translated_entities,
+        "entities": _normalize_entities(translation.translated_entities),
         "importance_score": analysis.importance_score,
         "credibility": analysis.credibility,
         "credibility_score": analysis.credibility_score,
@@ -449,7 +452,15 @@ def _apply_normalized_item(
     }
     item = NormalizedItem(
         raw_item_id=raw_item.id,
-        **{key: value for key, value in proposal.items() if key in allowed_fields},
+        **{
+            key: (
+                _normalize_entities(value)
+                if key == "entities" and isinstance(value, list)
+                else value
+            )
+            for key, value in proposal.items()
+            if key in allowed_fields
+        },
     )
     db.add(item)
     db.flush()
@@ -518,6 +529,47 @@ def _extraction_ids(payload: dict[str, Any]) -> list[int]:
         for value in payload.get("approved_media_extraction_ids", [])
         if isinstance(value, int)
     ]
+
+
+def _normalize_entities(values: list[object]) -> list[dict[str, str]]:
+    type_aliases = {
+        "英雄": "champion",
+        "物品": "item",
+        "装备": "item",
+        "设计师": "person",
+        "人物": "person",
+        "赛事": "tournament",
+        "版本": "patch",
+    }
+    normalized: list[dict[str, str]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        name = value.get("name")
+        entity_type = value.get("type")
+        canonical_name = value.get("canonical_name")
+        if not isinstance(name, str) or not name.strip():
+            dynamic_fields = [
+                (key, field_value)
+                for key, field_value in value.items()
+                if isinstance(field_value, str) and field_value.strip()
+            ]
+            if not dynamic_fields:
+                continue
+            dynamic_type, name = dynamic_fields[0]
+            entity_type = type_aliases.get(str(dynamic_type), str(dynamic_type))
+        record = {
+            "name": name.strip(),
+            "type": (
+                entity_type.strip()
+                if isinstance(entity_type, str) and entity_type.strip()
+                else "other"
+            ),
+        }
+        if isinstance(canonical_name, str) and canonical_name.strip():
+            record["canonical_name"] = canonical_name.strip()
+        normalized.append(record)
+    return normalized
 
 
 def _knowledge_texts(db: Session, knowledge_type: str, raw_item: RawItem) -> list[str]:

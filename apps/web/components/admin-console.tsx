@@ -1175,8 +1175,14 @@ function normalizeOCRLabel(value: string): string {
 function entityLabel(value: unknown): string {
   if (!value || typeof value !== "object") return textValue(value);
   const entity = value as Record<string, unknown>;
-  const name = textValue(entity.name);
-  const type = textValue(entity.type);
+  const fallback = Object.entries(entity).find(
+    ([key, fieldValue]) =>
+      !["name", "type", "canonical_name"].includes(key)
+      && typeof fieldValue === "string"
+      && fieldValue.trim().length > 0,
+  );
+  const name = textValue(entity.name ?? fallback?.[1]);
+  const type = textValue(entity.type ?? fallback?.[0]);
   return type === "—" ? name : `${name} · ${type}`;
 }
 

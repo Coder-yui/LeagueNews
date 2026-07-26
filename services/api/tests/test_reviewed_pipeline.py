@@ -396,7 +396,11 @@ def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> N
                         "source_term": "Ability Haste",
                         "preferred_translation": "技能急速",
                         "forbidden_translations": ["能力急速"],
-                    }
+                    },
+                    {
+                        "source_term": "Movement Speed",
+                        "preferred_translation": "移动速度",
+                    },
                 ],
             ),
         )
@@ -404,9 +408,12 @@ def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> N
         assert result.status == "rejected"
         assert result.outcome == "review_rejected"
         assert db.scalar(select(KnowledgeRule)) is None
-        term = db.scalar(select(GlossaryTerm))
-        assert term.preferred_translation == "技能急速"
-        assert term.is_active is True
+        terms = list(db.scalars(select(GlossaryTerm).order_by(GlossaryTerm.id)))
+        assert [term.preferred_translation for term in terms] == [
+            "技能急速",
+            "移动速度",
+        ]
+        assert all(term.is_active for term in terms)
 
 
 def test_ocr_rejection_does_not_grow_knowledge_or_glossary() -> None:

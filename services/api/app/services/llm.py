@@ -69,6 +69,17 @@ class RelevanceResult(BaseModel):
         return self
 
 
+class OrganizedKnowledgeRule(BaseModel):
+    knowledge_type: Literal["relevance", "analysis"]
+    scope: str = Field(min_length=1, max_length=160)
+    rule_text: str = Field(min_length=1, max_length=1000)
+    source_rule_ids: list[int] = Field(min_length=1)
+
+
+class KnowledgeOrganizationResult(BaseModel):
+    rules: list[OrganizedKnowledgeRule] = Field(min_length=1)
+
+
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
@@ -269,6 +280,52 @@ class LLMClient:
             max_tokens=800,
             schema=RelevanceResult,
             operation="相关性判断",
+        )
+
+    async def organize_knowledge(
+        self,
+        *,
+        rules: list[dict[str, object]],
+    ) -> KnowledgeOrganizationResult:
+        source_by_id = {int(rule["id"]): rule for rule in rules}
+
+        def validate_coverage(result: KnowledgeOrganizationResult) -> str | None:
+            output_ids = [
+                source_id
+                for rule in result.rules
+                for source_id in rule.source_rule_ids
+            ]
+            expected_ids = sorted(source_by_id)
+            if sorted(output_ids) != expected_ids:
+                return (
+                    "source_rule_ids 必须完整且仅使用一次："
+                    f"expected={expected_ids}, actual={sorted(output_ids)}"
+                )
+            for organized in result.rules:
+                sources = [source_by_id[source_id] for source_id in organized.source_rule_ids]
+                if any(
+                    source["knowledge_type"] != organized.knowledge_type
+                    or source["scope"] != organized.scope
+                    for source in sources
+                ):
+                    return "只能合并 knowledge_type 和 scope 完全相同的规则"
+            return None
+
+        prompt = (
+            "你是知识库编辑。整理所有输入规则：去除口语、背景叙述和重复表达，"
+            "合并语义重复或可组成同一判断原则的规则，但不得丢失有效约束、例外条件"
+            "或纠正结论。每条输出应是简洁、明确、可直接提供给模型执行的中文规则，"
+            "通常一到三句话。只能合并 knowledge_type 与 scope 完全相同的规则。"
+            "每个输入规则 ID 必须在 source_rule_ids 中出现且只出现一次。"
+            "只输出 JSON，不要输出 Markdown。"
+        )
+        return await self._validated_json_completion(
+            prompt=prompt,
+            payload={"rules": rules},
+            max_tokens=4000,
+            schema=KnowledgeOrganizationResult,
+            operation="知识整理",
+            business_validator=validate_coverage,
         )
 
     async def _validated_json_completion(

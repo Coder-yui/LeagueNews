@@ -12,6 +12,8 @@ from app.schemas.workflow import (
     KnowledgeRuleRead,
     KnowledgeRuleUpdate,
 )
+from app.services.llm import LLMAnalysisError, LLMConfigurationError
+from app.workflows.organize_knowledge import organize_active_knowledge_rules
 
 router = APIRouter()
 
@@ -44,6 +46,28 @@ def create_knowledge_rule(
     db.commit()
     db.refresh(rule)
     return rule
+
+
+@router.post("/rules/organize", response_model=list[KnowledgeRuleRead])
+async def organize_knowledge_rules(
+    db: Session = Depends(get_db),
+) -> object:
+    try:
+        return await organize_active_knowledge_rules(db)
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except LLMAnalysisError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.patch("/rules/{rule_id}", response_model=KnowledgeRuleRead)

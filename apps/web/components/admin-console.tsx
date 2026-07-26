@@ -8,9 +8,12 @@ import {
   FileClock,
   LoaderCircle,
   Play,
+  Plus,
   RefreshCw,
   RotateCcw,
   ScanText,
+  Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 
@@ -157,6 +160,12 @@ type OCRCorrectionDraft = {
   tableData: PatchTableData;
   dirty: boolean;
   invalid: boolean;
+};
+
+type GlossaryCorrectionDraft = {
+  id: number;
+  source_term: string;
+  preferred_translation: string;
 };
 
 type OCRProfile = {
@@ -481,8 +490,9 @@ function ReviewCard({
           ? "translation_term"
           : "analysis_correction";
   const [reason, setReason] = useState("");
-  const [sourceTerm, setSourceTerm] = useState("");
-  const [translation, setTranslation] = useState("");
+  const [glossaryUpdates, setGlossaryUpdates] = useState<GlossaryCorrectionDraft[]>([
+    { id: 1, source_term: "", preferred_translation: "" },
+  ]);
   const [feedbackType, setFeedbackType] = useState(defaultFeedbackType);
   const [ocrDrafts, setOcrDrafts] = useState<Record<number, OCRCorrectionDraft>>({});
   const updateOCRDraft = useCallback((draft: OCRCorrectionDraft) => {
@@ -493,6 +503,13 @@ function ReviewCard({
     "analysis_correction",
   ].includes(feedbackType);
   const learnsTerm = feedbackType === "translation_term";
+  const completeGlossaryUpdates = glossaryUpdates.filter(
+    (item) => item.source_term.trim() && item.preferred_translation.trim(),
+  );
+  const hasIncompleteGlossaryUpdate = glossaryUpdates.some(
+    (item) =>
+      Boolean(item.source_term.trim()) !== Boolean(item.preferred_translation.trim()),
+  );
   const rejectPayload = {
     feedback_type: feedbackType,
     reason,
@@ -500,8 +517,12 @@ function ReviewCard({
     knowledge_scope: "global",
     corrected_values: {},
     glossary_updates:
-      learnsTerm && sourceTerm && translation
-        ? [{ source_term: sourceTerm, preferred_translation: translation, forbidden_translations: [] }]
+      learnsTerm
+        ? completeGlossaryUpdates.map((item) => ({
+            source_term: item.source_term.trim(),
+            preferred_translation: item.preferred_translation.trim(),
+            forbidden_translations: [],
+          }))
         : [],
   };
   const rejectSuccess =
@@ -579,9 +600,70 @@ function ReviewCard({
             />
           </label>
           {learnsTerm && (
-            <div className="glossary-correction">
-              <label>错误原词<input value={sourceTerm} onChange={(event) => setSourceTerm(event.target.value)} /></label>
-              <label>标准译名<input value={translation} onChange={(event) => setTranslation(event.target.value)} /></label>
+            <div className="glossary-corrections">
+              {glossaryUpdates.map((item, index) => (
+                <div className="glossary-correction" key={item.id}>
+                  <label>
+                    错误原词
+                    <input
+                      value={item.source_term}
+                      onChange={(event) =>
+                        setGlossaryUpdates((current) =>
+                          current.map((entry) =>
+                            entry.id === item.id
+                              ? { ...entry, source_term: event.target.value }
+                              : entry,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    标准译名
+                    <input
+                      value={item.preferred_translation}
+                      onChange={(event) =>
+                        setGlossaryUpdates((current) =>
+                          current.map((entry) =>
+                            entry.id === item.id
+                              ? { ...entry, preferred_translation: event.target.value }
+                              : entry,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <button
+                    className="remove-glossary-row"
+                    type="button"
+                    disabled={glossaryUpdates.length === 1}
+                    aria-label={`删除第 ${index + 1} 项术语修正`}
+                    onClick={() =>
+                      setGlossaryUpdates((current) =>
+                        current.filter((entry) => entry.id !== item.id),
+                      )
+                    }
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+              <button
+                className="add-glossary-row"
+                type="button"
+                onClick={() =>
+                  setGlossaryUpdates((current) => [
+                    ...current,
+                    {
+                      id: Math.max(...current.map((item) => item.id)) + 1,
+                      source_term: "",
+                      preferred_translation: "",
+                    },
+                  ])
+                }
+              >
+                <Plus size={14} /> 添加术语修正
+              </button>
             </div>
           )}
         </div>
@@ -655,7 +737,9 @@ function ReviewCard({
             type="button"
             disabled={
               !reason ||
-              (learnsTerm && (!sourceTerm || !translation)) ||
+              (learnsTerm &&
+                (completeGlossaryUpdates.length === 0 ||
+                  hasIncompleteGlossaryUpdate)) ||
               busy === `reject-${review.id}`
             }
             onClick={() =>
@@ -1494,7 +1578,29 @@ function KnowledgePanel({
   return (
     <section className="knowledge-grid">
       <div>
-        <div className="panel-title"><h2>判断规则</h2><span>{rules.length} 条</span></div>
+        <div className="panel-title">
+          <h2>判断规则</h2>
+          <div className="panel-title-actions">
+            <span>{rules.filter((rule) => rule.is_active).length} 条生效</span>
+            <button
+              type="button"
+              disabled={
+                !rules.some((rule) => rule.is_active) ||
+                busy === "organize-knowledge"
+              }
+              onClick={() =>
+                void act(
+                  "organize-knowledge",
+                  () => api("/knowledge/rules/organize", { method: "POST" }),
+                  "AI 已完成知识去重、合并和精简；原规则已保留为停用历史",
+                )
+              }
+            >
+              <Sparkles size={13} />
+              {busy === "organize-knowledge" ? "正在整理…" : "AI 整理全部知识"}
+            </button>
+          </div>
+        </div>
         {rules.map((rule) => (
           <EditableRule rule={rule} busy={busy} act={act} key={rule.id} />
         ))}

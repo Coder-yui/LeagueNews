@@ -233,6 +233,56 @@ def test_schema_business_error_is_returned_to_model_and_retried() -> None:
     assert "未通过校验" in retry_messages[-1]["content"]
 
 
+def test_knowledge_organization_retries_when_source_ids_are_not_fully_covered() -> None:
+    incomplete = json.dumps(
+        {
+            "rules": [
+                {
+                    "knowledge_type": "analysis",
+                    "scope": "global",
+                    "rule_text": "精简规则",
+                    "source_rule_ids": [1],
+                }
+            ]
+        }
+    )
+    complete = json.dumps(
+        {
+            "rules": [
+                {
+                    "knowledge_type": "analysis",
+                    "scope": "global",
+                    "rule_text": "合并后的精简规则",
+                    "source_rule_ids": [1, 2],
+                }
+            ]
+        }
+    )
+    client, completions = _client_with_responses([incomplete, complete])
+
+    result = asyncio.run(
+        client.organize_knowledge(
+            rules=[
+                {
+                    "id": 1,
+                    "knowledge_type": "analysis",
+                    "scope": "global",
+                    "rule_text": "第一条",
+                },
+                {
+                    "id": 2,
+                    "knowledge_type": "analysis",
+                    "scope": "global",
+                    "rule_text": "第二条",
+                },
+            ]
+        )
+    )
+
+    assert result.rules[0].source_rule_ids == [1, 2]
+    assert len(completions.calls) == 2
+
+
 def test_two_invalid_schema_responses_raise_unified_error() -> None:
     client, completions = _client_with_responses(["{}", '{"product_scope":"lol_pc"}'])
 

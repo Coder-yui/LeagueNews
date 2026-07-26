@@ -197,7 +197,12 @@ footer { display: flex; justify-content: space-between; padding: 26px 0 40px; bo
 .review-form label, .report-generator label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 800; }
 .review-form textarea, .knowledge-card textarea { width: 100%; min-height: 82px; padding: 10px; border: 1px solid var(--line); background: white; color: var(--ink); font: inherit; line-height: 1.5; resize: vertical; }
 .review-form input, .review-form select, .knowledge-card input, .report-generator input, .report-generator select { width: 100%; padding: 9px; border: 1px solid var(--line); background: white; color: var(--ink); font: inherit; }
-.glossary-correction { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.glossary-corrections { display: grid; gap: 8px; margin-top: 12px; }
+.glossary-correction { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; }
+.glossary-correction button, .add-glossary-row, .panel-title-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 11px; border: 1px solid var(--line); background: white; color: var(--ink); font: inherit; font-size: 11px; font-weight: 800; cursor: pointer; }
+.glossary-correction button:disabled, .panel-title-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.glossary-correction .remove-glossary-row { color: #943f35; }
+.add-glossary-row { justify-self: start; }
 .review-note { margin: 10px 0 0; padding: 9px 11px; background: #fff2d8; color: #72551a; font-size: 12px; line-height: 1.5; }
 .review-feedback-context { display: grid; gap: 3px; margin-bottom: 12px; padding: 10px 12px; border-left: 3px solid var(--blue); background: #eef0f8; }
 .review-feedback-context strong { font-size: 12px; }
@@ -255,6 +260,8 @@ footer { display: flex; justify-content: space-between; padding: 26px 0 40px; bo
 .panel-title { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
 .panel-title h2 { margin: 0; }
 .panel-title span { color: var(--muted); font-size: 11px; }
+.panel-title-actions { display: flex; align-items: center; gap: 9px; }
+.panel-title-actions button { padding: 7px 9px; background: var(--acid); }
 .knowledge-card { margin-bottom: 10px; padding: 14px; border: 1px solid var(--line); background: var(--panel); }
 .knowledge-card.inactive { opacity: .55; }
 .knowledge-card > span { display: block; margin-bottom: 8px; color: var(--blue); font: 10px monospace; }

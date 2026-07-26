@@ -7,12 +7,9 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 import app.workflows.reviewed_pipeline as reviewed_pipeline
-from app.content_blocks import text_from_content_blocks
 from app.core.database import Base
-from app.models.event_revision import EventRevision
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
-from app.models.news_event import NewsEvent
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
@@ -24,6 +21,7 @@ from app.workflows.reviewed_pipeline import (
     approve_review,
     correct_ocr_review,
     reject_review,
+    retry_processing_run,
 )
 from app.workflows.understand_media import (
     build_patch_preview,
@@ -354,7 +352,8 @@ def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> N
             ),
         )
 
-        assert result.status == "revision_requested"
+        assert result.status == "rejected"
+        assert result.outcome == "review_rejected"
         assert db.scalar(select(KnowledgeRule)) is None
         term = db.scalar(select(GlossaryTerm))
         assert term.preferred_translation == "技能急速"
@@ -368,13 +367,13 @@ def test_ocr_rejection_does_not_grow_knowledge_or_glossary() -> None:
             raw_item_id=raw.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="item_analysis",
+            current_stage="image_ocr",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="item_analysis",
+            stage="image_ocr",
             status="pending",
             proposal={"translated_title": "OCR 后的译文"},
         )
@@ -397,7 +396,7 @@ def test_ocr_rejection_does_not_grow_knowledge_or_glossary() -> None:
             ),
         )
 
-        assert result.status == "revision_requested"
+        assert result.status == "rejected"
         assert review.feedback["feedback_type"] == "ocr_error"
         assert db.scalar(select(KnowledgeRule)) is None
         assert db.scalar(select(GlossaryTerm)) is None
@@ -552,68 +551,140 @@ def test_analysis_rejection_creates_editable_knowledge_rule() -> None:
         assert rule.knowledge_type == "analysis"
 
 
-def test_approved_event_proposal_creates_event_and_revision() -> None:
+def test_relevance_rejection_ends_run_and_creates_knowledge() -> None:
     with _session() as db:
         raw = _raw_item(db)
-        item = NormalizedItem(
-            raw_item_id=raw.id,
-            normalized_title="26.15版本预览",
-            normalized_text=text_from_content_blocks(raw.content_blocks),
-            summary="设计师发布版本预览。",
-            category="版本更新",
-            entities=[{"name": "26.15", "type": "patch"}],
-            importance_score=0.8,
-            credibility="official",
-            language="en",
-            source_language="en",
-            target_language="zh-CN",
-            translated_title="26.15版本预览",
-            translated_text="测试",
-            translated_content_blocks=[],
-            translation_status="translated",
-            translation_model="test",
-            analysis_model="test",
-            analysis_version="test",
-            event_status="event_review",
-        )
-        db.add(item)
-        db.flush()
         run = ProcessingRun(
             raw_item_id=raw.id,
-            workflow_type="event",
+            workflow_type="item",
             status="awaiting_review",
-            current_stage="event",
-            context={"normalized_item_id": item.id},
+            current_stage="relevance",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="event",
+            stage="relevance",
+            status="pending",
+            proposal={"is_lol_relevant": False},
+        )
+        db.add(review)
+        db.commit()
+
+        result = reject_review(
+            db,
+            review,
+            payload=ReviewRejection(
+                feedback_type="relevance_correction",
+                reason="该内容讨论英雄联盟端游版本改动，应判定为相关",
+            ),
+        )
+
+        assert result.status == "rejected"
+        assert result.outcome == "review_rejected"
+        rule = db.scalar(select(KnowledgeRule))
+        assert rule.knowledge_type == "relevance"
+
+
+def test_restart_creates_new_run_linked_to_rejected_run(monkeypatch) -> None:
+    async def fake_relevance_review(db, run):
+        run.status = "awaiting_review"
+        db.commit()
+
+    monkeypatch.setattr(
+        reviewed_pipeline,
+        "_generate_relevance_review",
+        fake_relevance_review,
+    )
+    with _session() as db:
+        raw = _raw_item(db)
+        old_run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="rejected",
+            outcome="review_rejected",
+            current_stage="item_analysis",
+        )
+        db.add(old_run)
+        db.commit()
+
+        new_run = asyncio.run(retry_processing_run(db, old_run))
+
+        assert new_run.id != old_run.id
+        assert new_run.supersedes_run_id == old_run.id
+        assert new_run.current_stage == "relevance"
+        assert new_run.status == "awaiting_review"
+        assert old_run.status == "rejected"
+
+
+def test_approved_item_persists_translated_patch_data_as_relational_link() -> None:
+    with _session() as db:
+        raw = _raw_item(db)
+        asset = MediaAsset(
+            raw_item_id=raw.id,
+            block_index=1,
+            mime_type="image/png",
+            storage_path="test.png",
+        )
+        db.add(asset)
+        db.flush()
+        extraction = MediaExtraction(
+            media_asset_id=asset.id,
+            task_type="patch_preview",
+            provider="patch-table+rapidocr",
+            ocr_engine="test",
+            structuring_model="patch-preview-deterministic-v1",
+            schema_version="v2",
+            status="processed",
+            raw_ocr_text="Aatrox Health 100 -> 120",
+            ocr_lines=[],
+            structured_data={"sections": [{"entries": [{"target": "Aatrox"}]}]},
+            processing_config={},
+            confidence=0.95,
+        )
+        db.add(extraction)
+        db.flush()
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="awaiting_review",
+            current_stage="item_analysis",
+        )
+        db.add(run)
+        db.flush()
+        review = ReviewTask(
+            processing_run_id=run.id,
+            stage="item_analysis",
             status="pending",
             proposal={
-                "is_event": True,
-                "profile": {
-                    "is_event": True,
-                    "event_type": "patch_preview",
-                    "occurred_at": None,
-                },
-                "candidate_events": [],
-                "resolution": {
-                    "action": "create",
-                    "event_id": None,
-                    "title": "26.15版本预览",
-                    "summary": "设计师发布版本预览。",
-                    "category": "版本更新",
-                    "event_type": "patch_preview",
-                    "entities": [{"name": "26.15", "type": "patch"}],
-                    "importance_score": 0.8,
-                    "credibility": "official",
-                    "relation_type": "official_preview",
-                    "adds_new_information": True,
-                    "conflicts": [],
-                    "reason": "新事件",
-                },
+                "normalized_title": "26.15版本预览",
+                "normalized_text": "Patch preview",
+                "summary": "设计师发布版本预览。",
+                "category": "版本更新",
+                "entities": [{"name": "26.15", "type": "patch"}],
+                "importance_score": 0.8,
+                "credibility": "official",
+                "credibility_score": 0.98,
+                "credibility_evidence": ["设计师官方账号"],
+                "language": "en",
+                "source_language": "en",
+                "target_language": "zh-CN",
+                "translated_title": "26.15版本预览",
+                "translated_text": "版本预览",
+                "translated_content_blocks": [],
+                "translation_status": "translated",
+                "translation_model": "test",
+                "analysis_model": "test",
+                "analysis_version": "v4-reviewed-item",
+                "approved_media_extraction_ids": [extraction.id],
+                "translated_media_extractions": [
+                    {
+                        "extraction_id": extraction.id,
+                        "translated_data": {
+                            "sections": [{"entries": [{"target": "暗裔剑魔"}]}]
+                        },
+                    }
+                ],
             },
         )
         db.add(review)
@@ -621,10 +692,12 @@ def test_approved_event_proposal_creates_event_and_revision() -> None:
 
         result = asyncio.run(approve_review(db, review, note="确认"))
 
-        event = db.scalar(select(NewsEvent))
-        revision = db.scalar(select(EventRevision))
+        item = db.scalar(select(NormalizedItem))
         assert result.status == "completed"
-        assert event.primary_item_id == item.id
-        assert revision.version == 1
-        assert item.event_status == "linked"
+        assert result.outcome == "approved"
+        assert item.approved_media_extraction_ids == [extraction.id]
+        assert item.translated_media_extractions[0]["translated_data"]["sections"][0][
+            "entries"
+        ][0]["target"] == "暗裔剑魔"
+        db.expire(raw, ["normalized_item"])
         assert raw.processing_status == "analyzed"

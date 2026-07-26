@@ -9,8 +9,10 @@ class ProcessingRunRead(BaseModel):
 
     id: int
     raw_item_id: int
+    supersedes_run_id: int | None
     workflow_type: str
     status: str
+    outcome: str | None
     current_stage: str
     context: dict[str, Any]
     error_message: str | None
@@ -93,9 +95,7 @@ class ReviewRejection(BaseModel):
         "ocr_error",
         "translation_term",
         "analysis_correction",
-        "event_correction",
-        "other",
-    ] = "other"
+    ]
     reason: str = Field(min_length=1)
     corrected_values: dict[str, Any] = Field(default_factory=dict)
     knowledge_rule: str | None = None
@@ -104,7 +104,7 @@ class ReviewRejection(BaseModel):
 
 
 class KnowledgeRuleCreate(BaseModel):
-    knowledge_type: Literal["relevance", "analysis", "event_aggregation"]
+    knowledge_type: Literal["relevance", "analysis"]
     scope: str = "global"
     rule_text: str = Field(min_length=1)
     correction_data: dict[str, Any] = Field(default_factory=dict)

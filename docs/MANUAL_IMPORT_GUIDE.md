@@ -287,8 +287,6 @@ uv run python scripts/extract_patch_media.py <media_asset_id>
 - 前端默认显示中文，可切换“中文 / 原文”。
 - 中文信源标记为 `not_required`，不会产生额外翻译调用。
 
-历史英文数据或失败后保持 `pending` 的翻译可以执行：
-
-```text
-POST /api/v1/normalized-items/{item_id}/translate
-```
+翻译属于受审核的单条处理流程，不能对已批准结果调用独立重翻译接口。翻译失败时，
+本次 `ProcessingRun` 标记为 `failed`；人工驳回译文时会沉淀术语并终止本次运行，
+之后从管理台创建关联旧运行的新处理运行。

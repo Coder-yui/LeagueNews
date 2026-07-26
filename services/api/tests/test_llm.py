@@ -11,8 +11,9 @@ from app.services.llm import (
     LLMClient,
     LLMConfigurationError,
     PatchPreviewExtraction,
+    TranslationResult,
 )
-from app.workflows.translate_item import detect_language
+from app.workflows.translate_item import build_translation, detect_language
 
 
 def test_missing_api_key_raises_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -37,14 +38,75 @@ def test_analysis_result_accepts_complete_result() -> None:
             "entities": [{"name": "26.14", "type": "patch"}],
             "importance_score": 0.8,
             "credibility": "official",
+            "credibility_score": 0.98,
+            "credibility_evidence": ["来自官方账号"],
         }
     )
     assert result.importance_score == 0.8
+    assert result.credibility_score == 0.98
 
 
 def test_language_detection() -> None:
     assert detect_language("Patch preview and balance changes") == "en"
     assert detect_language("版本更新与英雄平衡调整") == "zh-CN"
+
+
+def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_translate(_self, **payload):
+        captured.update(payload)
+        return TranslationResult.model_validate(
+            {
+                "translated_title": "版本预览",
+                "translated_blocks": [{"index": 0, "text": "正文"}],
+                "translated_summary": "版本调整摘要",
+                "translated_entities": [{"name": "暗裔剑魔", "type": "champion"}],
+                "translated_media_extractions": [
+                    {
+                        "extraction_id": 9,
+                        "translated_data": {
+                            "sections": [{"entries": [{"target": "暗裔剑魔"}]}]
+                        },
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(LLMClient, "translate", fake_translate)
+    raw_item = SimpleNamespace(
+        language="zh-CN",
+        display_title="版本预览",
+        content_blocks=[{"type": "paragraph", "text": "正文"}],
+    )
+    extraction = SimpleNamespace(
+        id=9,
+        structured_data={
+            "sections": [
+                {
+                    "entries": [
+                        {"target": "Aatrox", "changes": ["Health 100 -> 120"]}
+                    ]
+                }
+            ]
+        },
+    )
+
+    result = asyncio.run(
+        build_translation(
+            raw_item,
+            canonical_title="版本预览",
+            summary="版本调整摘要",
+            entities=[{"name": "Aatrox", "type": "champion"}],
+            media_extractions=[extraction],
+        )
+    )
+
+    assert result.translation_status == "translated"
+    assert captured["media_extractions"][0]["extraction_id"] == 9
+    assert result.translated_media_extractions[0]["translated_data"]["sections"][0][
+        "entries"
+    ][0]["target"] == "暗裔剑魔"
 
 
 def test_patch_preview_accepts_adjustment_sections() -> None:

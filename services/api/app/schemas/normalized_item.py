@@ -16,6 +16,8 @@ class NormalizedItemRead(BaseModel):
     entities: list[dict[str, Any]]
     importance_score: float
     credibility: str
+    credibility_score: float
+    credibility_evidence: list[str]
     language: str | None
     source_language: str | None
     target_language: str
@@ -23,10 +25,10 @@ class NormalizedItemRead(BaseModel):
     translated_text: str | None
     translated_content_blocks: list[dict[str, Any]]
     approved_media_extraction_ids: list[int]
+    translated_media_extractions: list[dict[str, Any]]
     translation_status: str
     translation_model: str | None
     analysis_model: str
     analysis_version: str
-    event_status: str
     created_at: datetime
     updated_at: datetime

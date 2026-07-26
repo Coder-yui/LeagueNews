@@ -1,6 +1,8 @@
 # LoL Daily Intel
 
-英雄联盟垂直领域多信源 AI 情报聚合网站。MVP 聚焦稳定闭环：手动导入 → 原始内容 pending → 人工触发 AI 处理 → 新闻事件 → 每日日报。
+英雄联盟垂直领域多信源 AI 情报项目。当前稳定边界是：平台采集 → 统一
+RawItem → LoL 相关性审核 → 可选版本图片 OCR → 单条分析与翻译审核。
+事件聚合和报告不属于当前启用流程。
 
 日常启动、检查和退出请参考 [`docs/LOCAL_RUNBOOK.md`](docs/LOCAL_RUNBOOK.md)。
 手动添加图文资讯请参考 [`docs/MANUAL_IMPORT_GUIDE.md`](docs/MANUAL_IMPORT_GUIDE.md)。
@@ -31,9 +33,10 @@ connector
   -> validated RawItemCandidate
   -> shared ingestion
   -> raw_items + source payloads + media_assets (pending)
+  -> relevance review
+  -> optional reviewed patch OCR
+  -> reviewed analysis + translation
   -> normalized_items
-  -> event_items -> news_events
-  -> FastAPI -> Next.js
 ```
 
 - `apps/web` — Next.js 展示层
@@ -48,13 +51,15 @@ connector
 
 - `raw_items`：所有 connector 共用的不可变结构化原文；`content_blocks` 是完整内容的唯一事实来源。平台调试载荷单独保存在 `raw_item_source_payloads`，处理状态保存在工作流表。
 - `media_assets`：原始图片及其在内容块中的位置；OCR 和视觉分析结果不属于采集基座。
-- `normalized_items`：单条原始资讯的清洗、逐内容块翻译、摘要、分类、实体、重要性、可信度和分析版本。
-- `news_events`：聚合后的新闻事件。
-- `event_items`：事件与 normalized item 的多对多关系，为后续多信源合并预留结构。
+- `normalized_items`：最终人工批准的单条处理结果，包括中文标题、摘要、分类、
+  实体、重要性、可信度等级与分数、正文翻译和分析版本。
+- `media_extractions`：版本预览图片的 OCR、表格化结果和人工修订历史。
+- `normalized_item_media_extractions`：最终条目采用的图片提取及其结构化中文译文。
+- `processing_runs`、`review_tasks`：处理运行和人工审核记录；拒绝的运行不会生成
+  `normalized_items`，重新处理会创建关联旧运行的新运行。
 
-当前 workflow 采用人工审核管线：Raw 先完成相关性和单条分析审核，再手动触发事件处理。
-应用按时间窗、实体和文本相似度检索候选事件，AI 只能更新候选列表中的事件，否则创建
-新事件；批准后通过 `event_items` 聚合多信源，并写入 `event_revisions`。
+完整流程和状态约束见
+[`docs/REVIEWED_AI_WORKFLOW.md`](docs/REVIEWED_AI_WORKFLOW.md)。
 
 ## Local development
 

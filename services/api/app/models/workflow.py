@@ -14,8 +14,12 @@ class ProcessingRun(Base):
     raw_item_id: Mapped[int] = mapped_column(
         ForeignKey("raw_items.id", ondelete="CASCADE"), index=True
     )
+    supersedes_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     workflow_type: Mapped[str] = mapped_column(String(40), index=True)
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
+    outcome: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     current_stage: Mapped[str] = mapped_column(String(40), index=True)
     context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

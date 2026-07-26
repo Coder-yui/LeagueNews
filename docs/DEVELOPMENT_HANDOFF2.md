@@ -1,4 +1,8 @@
-# LoL Daily Intel 开发交接文档（当前版）
+# LoL Daily Intel 历史开发交接记录
+
+> 本文记录 2026-07-25 时的旧实现，不再代表当前处理架构。当前有效设计以
+> `README.md`、`docs/CONNECTOR_ARCHITECTURE.md` 和
+> `docs/REVIEWED_AI_WORKFLOW.md` 为准。事件聚合与报告代码已经移出当前系统。
 
 更新时间：2026-07-25  
 项目目录：`E:\leagueNews`

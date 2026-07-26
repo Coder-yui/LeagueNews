@@ -27,14 +27,6 @@ type RawItem = {
   published_at: string | null;
 };
 
-type NormalizedItem = {
-  id: number;
-  raw_item_id: number;
-  normalized_title: string;
-  summary: string;
-  event_status: string;
-};
-
 type ProcessingRun = {
   id: number;
   raw_item_id: number;
@@ -69,16 +61,6 @@ type GlossaryTerm = {
   scope: string;
   version: number;
   is_active: boolean;
-};
-
-type GeneratedReport = {
-  id: number;
-  report_type: string;
-  period_start: string;
-  period_end: string;
-  status: string;
-  title: string;
-  content: string;
 };
 
 type OCRParameters = {
@@ -186,7 +168,7 @@ type OCRProfile = {
   is_active: boolean;
 };
 
-type Tab = "items" | "reviews" | "ocr" | "knowledge" | "reports";
+type Tab = "items" | "reviews" | "ocr" | "knowledge";
 type ItemReviewSection = "analysis" | "translation";
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -195,7 +177,6 @@ const stageLabels: Record<string, string> = {
   relevance: "相关性审核",
   image_ocr: "图片 OCR 审核",
   item_analysis: "翻译与单条分析审核",
-  event: "事件审核",
 };
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -213,12 +194,10 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 export function AdminConsole() {
   const [tab, setTab] = useState<Tab>("items");
   const [rawItems, setRawItems] = useState<RawItem[]>([]);
-  const [normalizedItems, setNormalizedItems] = useState<NormalizedItem[]>([]);
   const [runs, setRuns] = useState<ProcessingRun[]>([]);
   const [reviews, setReviews] = useState<ReviewTask[]>([]);
   const [rules, setRules] = useState<KnowledgeRule[]>([]);
   const [terms, setTerms] = useState<GlossaryTerm[]>([]);
-  const [reports, setReports] = useState<GeneratedReport[]>([]);
   const [ocrAssets, setOcrAssets] = useState<OCRAsset[]>([]);
   const [ocrRuns, setOcrRuns] = useState<OCRTestRun[]>([]);
   const [ocrProfiles, setOcrProfiles] = useState<OCRProfile[]>([]);
@@ -230,12 +209,10 @@ export function AdminConsole() {
     try {
       const [
         raw,
-        normalized,
         runRows,
         reviewRows,
         ruleRows,
         termRows,
-        reportRows,
         ocrAssetRows,
         ocrRunRows,
         ocrProfileRows,
@@ -243,24 +220,20 @@ export function AdminConsole() {
       ] =
         await Promise.all([
           api<RawItem[]>("/raw-items"),
-          api<NormalizedItem[]>("/normalized-items"),
           api<ProcessingRun[]>("/workflows/runs"),
           api<ReviewTask[]>("/workflows/reviews?status=pending"),
           api<KnowledgeRule[]>("/knowledge/rules"),
           api<GlossaryTerm[]>("/knowledge/glossary"),
-          api<GeneratedReport[]>("/reports"),
           api<OCRAsset[]>("/ocr-lab/assets"),
           api<OCRTestRun[]>("/ocr-lab/runs"),
           api<OCRProfile[]>("/ocr-lab/profiles"),
           api<MediaExtraction[]>("/media-assets/extractions"),
         ]);
       setRawItems(raw);
-      setNormalizedItems(normalized);
       setRuns(runRows);
       setReviews(reviewRows);
       setRules(ruleRows);
       setTerms(termRows);
-      setReports(reportRows);
       setOcrAssets(ocrAssetRows);
       setOcrRuns(ocrRunRows);
       setOcrProfiles(ocrProfileRows);
@@ -293,7 +266,7 @@ export function AdminConsole() {
     () => ({
       pending: rawItems.filter((item) => item.processing_status === "pending").length,
       reviews: reviews.length,
-      retry: runs.filter((run) => ["failed", "revision_requested"].includes(run.status)).length,
+      retry: runs.filter((run) => ["failed", "rejected"].includes(run.status)).length,
       knowledge: rules.filter((rule) => rule.is_active).length + terms.filter((term) => term.is_active).length,
     }),
     [rawItems, reviews, runs, rules, terms],
@@ -314,7 +287,6 @@ export function AdminConsole() {
           ["reviews", "审核中心", Check],
           ["ocr", "OCR 测试台", ScanText],
           ["knowledge", "知识与术语", BookOpenCheck],
-          ["reports", "报告", Languages],
         ] as const).map(([value, label, Icon]) => (
           <button
             className={tab === value ? "active" : ""}
@@ -335,7 +307,6 @@ export function AdminConsole() {
       {tab === "items" && (
         <ItemsPanel
           rawItems={rawItems}
-          normalizedItems={normalizedItems}
           runs={runs}
           busy={busy}
           act={act}
@@ -362,28 +333,22 @@ export function AdminConsole() {
       {tab === "knowledge" && (
         <KnowledgePanel rules={rules} terms={terms} busy={busy} act={act} />
       )}
-      {tab === "reports" && (
-        <ReportsPanel reports={reports} busy={busy} act={act} />
-      )}
     </>
   );
 }
 
 function ItemsPanel({
   rawItems,
-  normalizedItems,
   runs,
   busy,
   act,
 }: {
   rawItems: RawItem[];
-  normalizedItems: NormalizedItem[];
   runs: ProcessingRun[];
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
-  const normalizedByRaw = new Map(normalizedItems.map((item) => [item.raw_item_id, item]));
-  const retryRuns = runs.filter((run) => ["failed", "revision_requested"].includes(run.status));
+  const retryRuns = runs.filter((run) => ["failed", "rejected"].includes(run.status));
   return (
     <section className="admin-panel">
       {retryRuns.length > 0 && (
@@ -409,10 +374,7 @@ function ItemsPanel({
       )}
       <div className="admin-list">
         {rawItems.map((item) => {
-          const normalized = normalizedByRaw.get(item.id);
-          const canStart = item.processing_status === "pending"
-            || item.processing_status === "failed";
-          const canEvent = normalized?.event_status === "pending";
+          const canStart = item.processing_status === "pending";
           return (
             <article className="admin-item" key={item.id}>
               <div className="admin-item-meta">
@@ -438,21 +400,6 @@ function ItemsPanel({
                   >
                     {busy === `raw-${item.id}` ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}
                     开始 AI 处理
-                  </button>
-                )}
-                {canEvent && normalized && (
-                  <button
-                    type="button"
-                    disabled={busy === `event-${normalized.id}`}
-                    onClick={() =>
-                      void act(
-                        `event-${normalized.id}`,
-                        () => api(`/normalized-items/${normalized.id}/process-event`, { method: "POST" }),
-                        `信息 #${normalized.id} 已进入事件审核`,
-                      )
-                    }
-                  >
-                    <Play size={14} /> 进入事件处理
                   </button>
                 )}
               </div>
@@ -518,20 +465,22 @@ function ReviewCard({
   const structuredMediaResults = Array.isArray(review.proposal.media_extractions)
     ? review.proposal.media_extractions
     : [];
+  const translatedMediaResults = Array.isArray(
+    review.proposal.translated_media_extractions,
+  )
+    ? review.proposal.translated_media_extractions
+    : [];
   const defaultFeedbackType =
     review.stage === "relevance"
       ? "relevance_correction"
-      : review.stage === "event"
-        ? "event_correction"
-        : review.stage === "image_ocr"
-          ? "ocr_error"
-          : "analysis_correction";
+      : review.stage === "image_ocr"
+        ? "ocr_error"
+        : "analysis_correction";
   const [itemReviewSection, setItemReviewSection] = useState<ItemReviewSection>("analysis");
   const [reason, setReason] = useState("");
   const [sourceTerm, setSourceTerm] = useState("");
   const [translation, setTranslation] = useState("");
   const [feedbackType, setFeedbackType] = useState(defaultFeedbackType);
-  const [approvedItemSections, setApprovedItemSections] = useState<ItemReviewSection[]>([]);
   const [ocrDrafts, setOcrDrafts] = useState<Record<number, OCRCorrectionDraft>>({});
   const updateOCRDraft = useCallback((draft: OCRCorrectionDraft) => {
     setOcrDrafts((current) => ({ ...current, [draft.extractionId]: draft }));
@@ -546,7 +495,6 @@ function ReviewCard({
   const learnsRule = [
     "relevance_correction",
     "analysis_correction",
-    "event_correction",
   ].includes(feedbackType);
   const learnsTerm = feedbackType === "translation_term";
   const rejectPayload = {
@@ -572,19 +520,7 @@ function ReviewCard({
   const ocrActionKey = changedOCRDraft
     ? `correct-ocr-${review.id}-${changedOCRDraft.extractionId}`
     : `correct-ocr-${review.id}`;
-  const requiredItemSections: ItemReviewSection[] = ["analysis", "translation"];
-  const currentSectionIndex = requiredItemSections.indexOf(itemReviewSection);
-  const priorSectionsApproved = requiredItemSections
-    .slice(0, Math.max(currentSectionIndex, 0))
-    .every((section) => approvedItemSections.includes(section));
-  const currentSectionApproved = approvedItemSections.includes(itemReviewSection);
-  const approveItemSection = () => {
-    if (!priorSectionsApproved || currentSectionApproved) return;
-    if (itemReviewSection === "analysis") {
-      setApprovedItemSections((current) => [...current, "analysis"]);
-      selectItemReviewSection("translation");
-      return;
-    }
+  const approveItemReview = () => {
     void act(
       `approve-${review.id}`,
       () => api(`/workflows/reviews/${review.id}/approve`, {
@@ -594,13 +530,7 @@ function ReviewCard({
       "审核已批准，正式数据或下一审核阶段已生成",
     );
   };
-  const sectionApprovalLabel =
-    itemReviewSection === "analysis"
-      ? "批准分析与摘要"
-      : "批准翻译与术语";
   const sectionApprovalDisabled =
-    !priorSectionsApproved ||
-    currentSectionApproved ||
     changedOCRDrafts.length > 0 ||
     busy === `approve-${review.id}`;
   return (
@@ -616,10 +546,7 @@ function ReviewCard({
         <>
           <div className="review-section-tabs two-sections" role="tablist" aria-label="审核项目">
             <button
-              className={[
-                itemReviewSection === "analysis" ? "active" : "",
-                approvedItemSections.includes("analysis") ? "approved" : "",
-              ].filter(Boolean).join(" ")}
+              className={itemReviewSection === "analysis" ? "active" : ""}
               type="button"
               role="tab"
               aria-selected={itemReviewSection === "analysis"}
@@ -627,7 +554,6 @@ function ReviewCard({
             >
               <BookOpenCheck size={15} />
               <span><b>01</b> 分析与摘要</span>
-              {approvedItemSections.includes("analysis") && <Check size={14} aria-label="已批准" />}
             </button>
             <button
               className={itemReviewSection === "translation" ? "active" : ""}
@@ -649,8 +575,14 @@ function ReviewCard({
           )}
           {structuredMediaResults.length > 0 && (
             <details className="review-json-details media-structure-details">
-              <summary>查看图片程序结构化结果</summary>
+              <summary>查看图片原始结构化结果</summary>
               <pre>{JSON.stringify(structuredMediaResults, null, 2)}</pre>
+            </details>
+          )}
+          {translatedMediaResults.length > 0 && (
+            <details className="review-json-details media-structure-details">
+              <summary>查看图片结构化中文译文</summary>
+              <pre>{JSON.stringify(translatedMediaResults, null, 2)}</pre>
             </details>
           )}
         </>
@@ -692,9 +624,6 @@ function ReviewCard({
             {review.stage === "relevance" && (
               <option value="relevance_correction">相关性判断错误（沉淀规则）</option>
             )}
-            {review.stage === "event" && (
-              <option value="event_correction">事件判断或聚合错误（沉淀规则）</option>
-            )}
             </select>
           </label>
           )}
@@ -733,7 +662,7 @@ function ReviewCard({
           }
           onClick={() => {
             if (review.stage === "item_analysis") {
-              approveItemSection();
+              approveItemReview();
               return;
             }
             void act(
@@ -748,7 +677,7 @@ function ReviewCard({
         >
           <Check size={14} />{" "}
           {review.stage === "item_analysis"
-            ? sectionApprovalLabel
+            ? "批准完整处理结果"
             : review.stage === "image_ocr"
               ? "批准 OCR"
               : "批准"}
@@ -785,7 +714,11 @@ function ReviewCard({
           <button
             className="reject"
             type="button"
-            disabled={!reason || busy === `reject-${review.id}`}
+            disabled={
+              !reason ||
+              (learnsTerm && (!sourceTerm || !translation)) ||
+              busy === `reject-${review.id}`
+            }
             onClick={() =>
               void act(
                 `reject-${review.id}`,
@@ -824,7 +757,17 @@ function AnalysisReview({ proposal }: { proposal: JsonObject }) {
       </div>
       <div className="review-field">
         <span>可信度</span>
-        <strong>{textValue(proposal.credibility)}</strong>
+        <strong>
+          {textValue(proposal.credibility)} · {scoreValue(proposal.credibility_score)}
+        </strong>
+      </div>
+      <div className="review-field review-field-wide">
+        <span>可信度依据</span>
+        <p>
+          {Array.isArray(proposal.credibility_evidence)
+            ? proposal.credibility_evidence.map(textValue).join("；")
+            : "—"}
+        </p>
       </div>
       <div className="review-field review-field-wide">
         <span>实体</span>
@@ -1652,68 +1595,5 @@ function EditableTerm({
         )}>{term.is_active ? "停用" : "启用"}</button>
       </div>
     </article>
-  );
-}
-
-function ReportsPanel({
-  reports,
-  busy,
-  act,
-}: {
-  reports: GeneratedReport[];
-  busy: string | null;
-  act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
-}) {
-  const today = new Date().toISOString().slice(0, 10);
-  const [type, setType] = useState("daily");
-  const [start, setStart] = useState(today);
-  const [end, setEnd] = useState(today);
-  return (
-    <section className="admin-panel">
-      <div className="report-generator">
-        <label>类型<select value={type} onChange={(event) => setType(event.target.value)}><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option></select></label>
-        <label>开始日期<input type="date" value={start} onChange={(event) => setStart(event.target.value)} /></label>
-        <label>结束日期<input type="date" value={end} onChange={(event) => setEnd(event.target.value)} /></label>
-        <button type="button" disabled={busy === "report-generate"} onClick={() => void act(
-          "report-generate",
-          () => api("/reports/generate", {
-            method: "POST",
-            body: JSON.stringify({
-              report_type: type,
-              period_start: `${start}T00:00:00+08:00`,
-              period_end: `${end}T23:59:59+08:00`,
-              timezone: "Asia/Shanghai",
-            }),
-          }),
-          "报告草稿已生成，等待人工确认",
-        )}><Play size={14} /> 生成报告草稿</button>
-      </div>
-      <div className="admin-list">
-        {reports.map((report) => (
-          <article className="report-card" key={report.id}>
-            <span>{report.report_type} · {report.status}</span>
-            <h3>{report.title}</h3>
-            <div>{report.content}</div>
-            {report.status === "pending_review" && (
-              <div className="admin-actions">
-                <button className="approve" type="button" onClick={() => void act(
-                  `report-approve-${report.id}`,
-                  () => api(`/reports/${report.id}/approve`, { method: "POST", body: JSON.stringify({ note: null }) }),
-                  "报告已批准",
-                )}><Check size={14} /> 批准报告</button>
-                <button className="reject" type="button" onClick={() => {
-                  const reason = window.prompt("请输入退回理由");
-                  if (reason) void act(
-                    `report-reject-${report.id}`,
-                    () => api(`/reports/${report.id}/reject`, { method: "POST", body: JSON.stringify({ reason }) }),
-                    "报告已退回",
-                  );
-                }}><X size={14} /> 退回</button>
-              </div>
-            )}
-          </article>
-        ))}
-      </div>
-    </section>
   );
 }

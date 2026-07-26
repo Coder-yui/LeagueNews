@@ -23,6 +23,8 @@ class AnalysisResult(BaseModel):
     entities: list[dict[str, str]]
     importance_score: float = Field(ge=0, le=1)
     credibility: Literal["official", "corroborated", "unverified", "rumor"]
+    credibility_score: float = Field(ge=0, le=1)
+    credibility_evidence: list[str] = Field(default_factory=list)
 
 
 class RelevanceResult(BaseModel):
@@ -61,67 +63,6 @@ class RelevanceResult(BaseModel):
         return self
 
 
-class EventProfile(BaseModel):
-    is_event: bool
-    event_type: Literal[
-        "roster_change",
-        "esports_match",
-        "tournament",
-        "patch_preview",
-        "game_update",
-        "skin_leak",
-        "skin_release",
-        "hotfix",
-        "incident",
-        "announcement",
-        "other",
-    ]
-    title: str = Field(min_length=1, max_length=500)
-    summary: str = Field(min_length=1)
-    key_facts: list[str]
-    occurred_at: str | None = None
-    reason: str = Field(min_length=1)
-
-
-class EventResolution(BaseModel):
-    action: Literal["create", "update"]
-    event_id: int | None = None
-    title: str = Field(min_length=1, max_length=500)
-    summary: str = Field(min_length=1)
-    category: str = Field(min_length=1, max_length=60)
-    event_type: str = Field(min_length=1, max_length=60)
-    entities: list[dict[str, str]]
-    importance_score: float = Field(ge=0, le=1)
-    credibility: Literal["official", "corroborated", "unverified", "rumor"]
-    relation_type: Literal[
-        "initial_report",
-        "rumor",
-        "community_discussion",
-        "repost",
-        "official_preview",
-        "official_confirmation",
-        "correction",
-        "follow_up",
-        "contradiction",
-    ]
-    adds_new_information: bool
-    conflicts: list[dict[str, str]]
-    reason: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_action_target(self) -> "EventResolution":
-        if self.action == "create" and self.event_id is not None:
-            raise ValueError("create action must not include event_id")
-        if self.action == "update" and self.event_id is None:
-            raise ValueError("update action requires event_id")
-        return self
-
-
-class ReportDraft(BaseModel):
-    title: str = Field(min_length=1, max_length=500)
-    content: str = Field(min_length=1)
-
-
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
@@ -130,9 +71,17 @@ class TranslatedTextBlock(BaseModel):
     text: str = Field(min_length=1)
 
 
+class TranslatedMediaExtraction(BaseModel):
+    extraction_id: int = Field(ge=1)
+    translated_data: dict[str, object]
+
+
 class TranslationResult(BaseModel):
     translated_title: str = Field(min_length=1, max_length=500)
-    translated_blocks: list[TranslatedTextBlock] = Field(min_length=1)
+    translated_blocks: list[TranslatedTextBlock] = Field(default_factory=list)
+    translated_summary: str = Field(min_length=1)
+    translated_entities: list[dict[str, str]]
+    translated_media_extractions: list[TranslatedMediaExtraction] = Field(default_factory=list)
 
 
 class PatchEntry(BaseModel):
@@ -191,11 +140,14 @@ class LLMClient:
         knowledge_rules: list[str] | None = None,
     ) -> AnalysisResult:
         prompt = (
-            "你是英雄联盟新闻编辑。请分析输入资讯，只输出一个完整的 JSON 对象，"
+            "你是英雄联盟中文新闻编辑。请分析输入资讯，只输出一个完整的 JSON 对象，"
             "不要输出 Markdown。必须包含 title、summary、category、entities、"
-            "importance_score、credibility。category 使用简短中文分类；"
+            "importance_score、credibility、credibility_score、credibility_evidence。"
+            "title、summary、category 和实体的展示名称必须使用简体中文；"
+            "事实、专有名词原文和数值不得丢失。category 使用简短中文分类；"
             "importance_score 必须为 0 到 1；credibility 只能是 official、"
-            "corroborated、unverified、rumor。"
+            "corroborated、unverified、rumor；credibility_score 必须为 0 到 1；"
+            "credibility_evidence 列出支撑可信度判断的简短依据。"
         )
         return await self._validated_json_completion(
             prompt=prompt,
@@ -218,8 +170,14 @@ class LLMClient:
         source_language: str,
         target_language: str = "zh-CN",
         glossary: list[dict[str, object]] | None = None,
+        summary: str,
+        entities: list[dict[str, str]],
+        media_extractions: list[dict[str, object]] | None = None,
     ) -> TranslationResult:
         expected_indexes = {int(block["index"]) for block in text_blocks}
+        expected_extraction_ids = {
+            int(extraction["extraction_id"]) for extraction in media_extractions or []
+        }
 
         def validate_indexes(result: TranslationResult) -> str | None:
             actual_indexes = {block.index for block in result.translated_blocks}
@@ -228,12 +186,24 @@ class LLMClient:
                     "译文块索引不完整："
                     f"expected={sorted(expected_indexes)}, actual={sorted(actual_indexes)}"
                 )
+            actual_extraction_ids = {
+                extraction.extraction_id
+                for extraction in result.translated_media_extractions
+            }
+            if actual_extraction_ids != expected_extraction_ids:
+                return (
+                    "结构化版本译文 ID 不完整："
+                    f"expected={sorted(expected_extraction_ids)}, "
+                    f"actual={sorted(actual_extraction_ids)}"
+                )
             return None
 
         prompt = (
             "你是英雄联盟专业本地化编辑。将输入内容准确翻译为简体中文，"
-            "保留英雄、装备、赛事和版本术语，不能删减事实。只输出完整 JSON，"
-            "不要输出 Markdown。translated_blocks 必须逐一返回输入中的每个 index。"
+            "保留英雄、装备、赛事、技能、数值和版本术语，不能删减事实。"
+            "结构化版本数据必须保持原 JSON 结构和 extraction_id，只翻译其中需要展示的"
+            "自然语言字符串，不得改动数字、运算符和字段名。只输出完整 JSON，不要输出"
+            "Markdown。translated_blocks 必须逐一返回输入中的每个 index。"
         )
         return await self._validated_json_completion(
             prompt=prompt,
@@ -242,6 +212,9 @@ class LLMClient:
                 "target_language": target_language,
                 "title": title or "",
                 "text_blocks": text_blocks,
+                "summary": summary,
+                "entities": entities,
+                "media_extractions": media_extractions or [],
                 "approved_glossary": glossary or [],
             },
             max_tokens=8000,
@@ -278,93 +251,6 @@ class LLMClient:
             max_tokens=800,
             schema=RelevanceResult,
             operation="相关性判断",
-        )
-
-    async def classify_event(
-        self,
-        *,
-        item: dict[str, object],
-        knowledge_rules: list[str],
-    ) -> EventProfile:
-        prompt = (
-            "你是英雄联盟新闻事件编辑。判断单条信息是否描述一个可在时间线上追踪的事件。"
-            "转会、赛事、版本预览、皮肤爆料、游戏更新、热修复和正式公告通常是事件；"
-            "纯观点、攻略、闲聊和无具体发生事项的内容通常不是事件。只输出 JSON，"
-            "必须包含 is_event、event_type、title、summary、key_facts、occurred_at、reason。"
-        )
-        return await self._validated_json_completion(
-            prompt=prompt,
-            payload={"item": item, "approved_rules": knowledge_rules},
-            max_tokens=1200,
-            schema=EventProfile,
-            operation="事件识别",
-        )
-
-    async def resolve_event(
-        self,
-        *,
-        item: dict[str, object],
-        profile: dict[str, object],
-        candidates: list[dict[str, object]],
-        source_context: dict[str, object],
-        knowledge_rules: list[str],
-    ) -> EventResolution:
-        prompt = (
-            "你是英雄联盟事件聚合编辑。候选事件已由应用程序检索，不得选择候选列表外的 ID。"
-            "判断本条信息是否属于某个候选事件；属于则 action=update，否则 action=create。"
-            "事件以直接官方信息为主，其他来源作为早期报告、补充、冲突或观点。"
-            "相同实体不等于同一事件，必须是同一次、同一时间范围内发生的事情。"
-            "输出更新后的事件标题、摘要、分类、类型、实体、重要性、可信度、来源关系、"
-            "是否增加新信息、冲突和理由。只输出 JSON。"
-        )
-        candidate_ids = {int(candidate["id"]) for candidate in candidates}
-
-        def validate_candidate(result: EventResolution) -> str | None:
-            if result.action == "update" and result.event_id not in candidate_ids:
-                return "update 的 event_id 必须来自 candidate_events"
-            return None
-
-        return await self._validated_json_completion(
-            prompt=prompt,
-            payload={
-                "item": item,
-                "event_profile": profile,
-                "candidate_events": candidates,
-                "source_context": source_context,
-                "approved_rules": knowledge_rules,
-            },
-            max_tokens=2200,
-            schema=EventResolution,
-            operation="事件聚合",
-            business_validator=validate_candidate,
-        )
-
-    async def generate_report(
-        self,
-        *,
-        report_type: str,
-        period_start: str,
-        period_end: str,
-        timezone: str,
-        events: list[dict[str, object]],
-    ) -> ReportDraft:
-        prompt = (
-            "你是英雄联盟中文资讯主编。根据给定事件生成日报、周报或月报草稿。"
-            "区分本期新事件和本期后续更新；以官方信息为主，未证实内容明确标注；"
-            "不要添加输入中不存在的事实。输出 JSON，字段为 title 和 content。"
-        )
-        return await self._validated_json_completion(
-            prompt=prompt,
-            payload={
-                "report_type": report_type,
-                "period_start": period_start,
-                "period_end": period_end,
-                "timezone": timezone,
-                "events": events,
-            },
-            max_tokens=5000,
-            schema=ReportDraft,
-            operation="报告生成",
         )
 
     async def _validated_json_completion(

@@ -185,7 +185,9 @@ foreach (
         "018_normalize_x_author_names",
         "019_version_raw_item_ingestion",
         "020_reset_processing_data",
-        "021_remove_legacy_raw_item_identity_index"
+        "021_remove_legacy_raw_item_identity_index",
+        "022_refine_reviewed_item_pipeline",
+        "023_remove_deferred_event_reporting"
     )
 ) {
     if ($appliedVersions -notcontains $migrationVersion) {

@@ -1,11 +1,10 @@
+import json
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy.orm import Session
-
 from app.content_blocks import TEXT_BLOCK_TYPES, text_from_content_blocks
 from app.core.config import settings
-from app.models.normalized_item import NormalizedItem
+from app.models.media_extraction import MediaExtraction
 from app.models.raw_item import RawItem
 from app.services.llm import LLMClient
 
@@ -16,6 +15,9 @@ class TranslationData:
     translated_title: str
     translated_text: str
     translated_content_blocks: list[dict[str, Any]]
+    translated_summary: str
+    translated_entities: list[dict[str, str]]
+    translated_media_extractions: list[dict[str, object]]
     translation_status: str
     translation_model: str | None
 
@@ -32,6 +34,9 @@ async def build_translation(
     raw_item: RawItem,
     *,
     canonical_title: str,
+    summary: str,
+    entities: list[dict[str, str]],
+    media_extractions: list[MediaExtraction],
     glossary: list[dict[str, object]] | None = None,
 ) -> TranslationData:
     source_text = text_from_content_blocks(raw_item.content_blocks)
@@ -39,13 +44,29 @@ async def build_translation(
     target_language = "zh-CN"
     blocks = [dict(block) for block in raw_item.content_blocks]
 
-    if source_language.startswith("zh"):
+    structured_text = json.dumps(
+        [extraction.structured_data for extraction in media_extractions],
+        ensure_ascii=False,
+    )
+    structured_requires_translation = bool(
+        media_extractions and detect_language(structured_text) != "zh-CN"
+    )
+    if source_language.startswith("zh") and not structured_requires_translation:
         return TranslationData(
             source_language=source_language,
             target_language=target_language,
             translated_title=canonical_title,
             translated_text=source_text,
             translated_content_blocks=blocks,
+            translated_summary=summary,
+            translated_entities=entities,
+            translated_media_extractions=[
+                {
+                    "extraction_id": extraction.id,
+                    "translated_data": extraction.structured_data,
+                }
+                for extraction in media_extractions
+            ],
             translation_status="not_required",
             translation_model=None,
         )
@@ -64,23 +85,21 @@ async def build_translation(
         if block.get("type") in TEXT_BLOCK_TYPES
         and (block.get("text") or block.get("items"))
     ]
-    if not text_blocks:
-        return TranslationData(
-            source_language=source_language,
-            target_language=target_language,
-            translated_title=canonical_title,
-            translated_text="",
-            translated_content_blocks=blocks,
-            translation_status="not_required",
-            translation_model=None,
-        )
-
     result = await LLMClient().translate(
-        title=raw_item.display_title,
+        title=canonical_title,
         text_blocks=text_blocks,
         source_language=source_language,
         target_language=target_language,
         glossary=glossary,
+        summary=summary,
+        entities=entities,
+        media_extractions=[
+            {
+                "extraction_id": extraction.id,
+                "structured_data": extraction.structured_data,
+            }
+            for extraction in media_extractions
+        ],
     )
     translations = {block.index: block.text for block in result.translated_blocks}
     translated_blocks: list[dict[str, Any]] = []
@@ -103,25 +122,12 @@ async def build_translation(
         translated_title=result.translated_title or canonical_title,
         translated_text="\n\n".join(translated_text_parts),
         translated_content_blocks=translated_blocks,
+        translated_summary=result.translated_summary,
+        translated_entities=result.translated_entities,
+        translated_media_extractions=[
+            extraction.model_dump(mode="json")
+            for extraction in result.translated_media_extractions
+        ],
         translation_status="translated",
         translation_model=settings.model_name,
     )
-
-
-async def translate_normalized_item(db: Session, item: NormalizedItem) -> NormalizedItem:
-    translation = await build_translation(item.raw_item, canonical_title=item.normalized_title)
-    item.source_language = translation.source_language
-    item.target_language = translation.target_language
-    item.translated_title = translation.translated_title
-    item.translated_text = translation.translated_text
-    item.translated_content_blocks = translation.translated_content_blocks
-    item.translation_status = translation.translation_status
-    item.translation_model = translation.translation_model
-    if translation.translation_status == "translated":
-        item.normalized_title = translation.translated_title
-        for link in item.event_links:
-            if link.is_primary:
-                link.event.title = translation.translated_title
-    db.commit()
-    db.refresh(item)
-    return item

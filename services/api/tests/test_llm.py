@@ -283,6 +283,75 @@ def test_knowledge_organization_retries_when_source_ids_are_not_fully_covered() 
     assert len(completions.calls) == 2
 
 
+def test_translation_retries_when_structured_target_keeps_english_name() -> None:
+    def response(target: str) -> str:
+        return json.dumps(
+            {
+                "translated_title": "26.13版本完整预览",
+                "translated_blocks": [],
+                "translated_summary": "版本调整预览。",
+                "translated_entities": [],
+                "translated_media_extractions": [
+                    {
+                        "extraction_id": 9,
+                        "translated_data": {
+                            "sections": [
+                                {
+                                    "entries": [
+                                        {
+                                            "target": target,
+                                            "target_type": "champion",
+                                            "changes": ["标记伤害提高。"],
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    client, completions = _client_with_responses(
+        [response("Aphelios"), response("残月之肃")]
+    )
+
+    result = asyncio.run(
+        client.translate(
+            title="Patch 26.13 Full Preview",
+            text_blocks=[],
+            source_language="en",
+            summary="Patch preview.",
+            entities=[],
+            media_extractions=[
+                {
+                    "extraction_id": 9,
+                    "structured_data": {
+                        "sections": [
+                            {
+                                "entries": [
+                                    {
+                                        "target": "Aphelios",
+                                        "target_type": "champion",
+                                        "changes": ["Calibrum mark damage increased."],
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+    )
+
+    translated = result.translated_media_extractions[0].translated_data
+    assert translated["sections"][0]["entries"][0]["target"] == "残月之肃"
+    assert len(completions.calls) == 2
+    retry_messages = completions.calls[1]["messages"]
+    assert "target 未翻译" in retry_messages[-1]["content"]
+
+
 def test_two_invalid_schema_responses_raise_unified_error() -> None:
     client, completions = _client_with_responses(["{}", '{"product_scope":"lol_pc"}'])
 

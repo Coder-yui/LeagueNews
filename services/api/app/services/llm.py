@@ -200,6 +200,27 @@ class LLMClient:
             int(extraction["extraction_id"]) for extraction in media_extractions or []
         }
         expected_entity_count = len(entities)
+        source_extractions = {
+            int(extraction["extraction_id"]): extraction.get("structured_data") or {}
+            for extraction in media_extractions or []
+        }
+
+        def collect_targets(
+            value: object,
+            path: tuple[str | int, ...] = (),
+        ) -> dict[tuple[str | int, ...], tuple[str, str]]:
+            targets: dict[tuple[str | int, ...], tuple[str, str]] = {}
+            if isinstance(value, dict):
+                target = value.get("target")
+                target_type = value.get("target_type")
+                if isinstance(target, str) and isinstance(target_type, str):
+                    targets[path] = (target, target_type)
+                for key, child in value.items():
+                    targets.update(collect_targets(child, (*path, str(key))))
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    targets.update(collect_targets(child, (*path, index)))
+            return targets
 
         def validate_indexes(result: TranslationResult) -> str | None:
             actual_indexes = {block.index for block in result.translated_blocks}
@@ -224,13 +245,39 @@ class LLMClient:
                     f"expected={expected_entity_count}, "
                     f"actual={len(result.translated_entities)}"
                 )
+            translated_by_id = {
+                extraction.extraction_id: extraction.translated_data
+                for extraction in result.translated_media_extractions
+            }
+            for extraction_id, source_data in source_extractions.items():
+                source_targets = collect_targets(source_data)
+                translated_targets = collect_targets(translated_by_id[extraction_id])
+                if source_targets.keys() != translated_targets.keys():
+                    return f"结构化版本 target 结构发生变化：extraction_id={extraction_id}"
+                for path, (source_target, target_type) in source_targets.items():
+                    translated_target = translated_targets[path][0]
+                    requires_localization = (
+                        target_type in {"champion", "item", "rune", "system"}
+                        and any(char.isascii() and char.isalpha() for char in source_target)
+                    )
+                    if (
+                        requires_localization
+                        and translated_target.casefold() == source_target.casefold()
+                    ):
+                        return (
+                            "结构化版本 target 未翻译为官方简体中文名称："
+                            f"extraction_id={extraction_id}, target={source_target}"
+                        )
             return None
 
         prompt = (
             "你是英雄联盟专业本地化编辑。将输入内容准确翻译为简体中文，"
             "保留英雄、装备、赛事、技能、数值和版本术语，不能删减事实。"
             "结构化版本数据必须保持原 JSON 结构和 extraction_id，只翻译其中需要展示的"
-            "自然语言字符串，不得改动数字、运算符和字段名。只输出完整 JSON，不要输出"
+            "自然语言字符串，不得改动数字、运算符和字段名。结构化版本 entries 中的 "
+            "target 是前端展示名称而不是不可变标识符：target_type 为 champion、item、"
+            "rune 或 system 时，必须把英文 target 翻译成英雄联盟官方简体中文名称，"
+            "例如 Aphelios 必须译为“残月之肃”，不得保留英文。只输出完整 JSON，不要输出"
             "Markdown。translated_blocks 必须逐一返回输入中的每个 index；"
             "translated_entities 必须与输入实体一一对应，不能增加或删除。"
         )

@@ -33,6 +33,7 @@ export default async function Home() {
         </a>
         <nav aria-label="主要导航">
           <a className="active" href="#messages">消息</a>
+          <Link href="/events">事件</Link>
           <a href="#pipeline">处理链路</a>
           <a href="#sources">信源</a>
           <a href="/admin">处理台</a>

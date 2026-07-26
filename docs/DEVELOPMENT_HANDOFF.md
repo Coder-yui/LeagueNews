@@ -33,7 +33,8 @@
 - 图片本地化；视频等媒体以“请在原始位置查看”的链接展示。
 - 只有全部审核通过才写 `normalized_items`。
 - 消息列表按 `coalesce(raw_items.published_at, raw_items.ingested_at)` 降序排列。
-- 事件聚合和报告当前没有运行时模型、路由、工作流或页面。
+- 事件聚合 v2 已有核心模型、事务服务、只读路由、确定性候选检索、受审核 AI 工作流、
+  管理台入口和公开事件页面；报告尚未实现。
 
 ## 2. 单条处理的当前顺序
 
@@ -66,6 +67,9 @@
 - 已批准并发布的 `NormalizedItem = 2`
 - `knowledge_rules = 3`
 - `glossary_terms = 7`
+- `events = 0`
+- `event_messages = 0`
+- `event_revisions = 0`
 - 两条已发布消息分别来自 RawItem `#102`（2026-06-17，26.13 Full Preview）和
   RawItem `#103`（2026-06-16，26.13 Preview）
 
@@ -107,6 +111,11 @@
 | `media_extractions` | OCR、表格结构与人工修订版本 |
 | `normalized_items` | 全部审核通过的单条消息 |
 | `normalized_item_media_extractions` | 消息采用的图片结构及一一对应中文译文 |
+| `events` | 持续演化的事件当前状态 |
+| `event_messages` | 事件与已批准消息的一对多成员关系 |
+| `event_revisions` | 事件标题、摘要、变更原因和证据快照历史 |
+| `event_aggregation_runs` | 一条已批准消息的一次事件聚合运行及候选快照 |
+| `event_review_tasks` | AI 事件决策草稿、人工决定和反馈 |
 
 不要把新的事件状态塞回 `raw_items` 或 `normalized_items`。事件成员关系应由独立关联表
 表达。
@@ -147,12 +156,24 @@ GET  /api/v1/normalized-items
 GET  /api/v1/normalized-items/published
 GET  /api/v1/normalized-items/{id}/published
 
+GET  /api/v1/events
+GET  /api/v1/events/{id}
+GET  /api/v1/events/{id}/messages
+
+POST /api/v1/event-workflows/items/{id}/process
+GET  /api/v1/event-workflows/runs
+GET  /api/v1/event-workflows/reviews
+POST /api/v1/event-workflows/reviews/{id}/approve
+POST /api/v1/event-workflows/reviews/{id}/reject
+POST /api/v1/event-workflows/runs/{id}/retry
+
 GET  /api/v1/knowledge/rules
 POST /api/v1/knowledge/rules/organize
 GET  /api/v1/knowledge/glossary
 ```
 
-不存在 `/api/v1/events`、事件处理或报告生成 API。
+事件正式数据 API 仅提供读取；事件聚合通过独立受审核工作流显式触发。不存在自动调度
+或报告生成 API。
 
 ## 5. 数据库历史与不可触碰边界
 
@@ -164,8 +185,9 @@ GET  /api/v1/knowledge/glossary
 - `011_add_reviewed_ai_workflows.sql`
 - `023_remove_deferred_event_reporting.sql`
 
-未来事件聚合必须使用新的追加迁移，例如
-`026_create_event_aggregation_v2.sql`。这里的“迁移”只表示创建新表和约束：
+事件聚合 v2 已通过追加迁移
+`026_create_event_aggregation_v2.sql` 创建核心表和约束。后续仍必须使用新的追加迁移。
+这里的“迁移”只表示创建或扩展新表和约束：
 
 - 不移动或重写 RawItem。
 - 不删除或重建 NormalizedItem。
@@ -266,31 +288,44 @@ event_revisions
 
 ### A. 数据与只读接口
 
-1. 新增迁移、SQLAlchemy 模型和 schema。
+已于 2026-07-26 完成：
+
+1. 新增 `026_create_event_aggregation_v2.sql`、SQLAlchemy 模型和 schema。
 2. 实现事件列表、详情和成员读取 API。
-3. 实现仅供测试的人工建事件/关联服务，验证唯一约束、时间计算和 revision。
-4. 不接 LLM，不改现有消息页面。
+3. 实现仅供内部与测试调用的人工建事件/关联服务，验证唯一约束、时间计算、幂等和
+   revision。
+4. PostgreSQL 并发集成测试验证同一消息并发关联只产生一个 membership 和一个新
+   revision。
+5. 未接 LLM，未改现有消息页面，正式事件表保持为空。
 
 ### B. 确定性候选
 
-1. 从实体、分类、标题和发布时间构建检索输入。
+已于 2026-07-26 完成：
+
+1. 从实体、分类、标题和原始发布时间构建检索输入。
 2. 为 patch 版本实现稳定 `event_key`。
-3. 返回候选分数及可解释命中原因。
-4. 单测零候选、一个候选、多个相似候选和重复触发。
+3. 只查询正式 active 事件，返回候选分数及可解释命中原因，硬性限制最多 5 个。
+4. 单测覆盖零候选、精确候选、多个相似候选、上限和重复触发。
 
 ### C. AI 草稿与人工审核
 
-1. 定义严格 Pydantic 输出 schema。
-2. AI 只读取当前消息、最多 5 个候选和 event 专用知识。
-3. 管理台展示原消息、候选、AI 理由和拟议 revision。
-4. 人工批准后才事务落库；拒绝保留审核记录，并把事件聚合纠错沉淀为独立知识类型。
+已于 2026-07-26 完成：
+
+1. 定义严格 Pydantic 输出 schema，限制 `not_event/create/update` 和候选 ID。
+2. AI 只读取当前消息、最多 5 个候选和 `event_aggregation` 专用知识。
+3. 管理台事件页签展示消息、候选、AI 理由和拟议变更。
+4. 人工批准后才事务写入正式事件；拒绝保留审核记录并沉淀独立知识。
+5. create/update/not_event/reject/retry 均有测试，运行通过 `supersedes_run_id` 保留重试链。
 
 ### D. 事件前端
 
-1. 保持首页消息流独立可用。
-2. 增加事件列表和事件详情。
-3. 详情按原始发布时间展示成员消息时间线，并能回到单条消息。
+已于 2026-07-26 完成：
+
+1. 首页消息流保持独立可用，并增加事件导航。
+2. 新增 `/events` 和 `/events/{id}`。
+3. 详情按原始发布时间展示成员消息时间线，并能回到单条消息和原文。
 4. 明确显示来源、首次发生、最近更新和 revision 历史。
+5. 已通过 production build 和本地浏览器空状态、导航、管理台页签检查。
 
 报告、日报、自动调度、embedding 和大规模召回都延后到事件聚合稳定之后。
 

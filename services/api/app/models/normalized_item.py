@@ -42,6 +42,9 @@ class NormalizedItem(Base):
     media_links: Mapped[list["NormalizedItemMediaExtraction"]] = relationship(
         back_populates="normalized_item", cascade="all, delete-orphan"
     )
+    event_membership: Mapped["EventMessage | None"] = relationship(  # noqa: F821
+        back_populates="normalized_item", uselist=False
+    )
 
     @property
     def approved_media_extraction_ids(self) -> list[int]:

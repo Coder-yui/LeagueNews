@@ -2,6 +2,8 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     connectors,
+    events,
+    event_workflows,
     health,
     imports,
     knowledge,
@@ -23,6 +25,12 @@ api_router.include_router(
 api_router.include_router(media_assets.router, prefix="/media-assets", tags=["media_assets"])
 api_router.include_router(imports.router, prefix="/imports", tags=["imports"])
 api_router.include_router(connectors.router, prefix="/connectors", tags=["connectors"])
+api_router.include_router(events.router, prefix="/events", tags=["events"])
+api_router.include_router(
+    event_workflows.router,
+    prefix="/event-workflows",
+    tags=["event_workflows"],
+)
 api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
 api_router.include_router(ocr_lab.router, prefix="/ocr-lab", tags=["ocr_lab"])

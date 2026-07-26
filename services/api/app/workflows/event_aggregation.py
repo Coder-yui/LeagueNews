@@ -1,0 +1,223 @@
+from dataclasses import asdict
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.event import (
+    EventAggregationRun,
+    EventMessage,
+    EventReviewTask,
+)
+from app.models.normalized_item import NormalizedItem
+from app.models.workflow import KnowledgeRule
+from app.schemas.event_workflow import EventDecisionDraft, EventReviewRejection
+from app.services.event_aggregation import add_message_to_event, create_event
+from app.services.event_candidates import find_event_candidates, stable_event_key
+from app.services.llm import LLMClient
+
+EVENT_STAGE = "event_decision"
+
+
+async def start_event_aggregation(
+    db: Session,
+    item: NormalizedItem,
+    *,
+    supersedes_run_id: int | None = None,
+) -> EventAggregationRun:
+    if db.scalar(
+        select(EventMessage).where(EventMessage.normalized_item_id == item.id)
+    ):
+        raise ValueError("normalized item already belongs to an event")
+    active = db.scalar(
+        select(EventAggregationRun).where(
+            EventAggregationRun.normalized_item_id == item.id,
+            EventAggregationRun.status.in_(["running", "awaiting_review"]),
+        )
+    )
+    if active:
+        raise ValueError(f"normalized item already has active event run {active.id}")
+    run = EventAggregationRun(
+        normalized_item_id=item.id,
+        supersedes_run_id=supersedes_run_id,
+        status="running",
+        current_stage=EVENT_STAGE,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    try:
+        await _generate_review(db, run)
+    except Exception as exc:
+        db.rollback()
+        run = db.get(EventAggregationRun, run.id)
+        run.status = "failed"
+        run.outcome = "system_error"
+        run.error_message = str(exc)
+        run.completed_at = datetime.now(UTC)
+        db.commit()
+        raise
+    return run
+
+
+async def retry_event_aggregation(
+    db: Session,
+    run: EventAggregationRun,
+) -> EventAggregationRun:
+    if run.status not in {"failed", "rejected"}:
+        raise ValueError(f"event aggregation run cannot retry from status={run.status}")
+    item = db.get(NormalizedItem, run.normalized_item_id)
+    if item is None:
+        raise ValueError("normalized item no longer exists")
+    return await start_event_aggregation(db, item, supersedes_run_id=run.id)
+
+
+async def _generate_review(db: Session, run: EventAggregationRun) -> None:
+    item = run.normalized_item
+    candidates = find_event_candidates(db, normalized_item_id=item.id)
+    candidate_payloads = [asdict(candidate) for candidate in candidates]
+    rules = list(
+        db.scalars(
+            select(KnowledgeRule.rule_text)
+            .where(
+                KnowledgeRule.knowledge_type == "event_aggregation",
+                KnowledgeRule.is_active.is_(True),
+                KnowledgeRule.scope.in_(["global", item.category]),
+            )
+            .order_by(KnowledgeRule.updated_at.desc())
+        )
+    )
+    decision = await LLMClient().propose_event(
+        item={
+            "normalized_item_id": item.id,
+            "title": item.translated_title or item.normalized_title,
+            "summary": item.summary,
+            "category": item.category,
+            "entities": item.entities,
+            "published_at": (
+                item.raw_item.published_at.isoformat()
+                if item.raw_item.published_at
+                else None
+            ),
+        },
+        candidates=candidate_payloads,
+        stable_event_key=stable_event_key(item),
+        knowledge_rules=rules,
+    )
+    run.candidate_snapshot = candidate_payloads
+    run.decision_draft = decision.model_dump(mode="json")
+    run.status = "awaiting_review"
+    db.add(
+        EventReviewTask(
+            event_aggregation_run_id=run.id,
+            proposal={
+                "item": {
+                    "normalized_item_id": item.id,
+                    "title": item.translated_title or item.normalized_title,
+                    "summary": item.summary,
+                    "category": item.category,
+                },
+                "candidates": candidate_payloads,
+                "decision": run.decision_draft,
+            },
+        )
+    )
+    db.commit()
+    db.refresh(run)
+
+
+def approve_event_review(
+    db: Session,
+    review: EventReviewTask,
+    *,
+    note: str | None,
+) -> EventAggregationRun:
+    _require_pending(review)
+    run = review.run
+    decision = EventDecisionDraft.model_validate(run.decision_draft)
+    candidate_ids = {
+        int(candidate["event_id"]) for candidate in run.candidate_snapshot
+    }
+    now = datetime.now(UTC)
+
+    if decision.decision == "create":
+        create_event(
+            db,
+            normalized_item_id=run.normalized_item_id,
+            event_key=decision.event_key,
+            title=decision.title or "",
+            summary=decision.summary or "",
+            category=decision.category or "",
+            change_note=decision.change_note or "人工批准创建事件",
+            evidence={"event_run_id": run.id, "new_facts": decision.new_facts},
+            commit=False,
+        )
+        run.outcome = "created"
+    elif decision.decision == "update":
+        if decision.candidate_event_id not in candidate_ids:
+            raise ValueError("decision references an event outside the candidate snapshot")
+        _, added = add_message_to_event(
+            db,
+            event_id=decision.candidate_event_id,
+            normalized_item_id=run.normalized_item_id,
+            title=decision.title,
+            summary=decision.summary,
+            change_note=decision.change_note or "人工批准更新事件",
+            evidence={"event_run_id": run.id, "new_facts": decision.new_facts},
+            commit=False,
+        )
+        if not added:
+            raise ValueError("normalized item was already attached before approval")
+        run.outcome = "updated"
+    else:
+        run.outcome = "not_event"
+
+    review.status = "approved"
+    review.feedback = {"note": note} if note else {}
+    review.resolved_at = now
+    run.status = "completed"
+    run.completed_at = now
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def reject_event_review(
+    db: Session,
+    review: EventReviewTask,
+    *,
+    payload: EventReviewRejection,
+) -> EventAggregationRun:
+    _require_pending(review)
+    now = datetime.now(UTC)
+    review.status = "rejected"
+    review.feedback = payload.model_dump(mode="json")
+    review.resolved_at = now
+    run = review.run
+    run.status = "rejected"
+    run.outcome = "review_rejected"
+    run.completed_at = now
+    if payload.knowledge_rule:
+        db.add(
+            KnowledgeRule(
+                knowledge_type="event_aggregation",
+                scope=payload.knowledge_scope,
+                rule_text=payload.knowledge_rule,
+                correction_data={
+                    "reason": payload.reason,
+                    "decision_draft": run.decision_draft,
+                },
+                source_event_review_id=review.id,
+                is_active=True,
+            )
+        )
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def _require_pending(review: EventReviewTask) -> None:
+    if review.status != "pending":
+        raise ValueError(f"event review is already {review.status}")
+    if review.run.status != "awaiting_review":
+        raise ValueError(f"event run is not awaiting review: {review.run.status}")

@@ -6,6 +6,7 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.config import settings
+from app.schemas.event_workflow import EventDecisionDraft
 
 
 class LLMConfigurationError(RuntimeError):
@@ -70,7 +71,9 @@ class RelevanceResult(BaseModel):
 
 
 class OrganizedKnowledgeRule(BaseModel):
-    knowledge_type: Literal["relevance", "analysis", "translation"]
+    knowledge_type: Literal[
+        "relevance", "analysis", "translation", "event_aggregation"
+    ]
     scope: str = Field(min_length=1, max_length=160)
     rule_text: str = Field(min_length=1, max_length=1000)
     source_rule_ids: list[int] = Field(min_length=1)
@@ -181,6 +184,50 @@ class LLMClient:
             operation="单条分析",
         )
 
+    async def propose_event(
+        self,
+        *,
+        item: dict[str, object],
+        candidates: list[dict[str, object]],
+        stable_event_key: str | None,
+        knowledge_rules: list[str],
+    ) -> EventDecisionDraft:
+        candidate_ids = {int(candidate["event_id"]) for candidate in candidates}
+
+        def validate_candidate(result: EventDecisionDraft) -> str | None:
+            if (
+                result.decision == "update"
+                and result.candidate_event_id not in candidate_ids
+            ):
+                return "update 只能引用输入候选中的 event_id"
+            if result.decision == "create" and result.event_key not in {
+                None,
+                stable_event_key,
+            }:
+                return "create 不能编造稳定事件键"
+            return None
+
+        prompt = (
+            "你是英雄联盟资讯事件聚合编辑。只根据当前已批准中文消息、程序给出的"
+            "最多五个候选事件和审核知识，提出结构化草稿。decision 只能是 "
+            "not_event、create、update。update 必须引用候选 event_id；create 只能使用"
+            "程序提供的 stable_event_key 或 null。不得生成 SQL，不得假设候选之外的事件。"
+            "title、summary、category、change_note 和 new_facts 使用简体中文。"
+            "not_event 用于不值得进入持续事件层的孤立消息。只输出 JSON。"
+        )
+        return await self._validated_json_completion(
+            prompt=prompt,
+            payload={
+                "item": item,
+                "candidates": candidates,
+                "stable_event_key": stable_event_key,
+                "approved_rules": knowledge_rules,
+            },
+            max_tokens=1800,
+            schema=EventDecisionDraft,
+            operation="事件聚合决策",
+            business_validator=validate_candidate,
+        )
     async def translate(
         self,
         *,

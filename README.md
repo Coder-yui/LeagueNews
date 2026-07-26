@@ -16,7 +16,8 @@ Source
   -> 消息卡片与消息详情
 ```
 
-事件聚合和报告当前没有模型、API、工作流或页面。下一阶段事件聚合的边界与实施顺序见
+事件聚合 v2 已有核心数据模型、事务服务、确定性候选检索、受审核 AI 工作流、管理台
+以及公开事件列表和详情时间线；报告尚未实现。后续边界与实施顺序见
 [`docs/DEVELOPMENT_HANDOFF.md`](docs/DEVELOPMENT_HANDOFF.md)。
 
 ## 架构边界
@@ -83,6 +84,11 @@ GET /api/v1/media-assets
 GET /api/v1/normalized-items
 GET /api/v1/normalized-items/published
 GET /api/v1/normalized-items/{id}/published
+GET /api/v1/events
+GET /api/v1/events/{id}
+GET /api/v1/events/{id}/messages
+GET /api/v1/event-workflows/runs
+GET /api/v1/event-workflows/reviews
 GET /api/v1/workflows/runs
 GET /api/v1/workflows/reviews
 GET /api/v1/knowledge/rules

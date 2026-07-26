@@ -1,4 +1,11 @@
 from app.models.connector_run import ConnectorRun
+from app.models.event import (
+    Event,
+    EventAggregationRun,
+    EventMessage,
+    EventReviewTask,
+    EventRevision,
+)
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
@@ -10,6 +17,11 @@ from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, Revi
 
 __all__ = [
     "ConnectorRun",
+    "Event",
+    "EventAggregationRun",
+    "EventMessage",
+    "EventReviewTask",
+    "EventRevision",
     "GlossaryTerm",
     "KnowledgeRule",
     "MediaAsset",

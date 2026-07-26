@@ -46,6 +46,30 @@ type ReviewTask = {
   proposal: JsonObject;
 };
 
+type NormalizedItem = {
+  id: number;
+  normalized_title: string;
+  summary: string;
+  category: string;
+};
+
+type EventAggregationRun = {
+  id: number;
+  normalized_item_id: number;
+  supersedes_run_id: number | null;
+  status: string;
+  outcome: string | null;
+  current_stage: string;
+  error_message: string | null;
+};
+
+type EventReviewTask = {
+  id: number;
+  event_aggregation_run_id: number;
+  status: string;
+  proposal: JsonObject;
+};
+
 type KnowledgeRule = {
   id: number;
   knowledge_type: string;
@@ -176,7 +200,7 @@ type OCRProfile = {
   is_active: boolean;
 };
 
-type Tab = "items" | "reviews" | "ocr" | "knowledge";
+type Tab = "items" | "reviews" | "events" | "ocr" | "knowledge";
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -213,6 +237,9 @@ export function AdminConsole() {
   const [rawItems, setRawItems] = useState<RawItem[]>([]);
   const [runs, setRuns] = useState<ProcessingRun[]>([]);
   const [reviews, setReviews] = useState<ReviewTask[]>([]);
+  const [normalizedItems, setNormalizedItems] = useState<NormalizedItem[]>([]);
+  const [eventRuns, setEventRuns] = useState<EventAggregationRun[]>([]);
+  const [eventReviews, setEventReviews] = useState<EventReviewTask[]>([]);
   const [rules, setRules] = useState<KnowledgeRule[]>([]);
   const [terms, setTerms] = useState<GlossaryTerm[]>([]);
   const [ocrAssets, setOcrAssets] = useState<OCRAsset[]>([]);
@@ -228,6 +255,9 @@ export function AdminConsole() {
         raw,
         runRows,
         reviewRows,
+        normalizedRows,
+        eventRunRows,
+        eventReviewRows,
         ruleRows,
         termRows,
         ocrAssetRows,
@@ -239,6 +269,9 @@ export function AdminConsole() {
           api<RawItem[]>("/raw-items"),
           api<ProcessingRun[]>("/workflows/runs"),
           api<ReviewTask[]>("/workflows/reviews?status=pending"),
+          api<NormalizedItem[]>("/normalized-items"),
+          api<EventAggregationRun[]>("/event-workflows/runs"),
+          api<EventReviewTask[]>("/event-workflows/reviews?status=pending"),
           api<KnowledgeRule[]>("/knowledge/rules"),
           api<GlossaryTerm[]>("/knowledge/glossary"),
           api<OCRAsset[]>("/ocr-lab/assets"),
@@ -249,6 +282,9 @@ export function AdminConsole() {
       setRawItems(raw);
       setRuns(runRows);
       setReviews(reviewRows);
+      setNormalizedItems(normalizedRows);
+      setEventRuns(eventRunRows);
+      setEventReviews(eventReviewRows);
       setRules(ruleRows);
       setTerms(termRows);
       setOcrAssets(ocrAssetRows);
@@ -283,18 +319,19 @@ export function AdminConsole() {
     () => ({
       pending: rawItems.filter((item) => item.processing_status === "pending").length,
       reviews: reviews.length,
+      eventReviews: eventReviews.length,
       retry: latestRunsByRawItem(runs)
         .filter((run) => ["failed", "rejected"].includes(run.status)).length,
       knowledge: rules.filter((rule) => rule.is_active).length + terms.filter((term) => term.is_active).length,
     }),
-    [rawItems, reviews, runs, rules, terms],
+    [rawItems, reviews, eventReviews, runs, rules, terms],
   );
 
   return (
     <>
       <section className="admin-stats">
         <div><span>等待开始</span><strong>{counts.pending}</strong></div>
-        <div><span>待人工审核</span><strong>{counts.reviews}</strong></div>
+        <div><span>待人工审核</span><strong>{counts.reviews + counts.eventReviews}</strong></div>
         <div><span>等待重试</span><strong>{counts.retry}</strong></div>
         <div><span>生效知识</span><strong>{counts.knowledge}</strong></div>
       </section>
@@ -303,6 +340,7 @@ export function AdminConsole() {
         {([
           ["items", "单条处理", FileClock],
           ["reviews", "审核中心", Check],
+          ["events", "事件聚合", Sparkles],
           ["ocr", "OCR 测试台", ScanText],
           ["knowledge", "知识与术语", BookOpenCheck],
         ] as const).map(([value, label, Icon]) => (
@@ -348,10 +386,176 @@ export function AdminConsole() {
           act={act}
         />
       )}
+      {tab === "events" && (
+        <EventAggregationPanel
+          items={normalizedItems}
+          runs={eventRuns}
+          reviews={eventReviews}
+          busy={busy}
+          act={act}
+        />
+      )}
       {tab === "knowledge" && (
         <KnowledgePanel rules={rules} terms={terms} busy={busy} act={act} />
       )}
     </>
+  );
+}
+
+function EventAggregationPanel({
+  items,
+  runs,
+  reviews,
+  busy,
+  act,
+}: {
+  items: NormalizedItem[];
+  runs: EventAggregationRun[];
+  reviews: EventReviewTask[];
+  busy: string | null;
+  act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
+}) {
+  const latestRuns = new Map<number, EventAggregationRun>();
+  for (const run of runs) {
+    const current = latestRuns.get(run.normalized_item_id);
+    if (!current || run.id > current.id) latestRuns.set(run.normalized_item_id, run);
+  }
+  return (
+    <section className="admin-panel">
+      {reviews.length > 0 && (
+        <div className="admin-list">
+          {reviews.map((review) => (
+            <EventReviewCard
+              key={review.id}
+              review={review}
+              busy={busy}
+              act={act}
+            />
+          ))}
+        </div>
+      )}
+      <div className="admin-list">
+        {items.map((item) => {
+          const run = latestRuns.get(item.id);
+          const canStart = !run;
+          const canRetry = run && ["failed", "rejected"].includes(run.status);
+          return (
+            <article className="admin-item" key={item.id}>
+              <div className="admin-item-meta">
+                <span>MESSAGE #{item.id}</span>
+                <span>{item.category}</span>
+                <b>{run?.status ?? "未聚合"}</b>
+              </div>
+              <h3>{item.normalized_title}</h3>
+              <p>{item.summary}</p>
+              <div className="admin-actions">
+                {(canStart || canRetry) && (
+                  <button
+                    type="button"
+                    disabled={busy === `event-item-${item.id}`}
+                    onClick={() =>
+                      void act(
+                        `event-item-${item.id}`,
+                        () =>
+                          api(
+                            canRetry
+                              ? `/event-workflows/runs/${run.id}/retry`
+                              : `/event-workflows/items/${item.id}/process`,
+                            { method: "POST" },
+                          ),
+                        canRetry ? "事件聚合已重新生成草稿" : "事件聚合草稿已生成",
+                      )
+                    }
+                  >
+                    {busy === `event-item-${item.id}` ? (
+                      <LoaderCircle className="spin" size={14} />
+                    ) : canRetry ? (
+                      <RotateCcw size={14} />
+                    ) : (
+                      <Sparkles size={14} />
+                    )}
+                    {canRetry ? "重试事件判断" : "开始事件聚合"}
+                  </button>
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function EventReviewCard({
+  review,
+  busy,
+  act,
+}: {
+  review: EventReviewTask;
+  busy: string | null;
+  act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
+}) {
+  const [reason, setReason] = useState("");
+  const decision = review.proposal.decision as JsonObject | undefined;
+  return (
+    <article className="review-card">
+      <div className="review-heading">
+        <div>
+          <span>EVENT REVIEW #{review.id} · RUN #{review.event_aggregation_run_id}</span>
+          <h3>事件聚合决策：{String(decision?.decision ?? "未知")}</h3>
+        </div>
+      </div>
+      <pre>{JSON.stringify(review.proposal, null, 2)}</pre>
+      <div className="review-form">
+        <textarea
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          placeholder="拒绝时填写原因；可沉淀为事件聚合知识"
+        />
+      </div>
+      <div className="admin-actions">
+        <button
+          className="approve"
+          type="button"
+          disabled={busy === `event-approve-${review.id}`}
+          onClick={() =>
+            void act(
+              `event-approve-${review.id}`,
+              () =>
+                api(`/event-workflows/reviews/${review.id}/approve`, {
+                  method: "POST",
+                  body: JSON.stringify({ note: null }),
+                }),
+              "事件决策已批准并完成审计",
+            )
+          }
+        >
+          <Check size={14} /> 批准决策
+        </button>
+        <button
+          className="reject"
+          type="button"
+          disabled={!reason.trim() || busy === `event-reject-${review.id}`}
+          onClick={() =>
+            void act(
+              `event-reject-${review.id}`,
+              () =>
+                api(`/event-workflows/reviews/${review.id}/reject`, {
+                  method: "POST",
+                  body: JSON.stringify({
+                    reason: reason.trim(),
+                    knowledge_rule: reason.trim(),
+                    knowledge_scope: "global",
+                  }),
+                }),
+              "事件决策已拒绝并保留纠错记录",
+            )
+          }
+        >
+          <X size={14} /> 拒绝并沉淀知识
+        </button>
+      </div>
+    </article>
   );
 }
 

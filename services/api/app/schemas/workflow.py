@@ -116,7 +116,9 @@ class ReviewRejection(BaseModel):
 
 
 class KnowledgeRuleCreate(BaseModel):
-    knowledge_type: Literal["relevance", "analysis", "translation"]
+    knowledge_type: Literal[
+        "relevance", "analysis", "translation", "event_aggregation"
+    ]
     scope: str = "global"
     rule_text: str = Field(min_length=1)
     correction_data: dict[str, Any] = Field(default_factory=dict)
@@ -139,6 +141,7 @@ class KnowledgeRuleRead(BaseModel):
     rule_text: str
     correction_data: dict[str, Any]
     source_review_id: int | None
+    source_event_review_id: int | None
     version: int
     is_active: bool
     created_at: datetime

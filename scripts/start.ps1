@@ -189,7 +189,9 @@ foreach (
         "022_refine_reviewed_item_pipeline",
         "023_remove_deferred_event_reporting",
         "024_restore_production_ocr_profile",
-        "025_reset_item_processing_state"
+        "025_reset_item_processing_state",
+        "026_create_event_aggregation_v2",
+        "027_add_event_review_workflow"
     )
 ) {
     if ($appliedVersions -notcontains $migrationVersion) {

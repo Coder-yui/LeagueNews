@@ -72,3 +72,44 @@ export type PublishedItem = {
   media_extractions: PublishedMediaExtraction[];
   created_at: string;
 };
+
+export type EventSummary = {
+  id: number;
+  event_key: string | null;
+  title: string;
+  summary: string;
+  category: string;
+  status: string;
+  first_published_at: string | null;
+  last_published_at: string | null;
+  current_revision: number;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EventMessage = {
+  normalized_item_id: number;
+  relation_type: string;
+  source_published_at: string | null;
+  added_at: string;
+  title: string;
+  summary: string;
+  source_name: string;
+  source_url: string | null;
+};
+
+export type EventRevision = {
+  id: number;
+  revision: number;
+  title: string;
+  summary: string;
+  change_note: string;
+  evidence_snapshot: Record<string, unknown>;
+  created_at: string;
+};
+
+export type EventDetail = EventSummary & {
+  messages: EventMessage[];
+  revisions: EventRevision[];
+};

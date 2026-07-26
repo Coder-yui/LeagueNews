@@ -63,6 +63,9 @@ class KnowledgeRule(Base):
     source_review_id: Mapped[int | None] = mapped_column(
         ForeignKey("review_tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    source_event_review_id: Mapped[int | None] = mapped_column(
+        ForeignKey("event_review_tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     version: Mapped[int] = mapped_column(default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

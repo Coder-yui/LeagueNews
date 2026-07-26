@@ -242,6 +242,10 @@ class LLMClient:
             if isinstance(source, list):
                 if not isinstance(translated, list):
                     return f"{path_text} 应保持为数组"
+                if path and path[-1] == "changes":
+                    if not all(isinstance(item, str) for item in translated):
+                        return f"{path_text} 应为文本数组"
+                    return None
                 if len(source) != len(translated):
                     return (
                         f"{path_text} 数组长度发生变化："
@@ -324,8 +328,10 @@ class LLMClient:
             "保留英雄、装备、赛事、技能、数值和版本术语，不能删减事实。"
             "必须遵守 approved_rules 中经过人工审核的翻译规则，并优先采用 "
             "approved_glossary 中的标准术语。"
-            "结构化版本数据必须保持原 JSON 结构和 extraction_id，只翻译其中需要展示的"
-            "自然语言字符串，不得改动数字、运算符和字段名。结构化版本 entries 中的 "
+            "结构化版本数据必须保持原 JSON 结构、section/entry 对应关系和 extraction_id，"
+            "只翻译其中需要展示的自然语言字符串，不得改动数字、运算符和字段名。"
+            "changes 是同一条改动的文本分行，译文可以按中文表达需要合并或拆分行数，"
+            "但不得增删改动事实。结构化版本 entries 中的 "
             "target 是前端展示名称而不是不可变标识符：target_type 为 champion、item、"
             "rune 或 system 时，必须把英文 target 翻译成英雄联盟官方简体中文名称。"
             "必须忠实翻译 target 当前使用的称谓层级：名称翻译为对应名称，称号翻译为"

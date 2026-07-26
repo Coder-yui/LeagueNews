@@ -52,14 +52,10 @@ function BilingualPatchTable({
     <section className="bilingual-patch">
       <header className="bilingual-patch-head">
         <div>
-          <span>IMAGE OCR · REVIEWED</span>
           <h2>{translated.title ?? original.title ?? "版本改动"}</h2>
         </div>
         <div>
           {original.patch && <b>PATCH {original.patch}</b>}
-          {extraction.confidence !== null && (
-            <small>OCR {Math.round(extraction.confidence * 100)}%</small>
-          )}
         </div>
       </header>
       <div className="bilingual-column-labels" aria-hidden="true">
@@ -111,7 +107,7 @@ function BilingualPatchTable({
       })}
       {(original.warnings?.length ?? 0) > 0 && (
         <p className="bilingual-patch-warning">
-          OCR 提示：{original.warnings?.join("；")}
+          识别提示：{original.warnings?.join("；")}
         </p>
       )}
     </section>

@@ -357,39 +357,36 @@ def test_translation_retries_when_structured_target_keeps_english_name() -> None
     assert "target 未翻译" in retry_messages[-1]["content"]
 
 
-def test_translation_retries_when_structured_array_shape_changes() -> None:
-    def response(changes: list[str]) -> str:
-        return json.dumps(
-            {
-                "translated_title": "版本预览",
-                "translated_blocks": [],
-                "translated_summary": "版本预览。",
-                "translated_entities": [],
-                "translated_media_extractions": [
-                    {
-                        "extraction_id": 4,
-                        "translated_data": {
-                            "sections": [
-                                {
-                                    "entries": [
-                                        {
-                                            "target": "厄斐琉斯",
-                                            "target_type": "champion",
-                                            "changes": changes,
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        )
-
-    client, completions = _client_with_responses(
-        [response(["伤害提高。", "额外说明。"]), response(["伤害提高。"])]
+def test_translation_allows_structured_change_lines_to_split() -> None:
+    response = json.dumps(
+        {
+            "translated_title": "版本预览",
+            "translated_blocks": [],
+            "translated_summary": "版本预览。",
+            "translated_entities": [],
+            "translated_media_extractions": [
+                {
+                    "extraction_id": 4,
+                    "translated_data": {
+                        "sections": [
+                            {
+                                "entries": [
+                                    {
+                                        "target": "厄斐琉斯",
+                                        "target_type": "champion",
+                                        "changes": ["伤害提高。", "额外说明。"],
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+        ensure_ascii=False,
     )
+
+    client, completions = _client_with_responses([response])
 
     result = asyncio.run(
         client.translate(
@@ -420,10 +417,8 @@ def test_translation_retries_when_structured_array_shape_changes() -> None:
     )
 
     translated = result.translated_media_extractions[0].translated_data
-    assert len(translated["sections"][0]["entries"][0]["changes"]) == 1
-    assert len(completions.calls) == 2
-    retry_messages = completions.calls[1]["messages"]
-    assert "数组长度发生变化" in retry_messages[-1]["content"]
+    assert len(translated["sections"][0]["entries"][0]["changes"]) == 2
+    assert len(completions.calls) == 1
 
 
 def test_two_invalid_schema_responses_raise_unified_error() -> None:

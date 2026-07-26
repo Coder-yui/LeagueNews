@@ -15,6 +15,7 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
+from app.services.llm import AnalysisResult, LLMClient
 from app.services.media_ocr import OCRResult
 from app.services.patch_table import PatchTableResult
 from app.workflows.reviewed_pipeline import (
@@ -248,7 +249,7 @@ def test_deterministic_full_preview_keeps_reviewed_empty_changes() -> None:
     assert result.sections[0].entries[0].changes == []
 
 
-def test_approving_ocr_stages_extractions_then_moves_to_item_review(monkeypatch) -> None:
+def test_approving_ocr_stages_extractions_then_moves_to_translation_review(monkeypatch) -> None:
     structured_ids: list[int] = []
 
     def fake_structure(extraction, *, title):
@@ -256,14 +257,18 @@ def test_approving_ocr_stages_extractions_then_moves_to_item_review(monkeypatch)
         extraction.structured_data = {"title": title, "sections": []}
         return extraction
 
-    async def fake_generate_item_review(db, run):
-        assert run.current_stage == "item_analysis"
+    async def fake_generate_translation_review(db, run):
+        assert run.current_stage == "translation"
         assert run.context["approved_media_extraction_ids"] == structured_ids
         run.status = "awaiting_review"
         db.commit()
 
     monkeypatch.setattr(reviewed_pipeline, "structure_patch_extraction", fake_structure)
-    monkeypatch.setattr(reviewed_pipeline, "_generate_item_review", fake_generate_item_review)
+    monkeypatch.setattr(
+        reviewed_pipeline,
+        "_generate_translation_review",
+        fake_generate_translation_review,
+    )
 
     with _session() as db:
         raw = _raw_item(db)
@@ -312,30 +317,32 @@ def test_approving_ocr_stages_extractions_then_moves_to_item_review(monkeypatch)
 
         assert structured_ids == [extraction.id]
         assert review.status == "approved"
-        assert result.current_stage == "item_analysis"
+        assert result.current_stage == "translation"
         assert result.status == "awaiting_review"
 
 
-def test_approving_analysis_moves_to_translation_review(monkeypatch) -> None:
-    analysis_proposal = {
-        "normalized_title": "Patch 26.15 Preview",
-        "summary": "Patch preview from a designer.",
-        "entities": [
-            {"name": "26.15", "type": "patch"},
-            {"name": "Full Preview", "type": "document_type"},
+def test_approving_translation_moves_to_analysis_review(monkeypatch) -> None:
+    translation_proposal = {
+        "normalized_text": "Patch preview from a designer.",
+        "translated_title": "26.15版本预览",
+        "translated_text": "设计师发布版本预览。",
+        "translated_content_blocks": [
+            {"type": "paragraph", "text": "设计师发布版本预览。"}
         ],
+        "approved_media_extraction_ids": [],
+        "translated_media_extractions": [],
     }
 
-    async def fake_generate_translation_review(db, run):
-        assert run.current_stage == "translation"
-        assert run.context["approved_analysis_proposal"] == analysis_proposal
+    async def fake_generate_item_review(db, run):
+        assert run.current_stage == "item_analysis"
+        assert run.context["approved_translation_proposal"] == translation_proposal
         run.status = "awaiting_review"
         db.commit()
 
     monkeypatch.setattr(
         reviewed_pipeline,
-        "_generate_translation_review",
-        fake_generate_translation_review,
+        "_generate_item_review",
+        fake_generate_item_review,
     )
 
     with _session() as db:
@@ -344,25 +351,92 @@ def test_approving_analysis_moves_to_translation_review(monkeypatch) -> None:
             raw_item_id=raw.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="item_analysis",
+            current_stage="translation",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="item_analysis",
+            stage="translation",
             status="pending",
-            proposal=analysis_proposal,
+            proposal=translation_proposal,
         )
         db.add(review)
         db.commit()
 
-        result = asyncio.run(approve_review(db, review, note="分析通过"))
+        result = asyncio.run(approve_review(db, review, note="翻译通过"))
 
         assert review.status == "approved"
-        assert result.current_stage == "translation"
+        assert result.current_stage == "item_analysis"
         assert result.status == "awaiting_review"
         assert raw.normalized_item is None
+
+
+def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_analyze(_self, **payload):
+        captured.update(payload)
+        return AnalysisResult.model_validate(
+            {
+                "title": "26.15版本预览",
+                "summary": "厄斐琉斯将在新版本中获得增强。",
+                "category": "版本更新",
+                "entities": [
+                    {"name": "26.15", "type": "patch"},
+                    {"name": "版本预览", "type": "document_type"},
+                ],
+                "importance_score": 0.8,
+                "credibility": "official",
+                "credibility_score": 1.0,
+                "credibility_evidence": ["设计师官方账号"],
+            }
+        )
+
+    monkeypatch.setattr(LLMClient, "analyze", fake_analyze)
+    with _session() as db:
+        raw = _raw_item(db)
+        proposal = asyncio.run(
+            reviewed_pipeline._build_item_proposal(
+                raw_item=raw,
+                translation_proposal={
+                    "normalized_text": "Aphelios receives buffs.",
+                    "translated_title": "26.15版本预览",
+                    "translated_text": "厄斐琉斯获得增强。",
+                    "translated_content_blocks": [
+                        {"type": "paragraph", "text": "厄斐琉斯获得增强。"}
+                    ],
+                    "translated_media_extractions": [
+                        {
+                            "extraction_id": 3,
+                            "translated_data": {
+                                "sections": [
+                                    {
+                                        "entries": [
+                                            {
+                                                "target": "厄斐琉斯",
+                                                "target_type": "champion",
+                                                "changes": ["攻击力提高。"],
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                },
+                rules=["摘要只陈述已确认事实。"],
+            )
+        )
+
+    assert captured["title"] == "26.15版本预览"
+    assert "厄斐琉斯获得增强" in str(captured["content"])
+    assert "攻击力提高" in str(captured["content"])
+    assert "Aphelios receives buffs" not in str(captured["content"])
+    assert captured["knowledge_rules"] == ["摘要只陈述已确认事实。"]
+    assert "glossary" not in captured
+    assert proposal["summary"] == "厄斐琉斯将在新版本中获得增强。"
+    assert proposal["normalized_text"] == "Aphelios receives buffs."
 
 
 def test_translation_rejection_accepts_glossary_without_reason() -> None:
@@ -755,13 +829,13 @@ def test_approved_item_persists_translated_patch_data_as_relational_link() -> No
             raw_item_id=raw.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="translation",
+            current_stage="item_analysis",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="translation",
+            stage="item_analysis",
             status="pending",
             proposal={
                 "normalized_title": "26.15版本预览",

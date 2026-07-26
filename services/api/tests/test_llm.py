@@ -65,47 +65,6 @@ def test_analysis_result_rejects_more_than_five_entities() -> None:
         )
 
 
-def test_analysis_receives_approved_glossary() -> None:
-    response = json.dumps(
-        {
-            "title": "厄斐琉斯版本改动",
-            "summary": "厄斐琉斯获得增强。",
-            "category": "版本更新",
-            "entities": [{"name": "厄斐琉斯", "type": "champion"}],
-            "importance_score": 0.7,
-            "credibility": "official",
-            "credibility_score": 1.0,
-            "credibility_evidence": ["设计师官方账号"],
-        },
-        ensure_ascii=False,
-    )
-    client, completions = _client_with_responses([response])
-    glossary = [
-        {
-            "id": 7,
-            "source_term": "Aphelios",
-            "preferred_translation": "厄斐琉斯",
-            "forbidden_translations": ["残月之肃"],
-            "scope": "lol",
-        }
-    ]
-
-    result = asyncio.run(
-        client.analyze(
-            title="Aphelios patch changes",
-            content="Aphelios receives buffs.",
-            glossary=glossary,
-        )
-    )
-
-    assert result.summary == "厄斐琉斯获得增强。"
-    messages = completions.calls[0]["messages"]
-    assert isinstance(messages, list)
-    payload = json.loads(messages[1]["content"])
-    assert payload["approved_glossary"] == glossary
-    assert "preferred_translation" in messages[0]["content"]
-
-
 def test_language_detection() -> None:
     assert detect_language("Patch preview and balance changes") == "en"
     assert detect_language("版本更新与英雄平衡调整") == "zh-CN"
@@ -117,12 +76,10 @@ def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch
     async def fake_translate(_self, **payload):
         captured.update(payload)
         return TranslationResult.model_validate(
-            {
-                "translated_title": "版本预览",
-                "translated_blocks": [{"index": 0, "text": "正文"}],
-                "translated_summary": "版本调整摘要",
-                "translated_entities": [{"name": "亚托克斯", "type": "champion"}],
-                "translated_media_extractions": [
+                {
+                    "translated_title": "版本预览",
+                    "translated_blocks": [{"index": 0, "text": "正文"}],
+                    "translated_media_extractions": [
                     {
                         "extraction_id": 9,
                         "translated_data": {
@@ -155,9 +112,6 @@ def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch
     result = asyncio.run(
         build_translation(
             raw_item,
-            canonical_title="版本预览",
-            summary="版本调整摘要",
-            entities=[{"name": "Aatrox", "type": "champion"}],
             media_extractions=[extraction],
             rules=["未实装改动使用将来时。"],
         )
@@ -332,8 +286,6 @@ def test_translation_retries_when_structured_target_keeps_english_name() -> None
             {
                 "translated_title": "26.13版本完整预览",
                 "translated_blocks": [],
-                "translated_summary": "版本调整预览。",
-                "translated_entities": [],
                 "translated_media_extractions": [
                     {
                         "extraction_id": 9,
@@ -365,8 +317,6 @@ def test_translation_retries_when_structured_target_keeps_english_name() -> None
             title="Patch 26.13 Full Preview",
             text_blocks=[],
             source_language="en",
-            summary="Patch preview.",
-            entities=[],
             media_extractions=[
                 {
                     "extraction_id": 9,
@@ -403,8 +353,6 @@ def test_translation_allows_structured_change_lines_to_split() -> None:
         {
             "translated_title": "版本预览",
             "translated_blocks": [],
-            "translated_summary": "版本预览。",
-            "translated_entities": [],
             "translated_media_extractions": [
                 {
                     "extraction_id": 4,
@@ -434,8 +382,6 @@ def test_translation_allows_structured_change_lines_to_split() -> None:
             title="Patch preview",
             text_blocks=[],
             source_language="en",
-            summary="Patch preview.",
-            entities=[],
             media_extractions=[
                 {
                     "extraction_id": 4,

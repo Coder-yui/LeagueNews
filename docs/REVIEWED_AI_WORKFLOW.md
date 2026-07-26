@@ -18,11 +18,13 @@ RawItem
                  -> OCR + patch table extraction
                  -> human table correction / OCR review
                  -> deterministic patch structuring
-            -> AI item analysis
-            -> translate non-Chinese text and structured patch data
-            -> final item review
+            -> translate title, content blocks and structured patch data
+            -> translation + terminology review
+                 -> reject: rejected + translation rule or glossary term
+            -> analyze approved Chinese content
+            -> analysis + summary review
                  -> approve: NormalizedItem
-                 -> reject: rejected + analysis rule or glossary term
+                 -> reject: rejected + analysis rule
 ```
 
 “审核拒绝”不会删除审核、OCR 和知识记录；它只保证本次运行不产生正式
@@ -52,20 +54,26 @@ OCR -> 表格化提取 -> 人工修正表格 -> 最终确定性结构化
 人工修正会创建新的 `MediaExtraction`，不会覆盖原始提取。OCR 错误不进入通用
 AI 知识库；正确结果通过具体修订保存。
 
-### 分析和翻译
+### 翻译
 
-AI 生成：
+翻译阶段先于分析阶段。非中文内容会翻译标题、正文内容块以及已经结构化的版本
+改动数据；中文原文仍会形成一份 `not_required` 翻译审核草稿。结构化译文保持字段、
+数字、运算符和 section/entry 对应关系不变，`changes` 文本允许按中文表达拆行或合行。
+
+翻译审核只负责原文到中文内容的正确性。驳回时可以提交翻译规则、术语修正或两者，
+批准后的中文内容会固定到 ProcessingRun 上下文，作为下一阶段的唯一内容输入。
+
+### 分析与摘要
+
+分析阶段只读取已经通过人工审核的中文标题、中文正文和中文图片结构化数据，并生成：
 
 - 中文标准标题和摘要；
 - 分类和实体；
 - `importance_score`；
 - `credibility`、`credibility_score` 和 `credibility_evidence`。
 
-非中文内容会翻译标题、正文内容块、摘要、实体展示名称，以及已经结构化的版本
-改动数据。结构化译文保持字段、数字和运算符不变。
-
-分析与翻译组成同一个最终审核任务。人工批准后才写入正式结果；分析驳回产生
-`analysis` 知识规则，翻译驳回必须至少提交一个术语修正。
+分析阶段加载 `analysis` 类型知识规则，但不再加载术语表，也不再承担翻译。人工批准
+分析与摘要后才写入正式 `NormalizedItem`；分析驳回只产生 `analysis` 知识规则。
 
 ## 数据职责
 

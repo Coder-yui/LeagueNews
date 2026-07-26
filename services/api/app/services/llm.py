@@ -96,8 +96,6 @@ class TranslatedMediaExtraction(BaseModel):
 class TranslationResult(BaseModel):
     translated_title: str = Field(min_length=1, max_length=500)
     translated_blocks: list[TranslatedTextBlock] = Field(default_factory=list)
-    translated_summary: str = Field(min_length=1)
-    translated_entities: list[ExtractedEntity] = Field(max_length=5)
     translated_media_extractions: list[TranslatedMediaExtraction] = Field(default_factory=list)
 
 
@@ -155,7 +153,6 @@ class LLMClient:
         content: str,
         source_context: dict[str, object] | None = None,
         knowledge_rules: list[str] | None = None,
-        glossary: list[dict[str, object]] | None = None,
     ) -> AnalysisResult:
         prompt = (
             "你是英雄联盟中文新闻编辑。请分析输入资讯，只输出一个完整的 JSON 对象，"
@@ -167,8 +164,6 @@ class LLMClient:
             "实体只保留理解这条资讯最重要的 2 到 4 个，确有必要时最多 5 个；"
             "版本图片里批量出现的英雄或装备不要全部作为新闻实体；"
             "事实、专有名词原文和数值不得丢失。category 使用简短中文分类；"
-            "生成中文 title、summary 和 entities 时，必须优先采用 approved_glossary "
-            "中的 preferred_translation，禁止使用其中列出的 forbidden_translations；"
             "importance_score 必须为 0 到 1；credibility 只能是 official、"
             "corroborated、unverified、rumor；credibility_score 必须为 0 到 1；"
             "credibility_evidence 列出支撑可信度判断的简短依据。"
@@ -180,7 +175,6 @@ class LLMClient:
                 "content": content,
                 "source_context": source_context or {},
                 "approved_rules": knowledge_rules or [],
-                "approved_glossary": glossary or [],
             },
             max_tokens=1200,
             schema=AnalysisResult,
@@ -196,15 +190,12 @@ class LLMClient:
         target_language: str = "zh-CN",
         glossary: list[dict[str, object]] | None = None,
         knowledge_rules: list[str] | None = None,
-        summary: str,
-        entities: list[dict[str, str]],
         media_extractions: list[dict[str, object]] | None = None,
     ) -> TranslationResult:
         expected_indexes = {int(block["index"]) for block in text_blocks}
         expected_extraction_ids = {
             int(extraction["extraction_id"]) for extraction in media_extractions or []
         }
-        expected_entity_count = len(entities)
         source_extractions = {
             int(extraction["extraction_id"]): extraction.get("structured_data") or {}
             for extraction in media_extractions or []
@@ -287,12 +278,6 @@ class LLMClient:
                     f"expected={sorted(expected_extraction_ids)}, "
                     f"actual={sorted(actual_extraction_ids)}"
                 )
-            if len(result.translated_entities) != expected_entity_count:
-                return (
-                    "翻译前后实体数量不一致："
-                    f"expected={expected_entity_count}, "
-                    f"actual={len(result.translated_entities)}"
-                )
             translated_by_id = {
                 extraction.extraction_id: extraction.translated_data
                 for extraction in result.translated_media_extractions
@@ -344,7 +329,7 @@ class LLMClient:
             "“残月之肃”；若原文 target 本身是该称号，则应译为“残月之肃”。"
             "只输出完整 JSON，不要输出"
             "Markdown。translated_blocks 必须逐一返回输入中的每个 index；"
-            "translated_entities 必须与输入实体一一对应，不能增加或删除。"
+            "本阶段只翻译原始标题、正文块和图片结构化内容，不生成摘要、实体、分类或评分。"
         )
         return await self._validated_json_completion(
             prompt=prompt,
@@ -353,8 +338,6 @@ class LLMClient:
                 "target_language": target_language,
                 "title": title or "",
                 "text_blocks": text_blocks,
-                "summary": summary,
-                "entities": entities,
                 "media_extractions": media_extractions or [],
                 "approved_glossary": glossary or [],
                 "approved_rules": knowledge_rules or [],

@@ -703,9 +703,9 @@ function ReviewCard({
         >
           <Check size={14} />{" "}
           {review.stage === "item_analysis"
-            ? "批准分析，进入翻译审核"
+            ? "批准分析，完成处理"
             : review.stage === "translation"
-              ? "批准翻译，完成处理"
+              ? "批准翻译，进入分析审核"
             : review.stage === "image_ocr"
               ? "批准 OCR"
               : "批准"}

@@ -188,7 +188,8 @@ foreach (
         "021_remove_legacy_raw_item_identity_index",
         "022_refine_reviewed_item_pipeline",
         "023_remove_deferred_event_reporting",
-        "024_restore_production_ocr_profile"
+        "024_restore_production_ocr_profile",
+        "025_reset_item_processing_state"
     )
 ) {
     if ($appliedVersions -notcontains $migrationVersion) {

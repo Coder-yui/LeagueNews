@@ -462,14 +462,6 @@ function ReviewCard({
   const reviewExtractions = mediaExtractions.filter((extraction) =>
     approvedExtractionIds.includes(extraction.id),
   );
-  const structuredMediaResults = Array.isArray(review.proposal.media_extractions)
-    ? review.proposal.media_extractions
-    : [];
-  const translatedMediaResults = Array.isArray(
-    review.proposal.translated_media_extractions,
-  )
-    ? review.proposal.translated_media_extractions
-    : [];
   const defaultFeedbackType =
     review.stage === "relevance"
       ? "relevance_correction"
@@ -572,18 +564,6 @@ function ReviewCard({
           )}
           {itemReviewSection === "translation" && (
             <TranslationReview proposal={review.proposal} />
-          )}
-          {structuredMediaResults.length > 0 && (
-            <details className="review-json-details media-structure-details">
-              <summary>查看图片原始结构化结果</summary>
-              <pre>{JSON.stringify(structuredMediaResults, null, 2)}</pre>
-            </details>
-          )}
-          {translatedMediaResults.length > 0 && (
-            <details className="review-json-details media-structure-details">
-              <summary>查看图片结构化中文译文</summary>
-              <pre>{JSON.stringify(translatedMediaResults, null, 2)}</pre>
-            </details>
           )}
         </>
       ) : review.stage === "image_ocr" ? (
@@ -786,6 +766,14 @@ function AnalysisReview({ proposal }: { proposal: JsonObject }) {
 }
 
 function TranslationReview({ proposal }: { proposal: JsonObject }) {
+  const sourceStructures = Array.isArray(proposal.media_extractions)
+    ? proposal.media_extractions
+    : [];
+  const translatedStructures = Array.isArray(
+    proposal.translated_media_extractions,
+  )
+    ? proposal.translated_media_extractions
+    : [];
   return (
     <section className="translation-review">
       <div className="translation-meta">
@@ -807,6 +795,25 @@ function TranslationReview({ proposal }: { proposal: JsonObject }) {
           <p>{textValue(proposal.translated_text)}</p>
         </article>
       </div>
+      {sourceStructures.map((sourceStructure, index) => {
+        const translated = translatedStructures[index];
+        const translatedData =
+          translated && typeof translated === "object"
+            ? (translated as JsonObject).translated_data
+            : null;
+        return (
+          <div className="translation-columns" key={`patch-translation-${index}`}>
+            <article>
+              <span>版本图片结构化原文 {index + 1}</span>
+              <pre>{JSON.stringify(sourceStructure, null, 2)}</pre>
+            </article>
+            <article>
+              <span>版本图片结构化中文 {index + 1}</span>
+              <pre>{JSON.stringify(translatedData, null, 2)}</pre>
+            </article>
+          </div>
+        );
+      })}
     </section>
   );
 }

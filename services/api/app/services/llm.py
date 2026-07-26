@@ -26,7 +26,7 @@ class AnalysisResult(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     summary: str = Field(min_length=1)
     category: str = Field(min_length=1, max_length=60)
-    entities: list[ExtractedEntity]
+    entities: list[ExtractedEntity] = Field(max_length=5)
     importance_score: float = Field(ge=0, le=1)
     credibility: Literal["official", "corroborated", "unverified", "rumor"]
     credibility_score: float = Field(ge=0, le=1)
@@ -86,7 +86,7 @@ class TranslationResult(BaseModel):
     translated_title: str = Field(min_length=1, max_length=500)
     translated_blocks: list[TranslatedTextBlock] = Field(default_factory=list)
     translated_summary: str = Field(min_length=1)
-    translated_entities: list[ExtractedEntity]
+    translated_entities: list[ExtractedEntity] = Field(max_length=5)
     translated_media_extractions: list[TranslatedMediaExtraction] = Field(default_factory=list)
 
 
@@ -152,6 +152,8 @@ class LLMClient:
             "title、summary、category 和实体的展示名称必须使用简体中文；"
             "entities 必须是对象数组，每个对象严格使用 name、type、canonical_name "
             "三个键，禁止使用“英雄”“物品”等动态键；type 使用稳定英文类型；"
+            "实体只保留理解这条资讯最重要的 2 到 4 个，确有必要时最多 5 个；"
+            "版本图片里批量出现的英雄或装备不要全部作为新闻实体；"
             "事实、专有名词原文和数值不得丢失。category 使用简短中文分类；"
             "importance_score 必须为 0 到 1；credibility 只能是 official、"
             "corroborated、unverified、rumor；credibility_score 必须为 0 到 1；"
@@ -186,6 +188,7 @@ class LLMClient:
         expected_extraction_ids = {
             int(extraction["extraction_id"]) for extraction in media_extractions or []
         }
+        expected_entity_count = len(entities)
 
         def validate_indexes(result: TranslationResult) -> str | None:
             actual_indexes = {block.index for block in result.translated_blocks}
@@ -204,6 +207,12 @@ class LLMClient:
                     f"expected={sorted(expected_extraction_ids)}, "
                     f"actual={sorted(actual_extraction_ids)}"
                 )
+            if len(result.translated_entities) != expected_entity_count:
+                return (
+                    "翻译前后实体数量不一致："
+                    f"expected={expected_entity_count}, "
+                    f"actual={len(result.translated_entities)}"
+                )
             return None
 
         prompt = (
@@ -211,7 +220,8 @@ class LLMClient:
             "保留英雄、装备、赛事、技能、数值和版本术语，不能删减事实。"
             "结构化版本数据必须保持原 JSON 结构和 extraction_id，只翻译其中需要展示的"
             "自然语言字符串，不得改动数字、运算符和字段名。只输出完整 JSON，不要输出"
-            "Markdown。translated_blocks 必须逐一返回输入中的每个 index。"
+            "Markdown。translated_blocks 必须逐一返回输入中的每个 index；"
+            "translated_entities 必须与输入实体一一对应，不能增加或删除。"
         )
         return await self._validated_json_completion(
             prompt=prompt,

@@ -46,6 +46,25 @@ def test_analysis_result_accepts_complete_result() -> None:
     assert result.credibility_score == 0.98
 
 
+def test_analysis_result_rejects_more_than_five_entities() -> None:
+    with pytest.raises(ValueError, match="too_long"):
+        AnalysisResult.model_validate(
+            {
+                "title": "版本更新预告",
+                "summary": "官方公布调整方向。",
+                "category": "版本更新",
+                "entities": [
+                    {"name": f"实体{index}", "type": "champion"}
+                    for index in range(6)
+                ],
+                "importance_score": 0.8,
+                "credibility": "official",
+                "credibility_score": 0.98,
+                "credibility_evidence": ["来自官方账号"],
+            }
+        )
+
+
 def test_language_detection() -> None:
     assert detect_language("Patch preview and balance changes") == "en"
     assert detect_language("版本更新与英雄平衡调整") == "zh-CN"

@@ -58,7 +58,8 @@ ConnectorRequest
 `raw_item_source_payloads.payload` 是去除凭据和无关大字段后的 provenance/诊断快照，
 不是平台响应的逐字节归档。provider 和采集时间由表字段保存，不在 JSON 中重复。
 
-其余表均属于可丢弃、可重建的处理层。
+其余表不属于采集基座，但并非可随意清理。当前知识、术语、OCR 修订、审核记录和已批准
+`NormalizedItem` 都是后续开发的现有数据；除非用户另行明确要求，不得删除或重建。
 
 ## 增加新平台
 

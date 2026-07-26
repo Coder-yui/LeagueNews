@@ -314,7 +314,7 @@ def test_translation_retries_when_structured_target_keeps_english_name() -> None
         )
 
     client, completions = _client_with_responses(
-        [response("Aphelios"), response("残月之肃")]
+        [response("Aphelios"), response("厄斐琉斯")]
     )
 
     result = asyncio.run(
@@ -346,8 +346,11 @@ def test_translation_retries_when_structured_target_keeps_english_name() -> None
     )
 
     translated = result.translated_media_extractions[0].translated_data
-    assert translated["sections"][0]["entries"][0]["target"] == "残月之肃"
+    assert translated["sections"][0]["entries"][0]["target"] == "厄斐琉斯"
     assert len(completions.calls) == 2
+    initial_messages = completions.calls[0]["messages"]
+    assert "必须忠实翻译 target 当前使用的称谓层级" in initial_messages[0]["content"]
+    assert "若原文 target 本身是该称号，则应译为“残月之肃”" in initial_messages[0]["content"]
     retry_messages = completions.calls[1]["messages"]
     assert "target 未翻译" in retry_messages[-1]["content"]
 

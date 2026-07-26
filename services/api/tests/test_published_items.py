@@ -1,8 +1,14 @@
+from datetime import UTC, datetime
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
-from app.api.routes.normalized_items import _published_payload, _published_statement
+from app.api.routes.normalized_items import (
+    _published_payload,
+    _published_statement,
+    list_published_items,
+)
 from app.core.database import Base
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
@@ -150,3 +156,81 @@ def test_published_payload_combines_reviewed_item_source_and_bilingual_ocr() -> 
             ]
             == "厄斐琉斯"
         )
+
+
+def test_published_items_order_by_original_publish_time_with_ingestion_fallback() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Test Source", connector_type="x_twitter")
+        db.add(source)
+        db.flush()
+
+        def add_item(
+            *,
+            external_id: str,
+            published_at: datetime | None,
+            ingested_at: datetime,
+        ) -> RawItem:
+            raw = RawItem(
+                source_id=source.id,
+                external_id=external_id,
+                native_title=external_id,
+                content_blocks=[{"type": "paragraph", "text": external_id}],
+                published_at=published_at,
+                ingested_at=ingested_at,
+            )
+            db.add(raw)
+            db.flush()
+            db.add(
+                NormalizedItem(
+                    raw_item_id=raw.id,
+                    normalized_title=external_id,
+                    normalized_text=external_id,
+                    summary=external_id,
+                    category="测试",
+                    entities=[],
+                    importance_score=0.5,
+                    credibility="unverified",
+                    credibility_score=0.5,
+                    credibility_evidence=[],
+                    language="zh-CN",
+                    source_language="zh-CN",
+                    target_language="zh-CN",
+                    translated_title=external_id,
+                    translated_text=external_id,
+                    translated_content_blocks=[
+                        {"type": "paragraph", "text": external_id}
+                    ],
+                    translation_status="not_required",
+                    translation_model=None,
+                    analysis_model="test",
+                    analysis_version="test",
+                )
+            )
+            return raw
+
+        older = add_item(
+            external_id="older",
+            published_at=datetime(2026, 7, 1, tzinfo=UTC),
+            ingested_at=datetime(2026, 7, 5, tzinfo=UTC),
+        )
+        fallback = add_item(
+            external_id="fallback",
+            published_at=None,
+            ingested_at=datetime(2026, 7, 2, tzinfo=UTC),
+        )
+        newest = add_item(
+            external_id="newest",
+            published_at=datetime(2026, 7, 3, tzinfo=UTC),
+            ingested_at=datetime(2026, 7, 4, tzinfo=UTC),
+        )
+        db.commit()
+
+        payloads = list_published_items(db)
+
+        assert [payload["raw_item_id"] for payload in payloads] == [
+            newest.id,
+            fallback.id,
+            older.id,
+        ]

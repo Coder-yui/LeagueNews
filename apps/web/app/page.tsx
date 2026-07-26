@@ -65,7 +65,7 @@ export default async function Home() {
       <section id="messages" className="events-section">
         <div className="section-heading">
           <div><span className="kicker">REVIEWED STREAM</span><h2>已审核消息</h2></div>
-          <span>按完成时间排序</span>
+          <span>按原始发布时间排序</span>
         </div>
         <MessageFeed items={items} />
       </section>

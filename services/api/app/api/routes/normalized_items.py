@@ -1,7 +1,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
@@ -20,7 +20,7 @@ def list_normalized_items(db: Session = Depends(get_db)) -> list[NormalizedItem]
 
 
 def _published_statement():
-    return select(NormalizedItem).options(
+    return select(NormalizedItem).join(NormalizedItem.raw_item).options(
         selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
         selectinload(NormalizedItem.media_links)
         .selectinload(NormalizedItemMediaExtraction.media_extraction)
@@ -85,7 +85,8 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
 @router.get("/published", response_model=list[PublishedItemRead])
 def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     statement = _published_statement().order_by(
-        NormalizedItem.created_at.desc()
+        func.coalesce(RawItem.published_at, RawItem.ingested_at).desc(),
+        NormalizedItem.id.desc(),
     ).limit(100)
     return [_published_payload(item) for item in db.scalars(statement)]
 

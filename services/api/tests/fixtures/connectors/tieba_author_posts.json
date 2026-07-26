@@ -1,0 +1,59 @@
+{
+  "pages": [
+    {
+      "has_more": true,
+      "posts": [
+        {
+          "pid": 160000000001,
+          "author_id": 86124184,
+          "floor": 1,
+          "create_time": 1784860200,
+          "reply_num": 2,
+          "agree": 12,
+          "fragments": [
+            {"kind": "text", "text": "首楼正文"},
+            {
+              "kind": "image",
+              "origin_src": "https://imgsa.baidu.com/forum/pic/item/example.jpg"
+            },
+            {
+              "kind": "link",
+              "text": "活动页面",
+              "title": "活动页面",
+              "url": "https://lol.qq.com/example"
+            }
+          ]
+        },
+        {
+          "pid": 160000000099,
+          "author_id": 999,
+          "floor": 2,
+          "create_time": 1784860300,
+          "reply_num": 0,
+          "agree": 0,
+          "fragments": [{"kind": "text", "text": "其他用户内容"}]
+        }
+      ]
+    },
+    {
+      "has_more": false,
+      "posts": [
+        {
+          "pid": 160000000003,
+          "author_id": 86124184,
+          "floor": 3,
+          "create_time": 1784860400,
+          "reply_num": 0,
+          "agree": 3,
+          "fragments": [
+            {"kind": "text", "text": "楼主补充内容"},
+            {
+              "kind": "video",
+              "src": "https://tieba.baidu.com/video/example"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "status": 1,
+  "msg": "OK",
+  "data": {
+    "result": {
+      "iDocID": "1566318436975419583",
+      "sTitle": "首届海斗大赛",
+      "sAuthor": "英雄联盟官方",
+      "sCreated": "2026-07-03 17:04:57",
+      "sContent": "<p>图片之前的段落。</p><p><img data-src=\"//static.gametalk.qq.com/a.png\"></p><p>图片之后的段落。</p><iframe src=\"https://v.qq.com/txp/iframe/player.html?vid=abc\" title=\"赛事视频\"></iframe>",
+      "iComment": "secret-tracking-value",
+      "sDesc": "赛事说明"
+    }
+  }
+}

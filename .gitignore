@@ -1,0 +1,33 @@
+# Environment and secrets
+.env
+*.env.local
+
+# JavaScript
+node_modules/
+.pnpm-store/
+.pnpm-home/
+.next/
+out/
+pnpm-debug.log*
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv-cache/
+.pytest_cache/
+.pytest-tmp/
+.ruff_cache/
+.run/
+.secrets/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data
+postgres_data/
+apps/web/public/media/

@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "LoL Daily Intel",
+      "Group": "Local development",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "lol_daily_intel",
+      "Username": "lol",
+      "SSLMode": "prefer"
+    }
+  }
+}

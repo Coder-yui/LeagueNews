@@ -1,0 +1,28 @@
+[
+  {
+    "id": 1945200000000000000,
+    "id_str": "1945200000000000000",
+    "url": "https://x.com/RiotPhroxzon/status/1945200000000000000",
+    "date": "2026-07-14T15:00:00+00:00",
+    "lang": "en",
+    "rawContent": "Gameplay update with full text.",
+    "user": {
+      "username": "RiotPhroxzon",
+      "displayname": "Matt Leung-Harrison"
+    },
+    "media": {
+      "photos": [
+        {
+          "url": "https://pbs.twimg.com/media/example.jpg",
+          "altText": "A balance-change chart"
+        }
+      ],
+      "videos": []
+    },
+    "quotedTweet": {
+      "id_str": "1945100000000000000",
+      "url": "https://x.com/LeagueOfLegends/status/1945100000000000000"
+    },
+    "cookies": "must never be retained"
+  }
+]

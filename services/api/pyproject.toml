@@ -1,0 +1,44 @@
+[project]
+name = "lol-daily-intel-api"
+version = "0.1.0"
+description = "FastAPI backend for LoL Daily Intel"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "openai>=1.60,<3",
+  "onnxruntime>=1.22,<2",
+  "opencv-python>=4.11,<5.1",
+  "pillow>=11,<13",
+  "playwright>=1.54,<2",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic-settings>=2.7,<3",
+  "rapidocr>=3.4,<4",
+  "selectolax>=0.3.32,<1",
+  "sqlalchemy>=2.0,<3",
+  "trafilatura>=2.0,<3",
+  "twscrape>=0.17,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "aiotieba>=4.7,<5",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<9",
+  "ruff>=0.9,<1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

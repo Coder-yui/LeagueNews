@@ -1,0 +1,39 @@
+{
+  "ok": 1,
+  "data": {
+    "list": [
+      {
+          "mid": "5190000000000001",
+          "mblogid": "PxExample",
+          "created_at": "Fri Jul 24 10:30:00 +0800 2026",
+          "text_raw": "短微博内容\n第二行",
+          "isLongText": true,
+          "user": {
+            "id": 5756404150,
+            "screen_name": "英雄联盟赛事"
+          },
+          "pic_ids": ["example.jpg"],
+          "page_info": {
+            "object_type": "video",
+            "page_title": "比赛视频",
+            "page_url": "https://weibo.com/tv/show/example"
+          },
+          "url_struct": [
+            {
+              "url_title": "微博投票",
+              "long_url": "https://vote.weibo.com/example"
+            }
+          ],
+          "retweeted_status": {
+            "mid": "5189999999999999",
+            "mblogid": "QuotedBid",
+            "text_raw": "原微博正文",
+            "user": {
+              "id": 5720474518,
+              "screen_name": "英雄联盟"
+            }
+          }
+      }
+    ]
+  }
+}

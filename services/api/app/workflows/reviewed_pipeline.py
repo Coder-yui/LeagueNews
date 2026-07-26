@@ -24,6 +24,7 @@ from app.workflows.understand_media import (
 RELEVANCE_STAGE = "relevance"
 OCR_STAGE = "image_ocr"
 ITEM_STAGE = "item_analysis"
+TRANSLATION_STAGE = "translation"
 
 OFFICIAL_CONNECTORS = {"riot_official", "tencent_lol"}
 OFFICIAL_ACCOUNTS = {
@@ -112,6 +113,8 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
         await _generate_ocr_review(db, restarted)
     elif restarted.current_stage == ITEM_STAGE:
         await _generate_item_review(db, restarted)
+    elif restarted.current_stage == TRANSLATION_STAGE:
+        await _generate_translation_review(db, restarted)
     else:
         raise ValueError(f"unsupported restart stage: {restarted.current_stage}")
     return restarted
@@ -168,6 +171,15 @@ async def approve_review(
         db.commit()
         await _generate_item_review(db, run)
     elif review.stage == ITEM_STAGE:
+        run.context = {
+            **run.context,
+            "approved_analysis_proposal": review.proposal,
+        }
+        run.status = "running"
+        run.current_stage = TRANSLATION_STAGE
+        db.commit()
+        await _generate_translation_review(db, run)
+    elif review.stage == TRANSLATION_STAGE:
         _apply_normalized_item(db, run.raw_item, review.proposal)
         run.status = "completed"
         run.outcome = "approved"
@@ -377,7 +389,6 @@ async def _generate_item_review(db: Session, run: ProcessingRun) -> None:
         proposal = await _build_item_proposal(
             raw_item=run.raw_item,
             media_extractions=media_extractions,
-            glossary=_glossary_payload(db),
             rules=_knowledge_texts(db, "analysis", run.raw_item),
         )
         _replace_pending_review(db, run=run, stage=ITEM_STAGE, proposal=proposal)
@@ -391,7 +402,6 @@ async def _build_item_proposal(
     *,
     raw_item: RawItem,
     media_extractions: list[MediaExtraction],
-    glossary: list[dict[str, object]],
     rules: list[str],
     ocr_corrections: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
@@ -409,45 +419,78 @@ async def _build_item_proposal(
         source_context=_source_context(raw_item),
         knowledge_rules=rules,
     )
-    analysis_entities = [
-        entity.model_dump(mode="json") for entity in analysis.entities
-    ]
-    translation = await build_translation(
-        raw_item,
-        canonical_title=analysis.title,
-        summary=analysis.summary,
-        entities=analysis_entities,
-        media_extractions=media_extractions,
-        glossary=glossary,
-    )
     return {
-        "normalized_title": translation.translated_title,
+        "normalized_title": analysis.title,
         "normalized_text": source_text,
-        "summary": translation.translated_summary,
+        "summary": analysis.summary,
         "category": analysis.category,
-        "entities": _normalize_entities(translation.translated_entities),
+        "entities": _normalize_entities(
+            [entity.model_dump(mode="json") for entity in analysis.entities]
+        ),
         "importance_score": analysis.importance_score,
         "credibility": analysis.credibility,
         "credibility_score": analysis.credibility_score,
         "credibility_evidence": analysis.credibility_evidence,
         "language": raw_item.language,
-        "source_language": translation.source_language,
-        "target_language": translation.target_language,
-        "translated_title": translation.translated_title,
-        "translated_text": translation.translated_text,
-        "translated_content_blocks": translation.translated_content_blocks,
-        "translation_status": translation.translation_status,
-        "translation_model": translation.translation_model,
         "analysis_model": settings.model_name,
         "analysis_version": "v4-reviewed-item",
         "approved_media_extraction_ids": [item.id for item in media_extractions],
         "media_extractions": structured_context,
-        "translated_media_extractions": translation.translated_media_extractions,
         "ocr_corrections": ocr_corrections or [],
-        "glossary_term_ids": [
-            int(term["id"]) for term in glossary if isinstance(term.get("id"), int)
-        ],
     }
+
+
+async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
+    try:
+        analysis_proposal = run.context.get("approved_analysis_proposal")
+        if not isinstance(analysis_proposal, dict):
+            raise ValueError("translation stage requires an approved analysis proposal")
+        extraction_ids = _extraction_ids(analysis_proposal)
+        media_extractions = list(
+            db.scalars(
+                select(MediaExtraction)
+                .where(MediaExtraction.id.in_(extraction_ids))
+                .order_by(MediaExtraction.id)
+            )
+        )
+        glossary = _glossary_payload(db)
+        translation = await build_translation(
+            run.raw_item,
+            canonical_title=str(analysis_proposal["normalized_title"]),
+            summary=str(analysis_proposal["summary"]),
+            entities=list(analysis_proposal.get("entities") or []),
+            media_extractions=media_extractions,
+            glossary=glossary,
+        )
+        proposal = {
+            **analysis_proposal,
+            "normalized_title": translation.translated_title,
+            "summary": translation.translated_summary,
+            "entities": _normalize_entities(translation.translated_entities),
+            "source_language": translation.source_language,
+            "target_language": translation.target_language,
+            "translated_title": translation.translated_title,
+            "translated_text": translation.translated_text,
+            "translated_content_blocks": translation.translated_content_blocks,
+            "translation_status": translation.translation_status,
+            "translation_model": translation.translation_model,
+            "translated_media_extractions": translation.translated_media_extractions,
+            "glossary_term_ids": [
+                int(term["id"])
+                for term in glossary
+                if isinstance(term.get("id"), int)
+            ],
+        }
+        _replace_pending_review(
+            db,
+            run=run,
+            stage=TRANSLATION_STAGE,
+            proposal=proposal,
+        )
+        db.commit()
+    except Exception as exc:
+        _mark_failed(db, run, exc)
+        raise
 
 
 def _apply_normalized_item(
@@ -541,7 +584,8 @@ def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
     allowed = {
         RELEVANCE_STAGE: {"relevance_correction"},
         OCR_STAGE: {"ocr_error"},
-        ITEM_STAGE: {"analysis_correction", "translation_term"},
+        ITEM_STAGE: {"analysis_correction"},
+        TRANSLATION_STAGE: {"translation_term"},
     }
     if payload.feedback_type not in allowed.get(stage, set()):
         raise ValueError(

@@ -6,7 +6,6 @@ import {
   BookOpenCheck,
   Check,
   FileClock,
-  Languages,
   LoaderCircle,
   Play,
   RefreshCw,
@@ -169,15 +168,24 @@ type OCRProfile = {
 };
 
 type Tab = "items" | "reviews" | "ocr" | "knowledge";
-type ItemReviewSection = "analysis" | "translation";
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
 const stageLabels: Record<string, string> = {
   relevance: "相关性审核",
   image_ocr: "图片 OCR 审核",
-  item_analysis: "翻译与单条分析审核",
+  item_analysis: "分析与摘要审核",
+  translation: "翻译与术语审核",
 };
+
+function latestRunsByRawItem(runs: ProcessingRun[]): ProcessingRun[] {
+  const latest = new Map<number, ProcessingRun>();
+  for (const run of runs) {
+    const current = latest.get(run.raw_item_id);
+    if (!current || run.id > current.id) latest.set(run.raw_item_id, run);
+  }
+  return Array.from(latest.values());
+}
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
@@ -266,7 +274,8 @@ export function AdminConsole() {
     () => ({
       pending: rawItems.filter((item) => item.processing_status === "pending").length,
       reviews: reviews.length,
-      retry: runs.filter((run) => ["failed", "rejected"].includes(run.status)).length,
+      retry: latestRunsByRawItem(runs)
+        .filter((run) => ["failed", "rejected"].includes(run.status)).length,
       knowledge: rules.filter((rule) => rule.is_active).length + terms.filter((term) => term.is_active).length,
     }),
     [rawItems, reviews, runs, rules, terms],
@@ -348,7 +357,8 @@ function ItemsPanel({
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
-  const retryRuns = runs.filter((run) => ["failed", "rejected"].includes(run.status));
+  const retryRuns = latestRunsByRawItem(runs)
+    .filter((run) => ["failed", "rejected"].includes(run.status));
   return (
     <section className="admin-panel">
       {retryRuns.length > 0 && (
@@ -467,8 +477,9 @@ function ReviewCard({
       ? "relevance_correction"
       : review.stage === "image_ocr"
         ? "ocr_error"
-        : "analysis_correction";
-  const [itemReviewSection, setItemReviewSection] = useState<ItemReviewSection>("analysis");
+        : review.stage === "translation"
+          ? "translation_term"
+          : "analysis_correction";
   const [reason, setReason] = useState("");
   const [sourceTerm, setSourceTerm] = useState("");
   const [translation, setTranslation] = useState("");
@@ -477,13 +488,6 @@ function ReviewCard({
   const updateOCRDraft = useCallback((draft: OCRCorrectionDraft) => {
     setOcrDrafts((current) => ({ ...current, [draft.extractionId]: draft }));
   }, []);
-  const selectItemReviewSection = (section: ItemReviewSection) => {
-    setItemReviewSection(section);
-    setFeedbackType(
-      section === "translation" ? "translation_term" : "analysis_correction",
-    );
-    setReason("");
-  };
   const learnsRule = [
     "relevance_correction",
     "analysis_correction",
@@ -512,19 +516,6 @@ function ReviewCard({
   const ocrActionKey = changedOCRDraft
     ? `correct-ocr-${review.id}-${changedOCRDraft.extractionId}`
     : `correct-ocr-${review.id}`;
-  const approveItemReview = () => {
-    void act(
-      `approve-${review.id}`,
-      () => api(`/workflows/reviews/${review.id}/approve`, {
-        method: "POST",
-        body: JSON.stringify({ note: null }),
-      }),
-      "审核已批准，正式数据或下一审核阶段已生成",
-    );
-  };
-  const sectionApprovalDisabled =
-    changedOCRDrafts.length > 0 ||
-    busy === `approve-${review.id}`;
   return (
     <article className="review-card">
       <div className="review-heading">
@@ -535,37 +526,9 @@ function ReviewCard({
         <b>等待确认</b>
       </div>
       {review.stage === "item_analysis" ? (
-        <>
-          <div className="review-section-tabs two-sections" role="tablist" aria-label="审核项目">
-            <button
-              className={itemReviewSection === "analysis" ? "active" : ""}
-              type="button"
-              role="tab"
-              aria-selected={itemReviewSection === "analysis"}
-              onClick={() => selectItemReviewSection("analysis")}
-            >
-              <BookOpenCheck size={15} />
-              <span><b>01</b> 分析与摘要</span>
-            </button>
-            <button
-              className={itemReviewSection === "translation" ? "active" : ""}
-              type="button"
-              role="tab"
-              aria-selected={itemReviewSection === "translation"}
-              onClick={() => selectItemReviewSection("translation")}
-            >
-              <Languages size={15} />
-              <span><b>02</b> 翻译与术语</span>
-            </button>
-          </div>
-
-          {itemReviewSection === "analysis" && (
-            <AnalysisReview proposal={review.proposal} />
-          )}
-          {itemReviewSection === "translation" && (
-            <TranslationReview proposal={review.proposal} />
-          )}
-        </>
+        <AnalysisReview proposal={review.proposal} />
+      ) : review.stage === "translation" ? (
+        <TranslationReview proposal={review.proposal} />
       ) : review.stage === "image_ocr" ? (
         <>
           {reviewExtractions.map((extraction) => (
@@ -584,15 +547,15 @@ function ReviewCard({
       )}
       {review.stage !== "image_ocr" && (
         <div className="review-form">
-          {review.stage === "item_analysis" ? (
+          {["item_analysis", "translation"].includes(review.stage) ? (
           <div className="review-feedback-context">
             <strong>
-              {feedbackType === "translation_term"
+              {review.stage === "translation"
                   ? "翻译术语修正"
                   : "分析与摘要修正"}
             </strong>
             <span>
-              {feedbackType === "translation_term"
+              {review.stage === "translation"
                   ? "填写错误原词和标准译名，退回后会更新术语表。"
                   : "说明分析、分类或摘要的问题，退回后会沉淀为分析规则。"}
             </span>
@@ -623,7 +586,7 @@ function ReviewCard({
           )}
         </div>
       )}
-      {review.stage === "item_analysis" && (
+      {["item_analysis", "translation"].includes(review.stage) && (
         <details className="review-json-details">
           <summary>查看完整审核草稿 JSON</summary>
           <pre>{JSON.stringify(review.proposal, null, 2)}</pre>
@@ -634,17 +597,11 @@ function ReviewCard({
           className="approve"
           type="button"
           disabled={
-            review.stage === "item_analysis"
-              ? sectionApprovalDisabled
-              : changedOCRDrafts.length > 0 ||
-                invalidOCRDrafts.length > 0 ||
-                busy === `approve-${review.id}`
+            changedOCRDrafts.length > 0 ||
+            invalidOCRDrafts.length > 0 ||
+            busy === `approve-${review.id}`
           }
           onClick={() => {
-            if (review.stage === "item_analysis") {
-              approveItemReview();
-              return;
-            }
             void act(
               `approve-${review.id}`,
               () => api(`/workflows/reviews/${review.id}/approve`, {
@@ -657,7 +614,9 @@ function ReviewCard({
         >
           <Check size={14} />{" "}
           {review.stage === "item_analysis"
-            ? "批准完整处理结果"
+            ? "批准分析，进入翻译审核"
+            : review.stage === "translation"
+              ? "批准翻译，完成处理"
             : review.stage === "image_ocr"
               ? "批准 OCR"
               : "批准"}

@@ -316,7 +316,28 @@ def test_approving_ocr_stages_extractions_then_moves_to_item_review(monkeypatch)
         assert result.status == "awaiting_review"
 
 
-def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> None:
+def test_approving_analysis_moves_to_translation_review(monkeypatch) -> None:
+    analysis_proposal = {
+        "normalized_title": "Patch 26.15 Preview",
+        "summary": "Patch preview from a designer.",
+        "entities": [
+            {"name": "26.15", "type": "patch"},
+            {"name": "Full Preview", "type": "document_type"},
+        ],
+    }
+
+    async def fake_generate_translation_review(db, run):
+        assert run.current_stage == "translation"
+        assert run.context["approved_analysis_proposal"] == analysis_proposal
+        run.status = "awaiting_review"
+        db.commit()
+
+    monkeypatch.setattr(
+        reviewed_pipeline,
+        "_generate_translation_review",
+        fake_generate_translation_review,
+    )
+
     with _session() as db:
         raw = _raw_item(db)
         run = ProcessingRun(
@@ -330,6 +351,34 @@ def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> N
         review = ReviewTask(
             processing_run_id=run.id,
             stage="item_analysis",
+            status="pending",
+            proposal=analysis_proposal,
+        )
+        db.add(review)
+        db.commit()
+
+        result = asyncio.run(approve_review(db, review, note="分析通过"))
+
+        assert review.status == "approved"
+        assert result.current_stage == "translation"
+        assert result.status == "awaiting_review"
+        assert raw.normalized_item is None
+
+
+def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> None:
+    with _session() as db:
+        raw = _raw_item(db)
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="awaiting_review",
+            current_stage="translation",
+        )
+        db.add(run)
+        db.flush()
+        review = ReviewTask(
+            processing_run_id=run.id,
+            stage="translation",
             status="pending",
             proposal={"translated_title": "错误译文"},
         )
@@ -586,7 +635,9 @@ def test_relevance_rejection_ends_run_and_creates_knowledge() -> None:
         assert rule.knowledge_type == "relevance"
 
 
-@pytest.mark.parametrize("stage", ["relevance", "image_ocr", "item_analysis"])
+@pytest.mark.parametrize(
+    "stage", ["relevance", "image_ocr", "item_analysis", "translation"]
+)
 def test_restart_continues_from_rejected_stage(monkeypatch, stage: str) -> None:
     generated_stages: list[str] = []
 
@@ -598,6 +649,7 @@ def test_restart_continues_from_rejected_stage(monkeypatch, stage: str) -> None:
     monkeypatch.setattr(reviewed_pipeline, "_generate_relevance_review", fake_review)
     monkeypatch.setattr(reviewed_pipeline, "_generate_ocr_review", fake_review)
     monkeypatch.setattr(reviewed_pipeline, "_generate_item_review", fake_review)
+    monkeypatch.setattr(reviewed_pipeline, "_generate_translation_review", fake_review)
     with _session() as db:
         raw = _raw_item(db)
         old_run = ProcessingRun(
@@ -653,13 +705,13 @@ def test_approved_item_persists_translated_patch_data_as_relational_link() -> No
             raw_item_id=raw.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="item_analysis",
+            current_stage="translation",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="item_analysis",
+            stage="translation",
             status="pending",
             proposal={
                 "normalized_title": "26.15版本预览",

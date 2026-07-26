@@ -70,7 +70,7 @@ class RelevanceResult(BaseModel):
 
 
 class OrganizedKnowledgeRule(BaseModel):
-    knowledge_type: Literal["relevance", "analysis"]
+    knowledge_type: Literal["relevance", "analysis", "translation"]
     scope: str = Field(min_length=1, max_length=160)
     rule_text: str = Field(min_length=1, max_length=1000)
     source_rule_ids: list[int] = Field(min_length=1)
@@ -191,6 +191,7 @@ class LLMClient:
         source_language: str,
         target_language: str = "zh-CN",
         glossary: list[dict[str, object]] | None = None,
+        knowledge_rules: list[str] | None = None,
         summary: str,
         entities: list[dict[str, str]],
         media_extractions: list[dict[str, object]] | None = None,
@@ -273,6 +274,8 @@ class LLMClient:
         prompt = (
             "你是英雄联盟专业本地化编辑。将输入内容准确翻译为简体中文，"
             "保留英雄、装备、赛事、技能、数值和版本术语，不能删减事实。"
+            "必须遵守 approved_rules 中经过人工审核的翻译规则，并优先采用 "
+            "approved_glossary 中的标准术语。"
             "结构化版本数据必须保持原 JSON 结构和 extraction_id，只翻译其中需要展示的"
             "自然语言字符串，不得改动数字、运算符和字段名。结构化版本 entries 中的 "
             "target 是前端展示名称而不是不可变标识符：target_type 为 champion、item、"
@@ -296,6 +299,7 @@ class LLMClient:
                 "entities": entities,
                 "media_extractions": media_extractions or [],
                 "approved_glossary": glossary or [],
+                "approved_rules": knowledge_rules or [],
             },
             max_tokens=8000,
             schema=TranslationResult,

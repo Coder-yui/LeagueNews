@@ -218,13 +218,24 @@ def reject_review(
                     else "analysis"
                 ),
                 scope=payload.knowledge_scope,
-                rule_text=payload.knowledge_rule or payload.reason,
+                rule_text=payload.knowledge_rule or payload.reason or "",
                 correction_data=payload.corrected_values,
                 source_review_id=review.id,
                 is_active=True,
             )
         )
-    elif payload.feedback_type == "translation_term":
+    elif payload.feedback_type in {"translation_term", "translation_correction"}:
+        if payload.reason:
+            db.add(
+                KnowledgeRule(
+                    knowledge_type="translation",
+                    scope=payload.knowledge_scope,
+                    rule_text=payload.reason,
+                    correction_data=payload.corrected_values,
+                    source_review_id=review.id,
+                    is_active=True,
+                )
+            )
         for correction in payload.glossary_updates:
             db.add(
                 GlossaryTerm(
@@ -461,6 +472,7 @@ async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
             entities=list(analysis_proposal.get("entities") or []),
             media_extractions=media_extractions,
             glossary=glossary,
+            rules=_knowledge_texts(db, "translation", run.raw_item),
         )
         proposal = {
             **analysis_proposal,
@@ -585,14 +597,18 @@ def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
         RELEVANCE_STAGE: {"relevance_correction"},
         OCR_STAGE: {"ocr_error"},
         ITEM_STAGE: {"analysis_correction"},
-        TRANSLATION_STAGE: {"translation_term"},
+        TRANSLATION_STAGE: {"translation_term", "translation_correction"},
     }
     if payload.feedback_type not in allowed.get(stage, set()):
         raise ValueError(
             f"feedback_type={payload.feedback_type} is invalid for stage={stage}"
         )
-    if payload.feedback_type == "translation_term" and not payload.glossary_updates:
-        raise ValueError("translation rejection requires at least one glossary update")
+    if (
+        payload.feedback_type in {"translation_term", "translation_correction"}
+        and not payload.reason
+        and not payload.glossary_updates
+    ):
+        raise ValueError("translation rejection requires a reason or glossary update")
 
 
 def _extraction_ids(payload: dict[str, Any]) -> list[int]:

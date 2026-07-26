@@ -38,6 +38,7 @@ async def build_translation(
     entities: list[dict[str, str]],
     media_extractions: list[MediaExtraction],
     glossary: list[dict[str, object]] | None = None,
+    rules: list[str] | None = None,
 ) -> TranslationData:
     source_text = text_from_content_blocks(raw_item.content_blocks)
     source_language = raw_item.language or detect_language(source_text)
@@ -91,6 +92,7 @@ async def build_translation(
         source_language=source_language,
         target_language=target_language,
         glossary=glossary,
+        knowledge_rules=rules,
         summary=summary,
         entities=entities,
         media_extractions=[

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ProcessingRunRead(BaseModel):
@@ -94,17 +94,29 @@ class ReviewRejection(BaseModel):
         "relevance_correction",
         "ocr_error",
         "translation_term",
+        "translation_correction",
         "analysis_correction",
     ]
-    reason: str = Field(min_length=1)
+    reason: str | None = Field(default=None, min_length=1)
     corrected_values: dict[str, Any] = Field(default_factory=dict)
     knowledge_rule: str | None = None
     knowledge_scope: str = Field(default="global", min_length=1, max_length=160)
     glossary_updates: list[GlossaryCorrection] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def require_rejection_content(self) -> "ReviewRejection":
+        if self.reason is not None:
+            self.reason = self.reason.strip() or None
+        if self.feedback_type in {"translation_term", "translation_correction"}:
+            if not self.reason and not self.glossary_updates:
+                raise ValueError("翻译退回必须填写退回理由或至少一条术语修正")
+        elif not self.reason:
+            raise ValueError("该审核阶段必须填写退回理由")
+        return self
+
 
 class KnowledgeRuleCreate(BaseModel):
-    knowledge_type: Literal["relevance", "analysis"]
+    knowledge_type: Literal["relevance", "analysis", "translation"]
     scope: str = "global"
     rule_text: str = Field(min_length=1)
     correction_data: dict[str, Any] = Field(default_factory=dict)

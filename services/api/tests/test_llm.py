@@ -80,12 +80,12 @@ def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch
                 "translated_title": "版本预览",
                 "translated_blocks": [{"index": 0, "text": "正文"}],
                 "translated_summary": "版本调整摘要",
-                "translated_entities": [{"name": "暗裔剑魔", "type": "champion"}],
+                "translated_entities": [{"name": "亚托克斯", "type": "champion"}],
                 "translated_media_extractions": [
                     {
                         "extraction_id": 9,
                         "translated_data": {
-                            "sections": [{"entries": [{"target": "暗裔剑魔"}]}]
+                            "sections": [{"entries": [{"target": "亚托克斯"}]}]
                         },
                     }
                 ],
@@ -118,14 +118,16 @@ def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch
             summary="版本调整摘要",
             entities=[{"name": "Aatrox", "type": "champion"}],
             media_extractions=[extraction],
+            rules=["未实装改动使用将来时。"],
         )
     )
 
     assert result.translation_status == "translated"
     assert captured["media_extractions"][0]["extraction_id"] == 9
+    assert captured["knowledge_rules"] == ["未实装改动使用将来时。"]
     assert result.translated_media_extractions[0]["translated_data"]["sections"][0][
         "entries"
-    ][0]["target"] == "暗裔剑魔"
+    ][0]["target"] == "亚托克斯"
 
 
 def test_patch_preview_accepts_adjustment_sections() -> None:

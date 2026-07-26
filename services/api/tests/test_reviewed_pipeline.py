@@ -365,7 +365,7 @@ def test_approving_analysis_moves_to_translation_review(monkeypatch) -> None:
         assert raw.normalized_item is None
 
 
-def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> None:
+def test_translation_rejection_accepts_glossary_without_reason() -> None:
     with _session() as db:
         raw = _raw_item(db)
         run = ProcessingRun(
@@ -389,8 +389,7 @@ def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> N
             db,
             review,
             payload=ReviewRejection(
-                feedback_type="translation_term",
-                reason="Ability Haste 术语翻译错误",
+                feedback_type="translation_correction",
                 glossary_updates=[
                     {
                         "source_term": "Ability Haste",
@@ -414,6 +413,50 @@ def test_translation_rejection_creates_glossary_but_not_general_knowledge() -> N
             "移动速度",
         ]
         assert all(term.is_active for term in terms)
+
+
+def test_translation_rejection_accepts_reason_without_glossary() -> None:
+    with _session() as db:
+        raw = _raw_item(db)
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="awaiting_review",
+            current_stage="translation",
+        )
+        db.add(run)
+        db.flush()
+        review = ReviewTask(
+            processing_run_id=run.id,
+            stage="translation",
+            status="pending",
+            proposal={"translated_title": "待修正译文"},
+        )
+        db.add(review)
+        db.commit()
+
+        result = reject_review(
+            db,
+            review,
+            payload=ReviewRejection(
+                feedback_type="translation_correction",
+                reason="描述尚未实装的改动时统一使用将来时，不要写成已经生效。",
+            ),
+        )
+
+        rule = db.scalar(select(KnowledgeRule))
+        assert result.status == "rejected"
+        assert rule.knowledge_type == "translation"
+        assert rule.rule_text == "描述尚未实装的改动时统一使用将来时，不要写成已经生效。"
+        assert db.scalar(select(GlossaryTerm)) is None
+
+
+def test_translation_rejection_requires_reason_or_glossary() -> None:
+    with pytest.raises(ValueError, match="退回理由或至少一条术语修正"):
+        ReviewRejection(
+            feedback_type="translation_correction",
+            reason="   ",
+        )
 
 
 def test_ocr_rejection_does_not_grow_knowledge_or_glossary() -> None:

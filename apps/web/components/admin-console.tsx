@@ -487,7 +487,7 @@ function ReviewCard({
       : review.stage === "image_ocr"
         ? "ocr_error"
         : review.stage === "translation"
-          ? "translation_term"
+          ? "translation_correction"
           : "analysis_correction";
   const [reason, setReason] = useState("");
   const [glossaryUpdates, setGlossaryUpdates] = useState<GlossaryCorrectionDraft[]>([
@@ -502,7 +502,10 @@ function ReviewCard({
     "relevance_correction",
     "analysis_correction",
   ].includes(feedbackType);
-  const learnsTerm = feedbackType === "translation_term";
+  const learnsTerm = ["translation_term", "translation_correction"].includes(
+    feedbackType,
+  );
+  const trimmedReason = reason.trim();
   const completeGlossaryUpdates = glossaryUpdates.filter(
     (item) => item.source_term.trim() && item.preferred_translation.trim(),
   );
@@ -512,7 +515,7 @@ function ReviewCard({
   );
   const rejectPayload = {
     feedback_type: feedbackType,
-    reason,
+    reason: trimmedReason || null,
     knowledge_rule: learnsRule ? reason : null,
     knowledge_scope: "global",
     corrected_values: {},
@@ -529,7 +532,7 @@ function ReviewCard({
     feedbackType === "ocr_error"
       ? "草稿已退回；OCR 错误已记录，但不会写入知识或术语"
       : learnsTerm
-        ? "草稿已退回，术语修正已写入可编辑术语表"
+        ? "草稿已退回，翻译规则和术语修正已分别沉淀"
         : "草稿已退回，反馈已成为可编辑的长期规则";
   const changedOCRDrafts = Object.values(ocrDrafts).filter((draft) => draft.dirty);
   const invalidOCRDrafts = Object.values(ocrDrafts).filter((draft) => draft.invalid);
@@ -577,7 +580,7 @@ function ReviewCard({
             </strong>
             <span>
               {review.stage === "translation"
-                  ? "填写错误原词和标准译名，退回后会更新术语表。"
+                  ? "可只填写术语修正；如需说明句子译法，再填写退回理由。两者至少填写一种。"
                   : "说明分析、分类或摘要的问题，退回后会沉淀为分析规则。"}
             </span>
           </div>
@@ -596,7 +599,11 @@ function ReviewCard({
             <textarea
               value={reason}
               onChange={(event) => setReason(event.target.value)}
-              placeholder="说明错误和正确处理方式。"
+              placeholder={
+                review.stage === "translation"
+                  ? "可选：说明句子应该如何翻译。"
+                  : "说明错误和正确处理方式。"
+              }
             />
           </label>
           {learnsTerm && (
@@ -736,10 +743,9 @@ function ReviewCard({
             className="reject"
             type="button"
             disabled={
-              !reason ||
-              (learnsTerm &&
-                (completeGlossaryUpdates.length === 0 ||
-                  hasIncompleteGlossaryUpdate)) ||
+              (!trimmedReason &&
+                (!learnsTerm || completeGlossaryUpdates.length === 0)) ||
+              (learnsTerm && hasIncompleteGlossaryUpdate) ||
               busy === `reject-${review.id}`
             }
             onClick={() =>

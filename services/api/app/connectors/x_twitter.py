@@ -1,10 +1,12 @@
 import json
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.connectors.base import (
     BaseConnector,
@@ -116,21 +118,40 @@ class XTwitterConnector(BaseConnector[object]):
         user = _attr(tweet, "user")
         username = clean_text(_attr(user, "username"))
         display_name = clean_text(_attr(user, "displayname"))
-        text = clean_text(_attr(tweet, "rawContent"))
+        raw_text = clean_text(_attr(tweet, "rawContent"))
         url = clean_text(_attr(tweet, "url")) or f"https://x.com/{username}/status/{tweet_id}"
         published_at = _attr(tweet, "date")
-        media = _attr(tweet, "media")
+        retweeted = _attr(tweet, "retweetedTweet")
+        content_tweet = retweeted or tweet
+        media = _attr(content_tweet, "media")
+        photos = _as_list(_attr(media, "photos"))
+        videos = _as_list(_attr(media, "videos"))
+        quoted = _attr(content_tweet, "quotedTweet") or _attr(tweet, "quotedTweet")
+        quoted_url = clean_text(_attr(quoted, "url")) or None
+        links = [
+            *_as_list(_attr(tweet, "links")),
+            *(
+                _as_list(_attr(content_tweet, "links"))
+                if content_tweet is not tweet
+                else []
+            ),
+        ]
+        text, external_links = _extract_links(
+            raw_text,
+            links=links,
+            has_attachment=bool(photos or videos or quoted_url),
+        )
         blocks: list[dict[str, object]] = []
         if text:
             blocks.append({"type": "paragraph", "text": text})
-        for photo in _as_list(_attr(media, "photos")):
+        for photo in photos:
             photo_url = clean_text(_attr(photo, "url"))
             if photo_url:
                 blocks.append(
                     {
                         "type": "image",
                         "source_url": photo_url,
-                        "mime_type": "image/jpeg",
+                        "mime_type": _image_mime(photo_url),
                         "alt_text": clean_text(
                             _attr(photo, "altText", "alt_text", "alt")
                         )
@@ -140,10 +161,8 @@ class XTwitterConnector(BaseConnector[object]):
                 )
         # Video files and their thumbnails are intentionally excluded from the
         # ingestion contract. The original post URL remains available to users.
-        if not text:
+        if not text and not photos and not videos and not quoted_url and not external_links:
             raise XConnectorCollectionError(f"X tweet has no text: {tweet_id or 'unknown'}")
-        quoted = _attr(tweet, "quotedTweet")
-        quoted_url = clean_text(_attr(quoted, "url")) or None
         if quoted_url:
             blocks.append(
                 {
@@ -153,13 +172,24 @@ class XTwitterConnector(BaseConnector[object]):
                     "text": "引用推文",
                 }
             )
-        if _as_list(_attr(media, "videos")):
+        if videos:
+            video_post_url = clean_text(_attr(content_tweet, "url")) or url
             blocks.append(
                 {
                     "type": "embed",
                     "embed_kind": "video",
-                    "source_url": url,
+                    "source_url": video_post_url,
                     "text": "视频",
+                }
+            )
+        for link in external_links:
+            embed_kind = _external_embed_kind(link)
+            blocks.append(
+                {
+                    "type": "embed",
+                    "embed_kind": embed_kind,
+                    "source_url": link,
+                    "text": "外部视频" if embed_kind == "video" else "外部链接",
                 }
             )
         return RawItemCandidate(
@@ -175,6 +205,10 @@ class XTwitterConnector(BaseConnector[object]):
                 "source_response": _sanitize_tweet_payload(raw),
                 "quoted_tweet_id": clean_text(_attr(quoted, "id_str", "id")) or None,
                 "quoted_tweet_url": quoted_url,
+                "retweeted_tweet_id": (
+                    clean_text(_attr(retweeted, "id_str", "id")) or None
+                ),
+                "retweeted_tweet_url": clean_text(_attr(retweeted, "url")) or None,
             },
         )
 
@@ -220,6 +254,84 @@ def _attr(value: object, *names: str) -> object:
 
 def _as_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
+
+
+_TCO_URL_PATTERN = re.compile(r"https?://t\.co/[A-Za-z0-9]+", re.IGNORECASE)
+_VIDEO_HOSTS = frozenset(
+    {
+        "youtu.be",
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "vimeo.com",
+        "www.vimeo.com",
+    }
+)
+
+
+def _extract_links(
+    text: str,
+    *,
+    links: list[object],
+    has_attachment: bool,
+) -> tuple[str, list[str]]:
+    """Remove X short links from prose and return expanded external destinations."""
+    replacements: dict[str, tuple[str, str]] = {}
+    for link in links:
+        short_url = clean_text(_attr(link, "tcourl", "tcoUrl", "tco_url"))
+        expanded_url = clean_text(_attr(link, "url", "expandedUrl", "expanded_url"))
+        if short_url and expanded_url:
+            label = clean_text(_attr(link, "text", "displayUrl", "display_url"))
+            if not label:
+                label = urlsplit(expanded_url).hostname or "外部链接"
+            replacements[short_url] = (expanded_url, label)
+
+    external_links: list[str] = []
+    for short_url in _TCO_URL_PATTERN.findall(text):
+        replacement = replacements.get(short_url)
+        if replacement:
+            if replacement[0] not in external_links:
+                external_links.append(replacement[0])
+            continue
+        if not has_attachment and short_url not in external_links:
+            # Preserve an otherwise unknown destination as a standalone link
+            # instead of leaking tracking-oriented t.co text into the prose.
+            external_links.append(short_url)
+
+    cleaned = text
+    for short_url, (_expanded_url, label) in replacements.items():
+        escaped = re.escape(short_url)
+
+        def replace_known(match: re.Match[str]) -> str:
+            same_line_suffix = cleaned[match.end() :].split("\n", 1)[0]
+            return label if same_line_suffix.strip() else ""
+
+        cleaned = re.sub(escaped, replace_known, cleaned)
+    cleaned = _TCO_URL_PATTERN.sub("", cleaned)
+    cleaned = "\n".join(
+        re.sub(r"[ \t]{2,}", " ", line).rstrip()
+        for line in cleaned.splitlines()
+    )
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, external_links
+
+
+def _external_embed_kind(url: str) -> str:
+    hostname = (urlsplit(url).hostname or "").casefold()
+    return "video" if hostname in _VIDEO_HOSTS else "external_link"
+
+
+def _image_mime(url: str) -> str | None:
+    path = urlsplit(url).path.casefold()
+    if path.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if path.endswith(".png"):
+        return "image/png"
+    if path.endswith(".gif"):
+        return "image/gif"
+    if path.endswith(".webp"):
+        return "image/webp"
+    return None
 
 
 def _object_dict(value: object) -> dict[str, Any]:

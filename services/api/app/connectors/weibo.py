@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from selectolax.parser import HTMLParser
 
@@ -141,6 +141,7 @@ class WeiboConnector(BaseConnector[WeiboStatusRecord]):
         text = _html_text(
             full_text or clean_text(mblog.get("text_raw") or mblog.get("text"))
         )
+        text = _remove_attachment_short_urls(text, mblog)
         if not status_id or not uid or not text:
             raise WeiboConnectorCollectionError(
                 f"Weibo status is missing id, author, or text: {status_id or 'unknown'}"
@@ -283,14 +284,20 @@ def _attachment_links(
     mblog: dict[str, Any], *, canonical_url: str
 ) -> list[tuple[str, str, str]]:
     links: list[tuple[str, str, str]] = []
+    url_entries = _as_dict_list(mblog.get("url_struct"))
+    has_http_struct_link = any(
+        _is_http_url(clean_text(entry.get("long_url") or entry.get("url_long")))
+        for entry in url_entries
+    )
     page_info = mblog.get("page_info")
+    object_type = ""
     if isinstance(page_info, dict):
         object_type = clean_text(page_info.get("object_type") or page_info.get("type"))
         link = clean_text(page_info.get("page_url"))
         label = clean_text(
             page_info.get("page_title") or page_info.get("content2") or object_type
         )
-        if link:
+        if _is_http_url(link):
             links.append(
                 (
                     label or "附加内容",
@@ -298,19 +305,33 @@ def _attachment_links(
                     _weibo_embed_kind(object_type),
                 )
             )
-        elif object_type.casefold() in {"video", "vote", "poll"}:
+        elif not has_http_struct_link and object_type.casefold() in {
+            "video",
+            "live",
+            "vote",
+            "poll",
+            "hudongvote",
+        }:
             links.append(
                 (
-                    label or "视频/投票",
+                    label or "媒体内容",
                     canonical_url,
                     _weibo_embed_kind(object_type),
                 )
             )
-    for entry in _as_dict_list(mblog.get("url_struct")):
+    for entry in url_entries:
         link = clean_text(entry.get("long_url") or entry.get("url_long"))
-        if link:
+        if _is_http_url(link):
             links.append(
-                (clean_text(entry.get("url_title")) or "网页链接", link, "external_link")
+                (
+                    clean_text(entry.get("url_title")) or "网页链接",
+                    link,
+                    _weibo_link_embed_kind(
+                        link,
+                        label=clean_text(entry.get("url_title")),
+                        page_object_type=object_type,
+                    ),
+                )
             )
     deduplicated: list[tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -323,11 +344,44 @@ def _attachment_links(
 
 def _weibo_embed_kind(object_type: str) -> str:
     value = object_type.casefold()
-    if value == "video":
+    if value in {"video", "live"}:
         return "video"
-    if value in {"vote", "poll"}:
+    if value in {"vote", "poll", "hudongvote"}:
         return "poll"
     return "external_link"
+
+
+def _weibo_link_embed_kind(
+    url: str,
+    *,
+    label: str,
+    page_object_type: str,
+) -> str:
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").casefold()
+    searchable = f"{hostname}{parsed.path} {label}".casefold()
+    if "video.weibo.com" in hostname or "wblive" in searchable or "直播" in label:
+        return "video"
+    if "vote.weibo.com" in hostname or "投票" in label:
+        return "poll"
+    return _weibo_embed_kind(page_object_type)
+
+
+def _remove_attachment_short_urls(text: str, mblog: dict[str, Any]) -> str:
+    short_urls = {
+        clean_text(entry.get("short_url"))
+        for entry in _as_dict_list(mblog.get("url_struct"))
+        if _is_http_url(clean_text(entry.get("short_url")))
+    }
+    cleaned = text
+    for short_url in short_urls:
+        cleaned = cleaned.replace(short_url, "")
+    return clean_text(cleaned)
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _weibo_datetime(value: object) -> datetime | None:

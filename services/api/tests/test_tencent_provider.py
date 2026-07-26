@@ -83,3 +83,26 @@ def test_tencent_rejects_empty_article() -> None:
 
     with pytest.raises(TencentConnectorError, match="body is empty"):
         TencentLolConnector.parse_article(payload, discovery)
+
+
+def test_tencent_maps_redirect_article_to_external_link_block() -> None:
+    payload = load_json("tencent_article.json")
+    result = payload["data"]["result"]
+    result["iIsRedirect"] = "1"
+    result["sRedirectURL"] = (
+        "https://lol.qq.com/act/a20200421weekfree/index.html?siteId=750"
+    )
+    result["sContent"] = result["sRedirectURL"]
+    discovery = load_json("tencent_news_list.json")["data"]["result"][0]
+
+    item = TencentLolConnector.parse_article(payload, discovery)
+
+    assert item.content_blocks == [
+        {
+            "id": "b0001",
+            "type": "embed",
+            "embed_kind": "external_link",
+            "source_url": result["sRedirectURL"],
+            "text": "查看完整公告",
+        }
+    ]

@@ -72,6 +72,85 @@ def test_x_maps_text_media_alt_and_quote_without_secrets() -> None:
     assert item.content_blocks[3]["embed_kind"] == "video"
 
 
+def test_x_uses_retweeted_media_and_original_post_for_native_video() -> None:
+    tweet = json.loads((FIXTURES / "x_user_tweets.json").read_text(encoding="utf-8"))[0]
+    tweet["date"] = datetime.fromisoformat(tweet["date"])
+    tweet["rawContent"] = (
+        "RT @LCSOfficial: Tune in to https://t.co/QnwJPtPgcx "
+        "for the show https://t.co/vueipJHjCs"
+    )
+    tweet["links"] = [
+        {
+            "url": "http://lolesports.com",
+            "tcourl": "https://t.co/QnwJPtPgcx",
+        }
+    ]
+    tweet["media"] = {"photos": [], "videos": []}
+    tweet["quotedTweet"] = None
+    tweet["retweetedTweet"] = {
+        "id_str": "2080712956434596217",
+        "url": "https://x.com/LCSOfficial/status/2080712956434596217",
+        "links": tweet["links"],
+        "media": {
+            "photos": [{"url": "https://pbs.twimg.com/media/show-card.png"}],
+            "videos": [],
+        },
+    }
+
+    item = XTwitterConnector.map_tweet(tweet)
+
+    assert item.content_blocks[0]["text"] == (
+        "RT @LCSOfficial: Tune in to lolesports.com for the show"
+    )
+    assert item.content_blocks[1]["type"] == "image"
+    assert item.content_blocks[1]["mime_type"] == "image/png"
+    assert item.content_blocks[2]["source_url"] == "http://lolesports.com/"
+    assert all("t.co" not in json.dumps(block) for block in item.content_blocks)
+    assert item.provenance["retweeted_tweet_id"] == "2080712956434596217"
+
+
+def test_x_expands_external_video_link_without_leaving_tco_in_body() -> None:
+    tweet = json.loads((FIXTURES / "x_user_tweets.json").read_text(encoding="utf-8"))[0]
+    tweet["date"] = datetime.fromisoformat(tweet["date"])
+    tweet["rawContent"] = "Patch rundown is out!\n\nhttps://t.co/jEFjKjG8uA"
+    tweet["media"] = {"photos": [], "videos": []}
+    tweet["quotedTweet"] = None
+    tweet["links"] = [
+        {
+            "url": "https://youtu.be/Uc8lbPoPG1M",
+            "text": "youtu.be/Uc8lbPoPG1M",
+            "tcourl": "https://t.co/jEFjKjG8uA",
+        }
+    ]
+
+    item = XTwitterConnector.map_tweet(tweet)
+
+    assert item.content_blocks == [
+        {"id": "b0001", "type": "paragraph", "text": "Patch rundown is out!"},
+        {
+            "id": "b0002",
+            "type": "embed",
+            "embed_kind": "video",
+            "source_url": "https://youtu.be/Uc8lbPoPG1M",
+            "text": "外部视频",
+        },
+    ]
+
+
+def test_x_removes_photo_attachment_tco_without_creating_duplicate_link() -> None:
+    tweet = json.loads((FIXTURES / "x_user_tweets.json").read_text(encoding="utf-8"))[0]
+    tweet["date"] = datetime.fromisoformat(tweet["date"])
+    tweet["rawContent"] = "Don't miss these showmatches 👀 https://t.co/GBRiKz7hOT"
+    tweet["links"] = []
+    tweet["quotedTweet"] = None
+
+    item = XTwitterConnector.map_tweet(tweet)
+
+    assert item.content_blocks[0]["text"] == "Don't miss these showmatches 👀"
+    assert [block["type"] for block in item.content_blocks] == ["paragraph", "image"]
+    assert "t.co" not in json.dumps(item.content_blocks)
+
+
 def test_x_missing_cookie_is_clear_configuration_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

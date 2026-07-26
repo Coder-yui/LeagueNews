@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from app.connectors.base import (
@@ -89,7 +90,19 @@ class TencentLolConnector(BaseConnector[TencentArticleRecord]):
         docid = clean_text(result.get("iDocID") or discovery.get("iDocID"))
         url = cls.article_url.format(docid=docid)
         content_html = _strip_control_characters(str(result.get("sContent") or ""))
-        blocks = html_to_blocks(content_html, base_url=url)
+        redirect_url = clean_text(result.get("sRedirectURL") or discovery.get("sRedirectURL"))
+        is_redirect = str(result.get("iIsRedirect") or discovery.get("iIsRedirect") or "0") == "1"
+        if is_redirect and _is_http_url(redirect_url):
+            blocks = [
+                {
+                    "type": "embed",
+                    "embed_kind": "external_link",
+                    "source_url": redirect_url,
+                    "text": "查看完整公告",
+                }
+            ]
+        else:
+            blocks = html_to_blocks(content_html, base_url=url)
         if not any(block.get("text") for block in blocks):
             raise TencentConnectorError(f"Tencent article body is empty: docid={docid}")
 
@@ -137,3 +150,8 @@ def _parse_tencent_datetime(value: object) -> datetime | None:
 
 def _strip_control_characters(value: str) -> str:
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)

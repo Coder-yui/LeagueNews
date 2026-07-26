@@ -87,6 +87,35 @@ def test_weibo_collects_long_text_images_repost_and_attachment_links() -> None:
     assert "微博投票" in item.content_blocks[5]["text"]
 
 
+def test_weibo_removes_known_short_url_and_preserves_live_embed() -> None:
+    mblog = load_json("weibo_timeline.json")["data"]["list"][0]
+    mblog["text_raw"] = "今日比赛直播进行中 http://t.cn/AX9lp2or"
+    mblog["isLongText"] = False
+    mblog["page_info"] = {
+        "object_type": "live",
+        "page_title": "英雄联盟赛事的微博直播",
+        "page_url": "sinaweibo://chatroom?live_id=example",
+    }
+    mblog["url_struct"] = [
+        {
+            "short_url": "http://t.cn/AX9lp2or",
+            "long_url": "https://weibo.com/l/wblive/p/show/example",
+            "url_title": "英雄联盟赛事的微博直播",
+        }
+    ]
+    mblog["retweeted_status"] = None
+    mblog["pic_ids"] = []
+
+    item = WeiboConnector.map_mblog(mblog)
+
+    assert item.content_blocks[0]["text"] == "今日比赛直播进行中"
+    assert "t.cn" not in json.dumps(item.content_blocks, ensure_ascii=False)
+    assert item.content_blocks[-1]["embed_kind"] == "video"
+    assert item.content_blocks[-1]["source_url"] == (
+        "https://weibo.com/l/wblive/p/show/example"
+    )
+
+
 def test_weibo_login_rejection_is_clear_configuration_error() -> None:
     connector = WeiboConnector(
         browser_session_factory=lambda: FakeBrowserSession(

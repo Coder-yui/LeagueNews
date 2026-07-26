@@ -82,11 +82,39 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
         raise ValueError("only item processing runs can be restarted")
     if run.status not in {"rejected", "failed"}:
         raise ValueError(f"processing run cannot restart from status={run.status}")
-    return await start_item_processing(
-        db,
-        run.raw_item,
-        supersedes_run_id=run.id,
+    if run.raw_item.normalized_item:
+        raise ValueError("raw item already has an approved normalized item")
+    active = db.scalar(
+        select(ProcessingRun).where(
+            ProcessingRun.raw_item_id == run.raw_item_id,
+            ProcessingRun.workflow_type == "item",
+            ProcessingRun.status.in_(["running", "awaiting_review"]),
+        )
     )
+    if active:
+        raise ValueError(f"raw item already has active processing run {active.id}")
+
+    restarted = ProcessingRun(
+        raw_item_id=run.raw_item_id,
+        supersedes_run_id=run.id,
+        workflow_type="item",
+        status="running",
+        current_stage=run.current_stage,
+        context=dict(run.context),
+    )
+    db.add(restarted)
+    db.commit()
+    db.refresh(restarted)
+
+    if restarted.current_stage == RELEVANCE_STAGE:
+        await _generate_relevance_review(db, restarted)
+    elif restarted.current_stage == OCR_STAGE:
+        await _generate_ocr_review(db, restarted)
+    elif restarted.current_stage == ITEM_STAGE:
+        await _generate_item_review(db, restarted)
+    else:
+        raise ValueError(f"unsupported restart stage: {restarted.current_stage}")
+    return restarted
 
 
 async def approve_review(

@@ -586,16 +586,18 @@ def test_relevance_rejection_ends_run_and_creates_knowledge() -> None:
         assert rule.knowledge_type == "relevance"
 
 
-def test_restart_creates_new_run_linked_to_rejected_run(monkeypatch) -> None:
-    async def fake_relevance_review(db, run):
+@pytest.mark.parametrize("stage", ["relevance", "image_ocr", "item_analysis"])
+def test_restart_continues_from_rejected_stage(monkeypatch, stage: str) -> None:
+    generated_stages: list[str] = []
+
+    async def fake_review(db, run):
+        generated_stages.append(run.current_stage)
         run.status = "awaiting_review"
         db.commit()
 
-    monkeypatch.setattr(
-        reviewed_pipeline,
-        "_generate_relevance_review",
-        fake_relevance_review,
-    )
+    monkeypatch.setattr(reviewed_pipeline, "_generate_relevance_review", fake_review)
+    monkeypatch.setattr(reviewed_pipeline, "_generate_ocr_review", fake_review)
+    monkeypatch.setattr(reviewed_pipeline, "_generate_item_review", fake_review)
     with _session() as db:
         raw = _raw_item(db)
         old_run = ProcessingRun(
@@ -603,7 +605,8 @@ def test_restart_creates_new_run_linked_to_rejected_run(monkeypatch) -> None:
             workflow_type="item",
             status="rejected",
             outcome="review_rejected",
-            current_stage="item_analysis",
+            current_stage=stage,
+            context={"approved_media_extraction_ids": [7]},
         )
         db.add(old_run)
         db.commit()
@@ -612,9 +615,11 @@ def test_restart_creates_new_run_linked_to_rejected_run(monkeypatch) -> None:
 
         assert new_run.id != old_run.id
         assert new_run.supersedes_run_id == old_run.id
-        assert new_run.current_stage == "relevance"
+        assert new_run.current_stage == stage
+        assert new_run.context == {"approved_media_extraction_ids": [7]}
         assert new_run.status == "awaiting_review"
         assert old_run.status == "rejected"
+        assert generated_stages == [stage]
 
 
 def test_approved_item_persists_translated_patch_data_as_relational_link() -> None:

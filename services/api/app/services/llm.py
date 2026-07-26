@@ -223,6 +223,45 @@ class LLMClient:
                     targets.update(collect_targets(child, (*path, index)))
             return targets
 
+        def compare_structure(
+            source: object,
+            translated: object,
+            path: tuple[str | int, ...] = (),
+        ) -> str | None:
+            path_text = ".".join(str(part) for part in path) or "root"
+            if isinstance(source, dict):
+                if not isinstance(translated, dict):
+                    return f"{path_text} 应保持为对象"
+                if source.keys() != translated.keys():
+                    return f"{path_text} 的字段集合发生变化"
+                for key, value in source.items():
+                    error = compare_structure(value, translated[key], (*path, key))
+                    if error:
+                        return error
+                return None
+            if isinstance(source, list):
+                if not isinstance(translated, list):
+                    return f"{path_text} 应保持为数组"
+                if len(source) != len(translated):
+                    return (
+                        f"{path_text} 数组长度发生变化："
+                        f"expected={len(source)}, actual={len(translated)}"
+                    )
+                for index, value in enumerate(source):
+                    error = compare_structure(
+                        value,
+                        translated[index],
+                        (*path, index),
+                    )
+                    if error:
+                        return error
+                return None
+            if isinstance(source, str):
+                return None if isinstance(translated, str) else f"{path_text} 应保持为字符串"
+            if source != translated or type(source) is not type(translated):
+                return f"{path_text} 的非文本值被改动"
+            return None
+
         def validate_indexes(result: TranslationResult) -> str | None:
             actual_indexes = {block.index for block in result.translated_blocks}
             if actual_indexes != expected_indexes:
@@ -251,6 +290,15 @@ class LLMClient:
                 for extraction in result.translated_media_extractions
             }
             for extraction_id, source_data in source_extractions.items():
+                structure_error = compare_structure(
+                    source_data,
+                    translated_by_id[extraction_id],
+                )
+                if structure_error:
+                    return (
+                        "结构化版本译文必须与原数据逐项对应："
+                        f"extraction_id={extraction_id}, {structure_error}"
+                    )
                 source_targets = collect_targets(source_data)
                 translated_targets = collect_targets(translated_by_id[extraction_id])
                 if source_targets.keys() != translated_targets.keys():

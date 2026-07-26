@@ -357,6 +357,75 @@ def test_translation_retries_when_structured_target_keeps_english_name() -> None
     assert "target 未翻译" in retry_messages[-1]["content"]
 
 
+def test_translation_retries_when_structured_array_shape_changes() -> None:
+    def response(changes: list[str]) -> str:
+        return json.dumps(
+            {
+                "translated_title": "版本预览",
+                "translated_blocks": [],
+                "translated_summary": "版本预览。",
+                "translated_entities": [],
+                "translated_media_extractions": [
+                    {
+                        "extraction_id": 4,
+                        "translated_data": {
+                            "sections": [
+                                {
+                                    "entries": [
+                                        {
+                                            "target": "厄斐琉斯",
+                                            "target_type": "champion",
+                                            "changes": changes,
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    client, completions = _client_with_responses(
+        [response(["伤害提高。", "额外说明。"]), response(["伤害提高。"])]
+    )
+
+    result = asyncio.run(
+        client.translate(
+            title="Patch preview",
+            text_blocks=[],
+            source_language="en",
+            summary="Patch preview.",
+            entities=[],
+            media_extractions=[
+                {
+                    "extraction_id": 4,
+                    "structured_data": {
+                        "sections": [
+                            {
+                                "entries": [
+                                    {
+                                        "target": "Aphelios",
+                                        "target_type": "champion",
+                                        "changes": ["Damage increased."],
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+    )
+
+    translated = result.translated_media_extractions[0].translated_data
+    assert len(translated["sections"][0]["entries"][0]["changes"]) == 1
+    assert len(completions.calls) == 2
+    retry_messages = completions.calls[1]["messages"]
+    assert "数组长度发生变化" in retry_messages[-1]["content"]
+
+
 def test_two_invalid_schema_responses_raise_unified_error() -> None:
     client, completions = _client_with_responses(["{}", '{"product_scope":"lol_pc"}'])
 

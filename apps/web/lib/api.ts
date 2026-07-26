@@ -1,14 +1,28 @@
-import { sampleEvents } from "./sample-data";
-import type { NewsEvent } from "./types";
+import type { PublishedItem } from "./types";
 
-export async function getEvents(): Promise<{ events: NewsEvent[]; isDemo: boolean }> {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+
+export async function getPublishedItems(): Promise<PublishedItem[]> {
   try {
-    const response = await fetch(`${apiUrl}/events/feed`, { next: { revalidate: 60 } });
+    const response = await fetch(`${apiUrl}/normalized-items/published`, {
+      next: { revalidate: 30 },
+    });
     if (!response.ok) throw new Error(`API returned ${response.status}`);
-    const events = (await response.json()) as NewsEvent[];
-    return { events: events.length ? events : sampleEvents, isDemo: events.length === 0 };
+    return (await response.json()) as PublishedItem[];
   } catch {
-    return { events: sampleEvents, isDemo: true };
+    return [];
+  }
+}
+
+export async function getPublishedItem(id: number): Promise<PublishedItem | null> {
+  try {
+    const response = await fetch(`${apiUrl}/normalized-items/${id}/published`, {
+      next: { revalidate: 30 },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`API returned ${response.status}`);
+    return (await response.json()) as PublishedItem;
+  } catch {
+    return null;
   }
 }

@@ -1,5 +1,5 @@
 export type ContentBlock = {
-  id: string;
+  id?: string;
   type: "heading" | "paragraph" | "list" | "quote" | "image" | "embed";
   text?: string;
   level?: number;
@@ -13,42 +13,50 @@ export type ContentBlock = {
   mime_type?: string;
 };
 
-export type PatchChange = {
-  attribute: string;
-  before: string | null;
-  after: string | null;
-  raw_text: string;
-  confidence: number;
+export type PatchEntry = {
+  target: string;
+  target_type: string;
+  changes: string[];
+};
+
+export type PatchSection = {
+  section_type?: string;
+  label: string;
+  entries: PatchEntry[];
 };
 
 export type PatchPreviewData = {
-  document_type: "patch_preview";
-  patch: string | null;
-  title: string;
-  sections: Array<{
-    section_type: string;
-    label: string;
-    entries: Array<{
-      target: string;
-      target_type: string;
-      changes: PatchChange[];
-    }>;
-  }>;
-  warnings: string[];
+  document_type?: "patch_preview";
+  preview_kind?: "preview" | "full_preview";
+  patch?: string | null;
+  title?: string;
+  sections?: PatchSection[];
+  warnings?: string[];
 };
 
-export type MediaExtraction = {
+export type PublishedMediaExtraction = {
+  extraction_id: number;
   media_asset_id: number;
+  block_index: number;
   storage_path: string | null;
-  task_type: string;
-  status: string;
+  source_url: string | null;
+  mime_type: string | null;
   confidence: number | null;
-  structured_data: PatchPreviewData;
+  original_data: PatchPreviewData;
+  translated_data: PatchPreviewData;
 };
 
-export type EventSourceItem = {
-  normalized_item_id: number;
+export type PublishedItem = {
+  id: number;
   raw_item_id: number;
+  title: string;
+  summary: string;
+  category: string;
+  entities: Array<{ name?: string; type?: string; canonical_name?: string | null }>;
+  importance_score: number;
+  credibility: "official" | "corroborated" | "unverified" | "rumor" | string;
+  credibility_score: number;
+  credibility_evidence: string[];
   source_id: number;
   source_name: string;
   source_base_url: string | null;
@@ -61,18 +69,6 @@ export type EventSourceItem = {
   translated_title: string | null;
   translated_content_blocks: ContentBlock[];
   translation_status: string;
-  media_extractions: MediaExtraction[];
-};
-
-export type NewsEvent = {
-  id: number;
-  title: string;
-  summary: string;
-  category: string;
-  entities: Array<{ name?: string; type?: string }>;
-  importance_score: number;
-  credibility: "official" | "corroborated" | "unverified" | "rumor" | string;
-  occurred_at: string | null;
+  media_extractions: PublishedMediaExtraction[];
   created_at: string;
-  items: EventSourceItem[];
 };

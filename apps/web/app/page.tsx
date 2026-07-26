@@ -3,10 +3,10 @@ import {
   CalendarDays,
   Database,
   Radio,
-  Sparkles,
 } from "lucide-react";
-import { getEvents } from "@/lib/api";
-import { EventFeed } from "@/components/event-feed";
+import Link from "next/link";
+import { MessageFeed } from "@/components/message-feed";
+import { getPublishedItems } from "@/lib/api";
 
 const credibilityLabel: Record<string, string> = {
   official: "官方确认",
@@ -16,8 +16,8 @@ const credibilityLabel: Record<string, string> = {
 };
 
 export default async function Home() {
-  const { events, isDemo } = await getEvents();
-  const topEvent = events[0];
+  const items = await getPublishedItems();
+  const topItem = items[0];
   const dateLabel = new Intl.DateTimeFormat("zh-CN", {
     month: "long",
     day: "numeric",
@@ -32,51 +32,56 @@ export default async function Home() {
           <span>LoL Daily Intel</span>
         </a>
         <nav aria-label="主要导航">
-          <a className="active" href="#digest">今日情报</a>
-          <a href="#events">事件</a>
+          <a className="active" href="#messages">消息</a>
+          <a href="#pipeline">处理链路</a>
           <a href="#sources">信源</a>
           <a href="/admin">处理台</a>
         </nav>
         <div className="live-state"><span /> Workflow online</div>
       </header>
 
-      <section id="digest" className="hero">
+      <section id="top" className="hero">
         <div className="eyebrow"><CalendarDays size={15} /> {dateLabel} · 每日简报</div>
         <h1>峡谷内外，<br /><em>值得关注的事。</em></h1>
-        <p>从公告、赛事与社区讨论中提炼关键信号。保留来源脉络，也诚实标记不确定性。</p>
-        {isDemo && <div className="demo-note"><Sparkles size={16} /> 当前展示样例数据；API 有真实事件后会自动切换。</div>}
+        <p>展示经过 AI 处理与人工审核的单条消息。保留完整原文、中文译文、图片和可追溯的结构化结果。</p>
       </section>
 
       <section className="signal-grid" aria-label="今日概览">
-        <div><span>收录事件</span><strong>{events.length.toString().padStart(2, "0")}</strong></div>
-        <div><span>高优先级</span><strong>{events.filter((event) => event.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
-        <div><span>可信信号</span><strong>{events.filter((event) => ["official", "corroborated"].includes(event.credibility)).length.toString().padStart(2, "0")}</strong></div>
+        <div><span>已审消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
+        <div><span>高优先级</span><strong>{items.filter((item) => item.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
+        <div><span>可信信号</span><strong>{items.filter((item) => ["official", "corroborated"].includes(item.credibility)).length.toString().padStart(2, "0")}</strong></div>
         <div className="pulse"><Activity size={18} /><span>持续更新</span></div>
       </section>
 
-      {topEvent && (
+      {topItem && (
         <section className="lead-story">
-          <div className="lead-meta"><Radio size={16} /> 今日头条 · 重要性 {Math.round(topEvent.importance_score * 100)}</div>
-          <h2>{topEvent.title}</h2>
-          <p>{topEvent.summary}</p>
-          <div className="tag-row"><span>{topEvent.category}</span><span className={`cred ${topEvent.credibility}`}>{credibilityLabel[topEvent.credibility] ?? topEvent.credibility}</span></div>
+          <div className="lead-meta"><Radio size={16} /> 最新消息 · 重要性 {Math.round(topItem.importance_score * 100)}</div>
+          <h2><Link href={`/messages/${topItem.id}`}>{topItem.title}</Link></h2>
+          <p>{topItem.summary}</p>
+          <div className="tag-row"><span>{topItem.category}</span><span className={`cred ${topItem.credibility}`}>{credibilityLabel[topItem.credibility] ?? topItem.credibility}</span></div>
         </section>
       )}
 
-      <section id="events" className="events-section">
+      <section id="messages" className="events-section">
         <div className="section-heading">
-          <div><span className="kicker">INTEL STREAM</span><h2>今日事件</h2></div>
-          <span>按重要性排序</span>
+          <div><span className="kicker">REVIEWED STREAM</span><h2>已审核消息</h2></div>
+          <span>按完成时间排序</span>
         </div>
-        <EventFeed events={events} />
+        <MessageFeed items={items} />
       </section>
 
-      <section id="sources" className="pipeline">
+      <section id="pipeline" className="pipeline">
         <div><Database size={22} /><strong>可追踪的数据链</strong><span>采集与分析分层，所有结论回到原始内容。</span></div>
-        <div className="pipeline-flow"><span>CONNECTOR</span><i /> <span>RAW ITEM</span><i /> <span>AI ANALYSIS</span><i /> <span>EVENT</span></div>
+        <div className="pipeline-flow"><span>CONNECTOR</span><i /> <span>RAW ITEM</span><i /> <span>REVIEWED ITEM</span><i /> <span>MESSAGE</span></div>
       </section>
 
-      <footer><span>LoL Daily Intel · MVP</span><span>Built for signals, not noise.</span></footer>
+      <section id="sources" className="source-summary">
+        <span>信源</span>
+        <strong>{new Set(items.map((item) => item.source_name)).size}</strong>
+        <p>不同平台账号保持独立信源身份，所有消息均可返回原始位置核验。</p>
+      </section>
+
+      <footer><span>LoL Daily Intel · Reviewed messages</span><span>Built for signals, not noise.</span></footer>
     </main>
   );
 }

@@ -167,12 +167,6 @@ nav a.active { color: var(--ink); border-color: var(--ink); }
 .message-image-block figcaption { padding: 9px; color: #ccd2ca; font-size: 11px; text-align: center; }
 .message-embed { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 24px 0; padding: 16px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 13px; }
 .bilingual-patch { border: 1px solid #bcc4ba; border-top: 0; background: #f8f9f5; }
-.bilingual-patch-head { display: flex; justify-content: space-between; gap: 22px; padding: 20px; background: #171c18; color: white; }
-.bilingual-patch-head span { color: var(--acid); font: 800 10px monospace; letter-spacing: .12em; }
-.bilingual-patch-head h2 { margin: 6px 0 0; font-size: 20px; }
-.bilingual-patch-head > div:last-child { display: grid; align-content: center; justify-items: end; gap: 5px; }
-.bilingual-patch-head b { color: var(--acid); font: 12px monospace; }
-.bilingual-patch-head small { color: #aeb7ad; font: 10px monospace; }
 .bilingual-column-labels, .bilingual-section-title { display: grid; grid-template-columns: 1fr 1fr; }
 .bilingual-column-labels span { padding: 10px 14px; background: #e5e9df; color: #596259; font-size: 10px; font-weight: 900; letter-spacing: .06em; }
 .bilingual-column-labels span + span, .bilingual-section-title strong + strong { border-left: 1px solid #cbd0c7; }
@@ -437,8 +431,6 @@ footer { display: flex; justify-content: space-between; padding: 26px 0 40px; bo
   .message-card-image { grid-column: 1; min-height: 210px; }
   .message-detail-head { padding-top: 22px; }
   .message-detail-head h1 { font-size: 38px; }
-  .bilingual-patch-head { align-items: flex-start; flex-direction: column; }
-  .bilingual-patch-head > div:last-child { justify-items: start; }
   .review-section-tabs, .review-content-panel, .translation-columns, .glossary-correction, .report-generator, .ocr-control-grid, .ocr-images, .ocr-pair, .ocr-review-record { grid-template-columns: 1fr; }
   .translation-columns article + article { border-top: 1px solid var(--line); border-left: 0; }
   .ocr-pair small { text-align: left; }

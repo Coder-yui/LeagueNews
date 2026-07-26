@@ -50,14 +50,6 @@ function BilingualPatchTable({
 
   return (
     <section className="bilingual-patch">
-      <header className="bilingual-patch-head">
-        <div>
-          <h2>{translated.title ?? original.title ?? "版本改动"}</h2>
-        </div>
-        <div>
-          {original.patch && <b>PATCH {original.patch}</b>}
-        </div>
-      </header>
       <div className="bilingual-column-labels" aria-hidden="true">
         <span>EN · 图片原文</span>
         <span>中文 · 审核译文</span>

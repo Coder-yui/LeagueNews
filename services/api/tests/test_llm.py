@@ -65,6 +65,47 @@ def test_analysis_result_rejects_more_than_five_entities() -> None:
         )
 
 
+def test_analysis_receives_approved_glossary() -> None:
+    response = json.dumps(
+        {
+            "title": "厄斐琉斯版本改动",
+            "summary": "厄斐琉斯获得增强。",
+            "category": "版本更新",
+            "entities": [{"name": "厄斐琉斯", "type": "champion"}],
+            "importance_score": 0.7,
+            "credibility": "official",
+            "credibility_score": 1.0,
+            "credibility_evidence": ["设计师官方账号"],
+        },
+        ensure_ascii=False,
+    )
+    client, completions = _client_with_responses([response])
+    glossary = [
+        {
+            "id": 7,
+            "source_term": "Aphelios",
+            "preferred_translation": "厄斐琉斯",
+            "forbidden_translations": ["残月之肃"],
+            "scope": "lol",
+        }
+    ]
+
+    result = asyncio.run(
+        client.analyze(
+            title="Aphelios patch changes",
+            content="Aphelios receives buffs.",
+            glossary=glossary,
+        )
+    )
+
+    assert result.summary == "厄斐琉斯获得增强。"
+    messages = completions.calls[0]["messages"]
+    assert isinstance(messages, list)
+    payload = json.loads(messages[1]["content"])
+    assert payload["approved_glossary"] == glossary
+    assert "preferred_translation" in messages[0]["content"]
+
+
 def test_language_detection() -> None:
     assert detect_language("Patch preview and balance changes") == "en"
     assert detect_language("版本更新与英雄平衡调整") == "zh-CN"

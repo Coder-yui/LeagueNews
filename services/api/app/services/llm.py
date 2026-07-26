@@ -155,6 +155,7 @@ class LLMClient:
         content: str,
         source_context: dict[str, object] | None = None,
         knowledge_rules: list[str] | None = None,
+        glossary: list[dict[str, object]] | None = None,
     ) -> AnalysisResult:
         prompt = (
             "你是英雄联盟中文新闻编辑。请分析输入资讯，只输出一个完整的 JSON 对象，"
@@ -166,6 +167,8 @@ class LLMClient:
             "实体只保留理解这条资讯最重要的 2 到 4 个，确有必要时最多 5 个；"
             "版本图片里批量出现的英雄或装备不要全部作为新闻实体；"
             "事实、专有名词原文和数值不得丢失。category 使用简短中文分类；"
+            "生成中文 title、summary 和 entities 时，必须优先采用 approved_glossary "
+            "中的 preferred_translation，禁止使用其中列出的 forbidden_translations；"
             "importance_score 必须为 0 到 1；credibility 只能是 official、"
             "corroborated、unverified、rumor；credibility_score 必须为 0 到 1；"
             "credibility_evidence 列出支撑可信度判断的简短依据。"
@@ -177,6 +180,7 @@ class LLMClient:
                 "content": content,
                 "source_context": source_context or {},
                 "approved_rules": knowledge_rules or [],
+                "approved_glossary": glossary or [],
             },
             max_tokens=1200,
             schema=AnalysisResult,

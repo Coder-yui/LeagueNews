@@ -401,6 +401,7 @@ async def _generate_item_review(db: Session, run: ProcessingRun) -> None:
             raw_item=run.raw_item,
             media_extractions=media_extractions,
             rules=_knowledge_texts(db, "analysis", run.raw_item),
+            glossary=_glossary_payload(db),
         )
         _replace_pending_review(db, run=run, stage=ITEM_STAGE, proposal=proposal)
         db.commit()
@@ -414,6 +415,7 @@ async def _build_item_proposal(
     raw_item: RawItem,
     media_extractions: list[MediaExtraction],
     rules: list[str],
+    glossary: list[dict[str, object]],
     ocr_corrections: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
     structured_context = extraction_context(media_extractions)
@@ -429,6 +431,7 @@ async def _build_item_proposal(
         content=analysis_content,
         source_context=_source_context(raw_item),
         knowledge_rules=rules,
+        glossary=glossary,
     )
     return {
         "normalized_title": analysis.title,
@@ -445,6 +448,9 @@ async def _build_item_proposal(
         "language": raw_item.language,
         "analysis_model": settings.model_name,
         "analysis_version": "v4-reviewed-item",
+        "analysis_glossary_term_ids": [
+            int(term["id"]) for term in glossary if isinstance(term.get("id"), int)
+        ],
         "approved_media_extraction_ids": [item.id for item in media_extractions],
         "media_extractions": structured_context,
         "ocr_corrections": ocr_corrections or [],

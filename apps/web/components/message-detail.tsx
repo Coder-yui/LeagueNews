@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useState } from "react";
 import {
+  ArrowUp,
   BadgeCheck,
   ExternalLink,
   Languages,
@@ -233,7 +234,21 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
           </div>
         )}
       </header>
-      <ContentBlocks blocks={blocks} extractions={item.media_extractions} />
+      <ContentBlocks
+        blocks={blocks}
+        extractions={
+          view === "translated" && canTranslate ? item.media_extractions : []
+        }
+      />
+      <button
+        className="message-back-to-top"
+        type="button"
+        aria-label="回到顶部"
+        title="回到顶部"
+        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      >
+        <ArrowUp size={17} strokeWidth={2.4} />
+      </button>
     </article>
   );
 }

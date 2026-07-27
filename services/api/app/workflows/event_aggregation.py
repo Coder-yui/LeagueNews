@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.content_blocks import has_quoted_post
 from app.models.event import (
     EventAggregationRun,
     EventMessage,
@@ -13,8 +14,16 @@ from app.models.normalized_item import NormalizedItem
 from app.models.workflow import KnowledgeRule
 from app.schemas.event_workflow import EventDecisionDraft, EventReviewRejection
 from app.services.event_aggregation import add_message_to_event, create_event
-from app.services.event_candidates import find_event_candidates, stable_event_key
+from app.services.event_candidates import (
+    event_aggregation_policy,
+    find_event_candidates,
+    stable_event_key,
+)
 from app.services.llm import LLMClient
+from app.services.raw_item_versions import (
+    is_latest_normalized_item,
+    superseded_normalized_item_ids,
+)
 
 EVENT_STAGE = "event_decision"
 
@@ -25,6 +34,8 @@ async def start_event_aggregation(
     *,
     supersedes_run_id: int | None = None,
 ) -> EventAggregationRun:
+    if not is_latest_normalized_item(db, item):
+        raise ValueError("normalized item has been superseded by a newer raw revision")
     if db.scalar(
         select(EventMessage).where(EventMessage.normalized_item_id == item.id)
     ):
@@ -94,6 +105,25 @@ async def _generate_review(db: Session, run: EventAggregationRun) -> None:
             "summary": item.summary,
             "category": item.category,
             "entities": item.entities,
+            "importance_score": item.importance_score,
+            "credibility": item.credibility,
+            "credibility_score": item.credibility_score,
+            "credibility_evidence": item.credibility_evidence,
+            "raw_revision": item.raw_item.revision,
+            "supersedes_raw_item_id": item.raw_item.supersedes_raw_item_id,
+            "superseded_normalized_item_ids": superseded_normalized_item_ids(
+                db, item
+            ),
+            "event_policy": event_aggregation_policy(item),
+            "source": {
+                "source_id": item.raw_item.source_id,
+                "source_name": item.raw_item.source.name,
+                "connector_type": item.raw_item.source.connector_type,
+                "authority": item.raw_item.source.connector_config.get(
+                    "authority_level"
+                ),
+                "is_repost": has_quoted_post(item.raw_item.content_blocks),
+            },
             "published_at": (
                 item.raw_item.published_at.isoformat()
                 if item.raw_item.published_at
@@ -134,6 +164,8 @@ def approve_event_review(
 ) -> EventAggregationRun:
     _require_pending(review)
     run = review.run
+    if not is_latest_normalized_item(db, run.normalized_item):
+        raise ValueError("normalized item was superseded before event review approval")
     decision = EventDecisionDraft.model_validate(run.decision_draft)
     candidate_ids = {
         int(candidate["event_id"]) for candidate in run.candidate_snapshot
@@ -141,6 +173,8 @@ def approve_event_review(
     now = datetime.now(UTC)
 
     if decision.decision == "create":
+        item = run.normalized_item
+        is_official_confirmation = _official_confirmation(item, decision)
         create_event(
             db,
             normalized_item_id=run.normalized_item_id,
@@ -148,6 +182,18 @@ def approve_event_review(
             title=decision.title or "",
             summary=decision.summary or "",
             category=decision.category or "",
+            event_type=decision.event_type,
+            lifecycle_status=decision.lifecycle_status or "developing",
+            evidence_stance=decision.evidence_stance,
+            independence_key=f"source:{item.raw_item.source_id}",
+            is_official_confirmation=is_official_confirmation,
+            importance_score=(
+                item.importance_score
+                if decision.importance_score is None
+                else decision.importance_score
+            ),
+            importance_evidence=decision.importance_evidence,
+            latest_development=decision.latest_development,
             change_note=decision.change_note or "人工批准创建事件",
             evidence={"event_run_id": run.id, "new_facts": decision.new_facts},
             commit=False,
@@ -162,6 +208,23 @@ def approve_event_review(
             normalized_item_id=run.normalized_item_id,
             title=decision.title,
             summary=decision.summary,
+            lifecycle_status=decision.lifecycle_status,
+            evidence_stance=decision.evidence_stance,
+            independence_key=f"source:{run.normalized_item.raw_item.source_id}",
+            is_official_confirmation=_official_confirmation(
+                run.normalized_item, decision
+            ),
+            is_significant_update=decision.update_kind not in {
+                "context",
+                "duplicate_evidence",
+            },
+            importance_score=(
+                run.normalized_item.importance_score
+                if decision.importance_score is None
+                else decision.importance_score
+            ),
+            importance_evidence=decision.importance_evidence,
+            latest_development=decision.latest_development,
             change_note=decision.change_note or "人工批准更新事件",
             evidence={"event_run_id": run.id, "new_facts": decision.new_facts},
             commit=False,
@@ -221,3 +284,14 @@ def _require_pending(review: EventReviewTask) -> None:
         raise ValueError(f"event review is already {review.status}")
     if review.run.status != "awaiting_review":
         raise ValueError(f"event run is not awaiting review: {review.run.status}")
+
+
+def _official_confirmation(
+    item: NormalizedItem,
+    decision: EventDecisionDraft,
+) -> bool:
+    return (
+        decision.official_confirmation
+        and item.credibility == "official"
+        and not has_quoted_post(item.raw_item.content_blocks)
+    )

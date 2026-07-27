@@ -430,6 +430,9 @@ async def _build_item_proposal(
         source_context=_source_context(raw_item),
         knowledge_rules=rules,
     )
+    authority = _source_authority(raw_item)
+    credibility_score = max(0.0, min(authority, 100) / 100)
+    is_official = authority >= 100
     return {
         **translation_proposal,
         "normalized_title": analysis.title,
@@ -439,12 +442,19 @@ async def _build_item_proposal(
             [entity.model_dump(mode="json") for entity in analysis.entities]
         ),
         "importance_score": analysis.importance_score,
-        "credibility": analysis.credibility,
-        "credibility_score": analysis.credibility_score,
-        "credibility_evidence": analysis.credibility_evidence,
+        "importance_evidence": analysis.importance_evidence,
+        "credibility": "official" if is_official else "unverified",
+        "credibility_score": credibility_score,
+        "credibility_evidence": [
+            (
+                f"信源“{raw_item.source.name}”被配置为官方来源（权威度 {authority}）"
+                if is_official
+                else f"信源“{raw_item.source.name}”的配置权威度为 {authority}"
+            )
+        ],
         "language": raw_item.language,
         "analysis_model": settings.model_name,
-        "analysis_version": "v4-reviewed-item",
+        "analysis_version": "v5-importance-rubric",
         "ocr_corrections": ocr_corrections or [],
     }
 
@@ -485,6 +495,16 @@ async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
                 if isinstance(term.get("id"), int)
             ],
         }
+        if translation.translation_status == "not_required":
+            run.context = {
+                **run.context,
+                "approved_translation_proposal": proposal,
+            }
+            run.status = "running"
+            run.current_stage = ITEM_STAGE
+            db.commit()
+            await _generate_item_review(db, run)
+            return
         _replace_pending_review(
             db,
             run=run,
@@ -714,7 +734,7 @@ def _source_authority(raw_item: RawItem) -> int:
     if raw_item.source.connector_type in {"weibo", "x_twitter"}:
         return 60
     if raw_item.source.connector_type == "baidu_tieba":
-        return 30
+        return 60
     return 50
 
 

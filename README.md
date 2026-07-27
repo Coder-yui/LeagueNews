@@ -28,7 +28,7 @@ Source
   媒体落盘和入库。
 - `raw_items.content_blocks` 是原始图文的唯一事实来源，处理层不得回写。
 - `normalized_items` 只保存经过全部人工审核的单条消息结果。
-- 后续事件聚合只消费已批准的 `NormalizedItem`，不得改变采集和单条处理基座。
+- 事件聚合只消费已批准的 `NormalizedItem`，不得改变采集和单条处理基座。
 
 详细设计：
 
@@ -37,7 +37,7 @@ Source
 - [人工审核单条处理流程](docs/REVIEWED_AI_WORKFLOW.md)
 - [本地运行手册](docs/LOCAL_RUNBOOK.md)
 - [Connector 运行与排障](docs/CONNECTOR_OPERATIONS_GUIDE.md)
-- [下一阶段开发 Handoff](docs/DEVELOPMENT_HANDOFF.md)
+- [开发 Handoff](docs/DEVELOPMENT_HANDOFF.md)
 
 ## 目录
 

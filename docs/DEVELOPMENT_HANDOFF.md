@@ -1,12 +1,10 @@
 # LoL Daily Intel 开发 Handoff
 
-更新时间：2026-07-26
+更新时间：2026-07-27
 
 工作区：`E:\leagueNews`
 
-代码基线：`feeeb09 fix: sort messages by source publish time`
-
-本文是下一开发对话的权威入口。当前事实以代码、迁移和本文为准；旧的事件/报告实现
+本文是后续开发对话的权威入口。当前事实以代码、迁移和本文为准；旧的事件/报告实现
 说明已经清理。
 
 ## 1. 当前完成边界
@@ -25,7 +23,7 @@
   -> 消息列表与详情
 ```
 
-这条基座已经工作，下一阶段不得为事件聚合改写它。
+这条基座已经工作，事件聚合不得反向改写它。
 
 - Connector 是平台级能力；Source 是具体账号或站点。新增平台实现新 Connector，新增账号
   通常只新增 Source。
@@ -186,7 +184,9 @@ GET  /api/v1/knowledge/glossary
 - `023_remove_deferred_event_reporting.sql`
 
 事件聚合 v2 已通过追加迁移
-`026_create_event_aggregation_v2.sql` 创建核心表和约束。后续仍必须使用新的追加迁移。
+`026_create_event_aggregation_v2.sql`、`027_add_event_review_workflow.sql` 和
+`028_add_event_editorial_metrics.sql` 创建核心表、审核流程、编辑指标和约束。后续仍
+必须使用新的追加迁移。
 这里的“迁移”只表示创建或扩展新表和约束：
 
 - 不移动或重写 RawItem。
@@ -197,7 +197,7 @@ GET  /api/v1/knowledge/glossary
 现有业务数据属于测试与验收基线。开始开发前先查看 `git status --short` 和数据库实际
 状态，不要使用 `git reset --hard`、`git clean` 或带 `-v` 的 Docker 数据卷删除命令。
 
-## 6. 下一阶段：事件聚合 v2
+## 6. 当前事件聚合 v2
 
 ### 目标
 
@@ -313,7 +313,8 @@ event_revisions
 
 1. 定义严格 Pydantic 输出 schema，限制 `not_event/create/update` 和候选 ID。
 2. AI 只读取当前消息、最多 5 个候选和 `event_aggregation` 专用知识。
-3. 管理台事件页签展示消息、候选、AI 理由和拟议变更。
+3. 管理台事件页签管理已审核/未审核消息；审核中心的事件聚合审核页展示候选、AI 理由
+   和拟议变更。
 4. 人工批准后才事务写入正式事件；拒绝保留审核记录并沉淀独立知识。
 5. create/update/not_event/reject/retry 均有测试，运行通过 `supersedes_run_id` 保留重试链。
 

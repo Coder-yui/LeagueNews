@@ -7,6 +7,7 @@ import app.models  # noqa: F401
 from app.api.routes.normalized_items import (
     _published_payload,
     _published_statement,
+    list_normalized_items,
     list_published_items,
 )
 from app.core.database import Base
@@ -234,3 +235,69 @@ def test_published_items_order_by_original_publish_time_with_ingestion_fallback(
             fallback.id,
             older.id,
         ]
+
+
+def test_message_lists_only_include_latest_raw_revision() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Versioned Source", connector_type="riot_official")
+        db.add(source)
+        db.flush()
+
+        def add_revision(
+            *,
+            external_id: str,
+            revision: int,
+            supersedes_raw_item_id: int | None,
+        ) -> tuple[RawItem, NormalizedItem]:
+            raw = RawItem(
+                source_id=source.id,
+                external_id=external_id,
+                native_title=f"Revision {revision}",
+                content_blocks=[
+                    {"type": "paragraph", "text": f"Revision {revision}"}
+                ],
+                revision=revision,
+                supersedes_raw_item_id=supersedes_raw_item_id,
+            )
+            db.add(raw)
+            db.flush()
+            item = NormalizedItem(
+                raw_item_id=raw.id,
+                normalized_title=f"Revision {revision}",
+                normalized_text=f"Revision {revision}",
+                summary=f"Revision {revision}",
+                category="测试",
+                entities=[],
+                importance_score=0.5,
+                credibility="official",
+                credibility_score=1,
+                credibility_evidence=[],
+                target_language="zh-CN",
+                translated_title=f"Revision {revision}",
+                translated_content_blocks=[],
+                translation_status="not_required",
+                analysis_model="test",
+                analysis_version="test",
+            )
+            db.add(item)
+            db.commit()
+            return raw, item
+
+        old_raw, old_item = add_revision(
+            external_id="same-article",
+            revision=1,
+            supersedes_raw_item_id=None,
+        )
+        _, latest_item = add_revision(
+            external_id="same-article",
+            revision=2,
+            supersedes_raw_item_id=old_raw.id,
+        )
+
+        assert [item.id for item in list_normalized_items(db)] == [latest_item.id]
+        assert [item["id"] for item in list_published_items(db)] == [
+            latest_item.id
+        ]
+        assert old_item.id != latest_item.id

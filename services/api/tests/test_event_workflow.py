@@ -242,3 +242,29 @@ async def test_reject_records_knowledge_and_retry_supersedes_run(
     assert retried.supersedes_run_id == first.id
     assert retried.status == "awaiting_review"
     assert db.scalar(select(func.count(EventAggregationRun.id))) == 2
+
+
+@pytest.mark.anyio
+async def test_superseded_item_cannot_start_event_aggregation(
+    db: Session,
+) -> None:
+    source = Source(name="Superseded Workflow", connector_type="riot_official")
+    db.add(source)
+    db.commit()
+    old = _item(db, source, 0, "旧版活动页面")
+    successor_raw = RawItem(
+        source_id=source.id,
+        external_id="workflow-successor",
+        native_title="新版活动页面",
+        content_blocks=[
+            {"id": "b0001", "type": "paragraph", "text": "新版活动页面"}
+        ],
+        published_at=datetime(2026, 6, 20, tzinfo=UTC),
+        revision=2,
+        supersedes_raw_item_id=old.raw_item_id,
+    )
+    db.add(successor_raw)
+    db.commit()
+
+    with pytest.raises(ValueError, match="superseded"):
+        await start_event_aggregation(db, old)

@@ -37,13 +37,11 @@ def test_analysis_result_accepts_complete_result() -> None:
             "category": "版本更新",
             "entities": [{"name": "26.14", "type": "patch"}],
             "importance_score": 0.8,
-            "credibility": "official",
-            "credibility_score": 0.98,
-            "credibility_evidence": ["来自官方账号"],
+            "importance_evidence": ["属于版本预览，按对应区间评分。"],
         }
     )
     assert result.importance_score == 0.8
-    assert result.credibility_score == 0.98
+    assert not hasattr(result, "credibility_score")
 
 
 def test_analysis_result_rejects_more_than_five_entities() -> None:
@@ -58,9 +56,7 @@ def test_analysis_result_rejects_more_than_five_entities() -> None:
                     for index in range(6)
                 ],
                 "importance_score": 0.8,
-                "credibility": "official",
-                "credibility_score": 0.98,
-                "credibility_evidence": ["来自官方账号"],
+                "importance_evidence": ["属于版本更新。"],
             }
         )
 
@@ -123,6 +119,57 @@ def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch
     assert result.translated_media_extractions[0]["translated_data"]["sections"][0][
         "entries"
     ][0]["target"] == "亚托克斯"
+
+
+def test_long_article_translation_uses_large_contextual_chunks(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def fake_translate(_self, **payload):
+        calls.append(payload)
+        context = payload["document_context"]
+        preferred_title = context.get("preferred_translated_title")
+        return TranslationResult.model_validate(
+            {
+                "translated_title": preferred_title or "26.12版本公告",
+                "translated_blocks": [
+                    {
+                        "index": block["index"],
+                        "text": f"译文 {block['index']}",
+                    }
+                    for block in payload["text_blocks"]
+                ],
+                "translated_media_extractions": [],
+            }
+        )
+
+    monkeypatch.setattr(LLMClient, "translate", fake_translate)
+    raw_item = SimpleNamespace(
+        language="en",
+        display_title="Patch 26.12 Notes",
+        content_blocks=[
+            {"type": "heading", "level": 2, "text": "Champions"},
+            {"type": "paragraph", "text": "first " + ("a" * 5_000)},
+            {"type": "paragraph", "text": "second " + ("b" * 5_000)},
+            {"type": "paragraph", "text": "third " + ("c" * 5_000)},
+        ],
+    )
+
+    result = asyncio.run(build_translation(raw_item, media_extractions=[]))
+
+    assert len(calls) == 2
+    assert [block["index"] for block in calls[0]["text_blocks"]] == [0, 1, 2]
+    assert [block["index"] for block in calls[1]["text_blocks"]] == [3]
+    assert calls[0]["document_context"]["document_outline"] == "Champions"
+    assert calls[0]["document_context"]["total_chunks"] == 2
+    assert calls[1]["document_context"]["preferred_translated_title"] == "26.12版本公告"
+    assert calls[1]["document_context"]["previous_translation_tail"]
+    assert result.translated_title == "26.12版本公告"
+    assert [block["text"] for block in result.translated_content_blocks] == [
+        "译文 0",
+        "译文 1",
+        "译文 2",
+        "译文 3",
+    ]
 
 
 def test_patch_preview_accepts_adjustment_sections() -> None:
@@ -193,6 +240,223 @@ def _client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeComple
         chat=SimpleNamespace(completions=completions)
     )
     return client, completions
+
+
+def test_analysis_prompt_uses_approved_importance_rubric() -> None:
+    response = json.dumps(
+        {
+            "title": "新英雄公布",
+            "summary": "官方公布了一名新英雄。",
+            "category": "游戏更新",
+            "entities": [{"name": "新英雄", "type": "champion"}],
+            "importance_score": 0.95,
+            "importance_evidence": ["新英雄发布适用0.92至1.00区间。"],
+        }
+    )
+    client, completions = _client_with_responses([response])
+
+    result = asyncio.run(
+        client.analyze(
+            title="New champion",
+            content="A new champion is revealed.",
+            source_context={"authority": 100},
+            knowledge_rules=[],
+        )
+    )
+
+    assert result.importance_score == 0.95
+    messages = completions.calls[0]["messages"]
+    assert isinstance(messages, list)
+    prompt = messages[0]["content"]
+    assert "新英雄或英雄重做为 0.92-1.00" in prompt
+    assert "中韩队伍默认属于热门队伍" in prompt
+    assert "LPL 普通赛程和普通赛果如非决赛为 0.50-0.60" in prompt
+    assert "单一操作集锦、赛后调侃、二创视频" in prompt
+    assert "国服真正可免费获得皮肤的活动为 0.85-0.92" in prompt
+    assert "明星选手转会最高 0.75" in prompt
+    assert "官方来源不代表消息一定重要" in prompt
+    assert "不要在其中讨论信源或可信度" in prompt
+    assert "必须同时保留附属对象和文本明确指向的父级对象" in prompt
+
+
+def test_event_create_with_candidates_requires_explicit_rejections() -> None:
+    invalid_create = json.dumps(
+        {
+            "decision": "create",
+            "reason": "误认为是独立事件",
+            "title": "测试服礼包封面",
+            "summary": "出现礼包封面。",
+            "category": "测试服资讯",
+        }
+    )
+    valid_update = json.dumps(
+        {
+            "decision": "update",
+            "reason": "礼包是已有模式的附属内容",
+            "candidate_event_id": 8,
+            "update_kind": "context",
+            "evidence_stance": "context",
+        }
+    )
+    client, completions = _client_with_responses([invalid_create, valid_update])
+
+    result = asyncio.run(
+        client.propose_event(
+            item={
+                "title": "测试服怀旧玩法礼包封面",
+                "summary": "测试服出现相关礼包封面。",
+            },
+            candidates=[
+                {
+                    "event_id": 8,
+                    "title": "经典玩法正式公布",
+                    "summary": "拳头公布经典玩法。",
+                    "core_entities": ["classic mode"],
+                    "match_level": "broad",
+                }
+            ],
+            stable_event_key=None,
+            knowledge_rules=[],
+        )
+    )
+
+    assert result.decision == "update"
+    assert result.update_kind == "context"
+    assert len(completions.calls) == 2
+    retry_messages = completions.calls[1]["messages"]
+    assert isinstance(retry_messages, list)
+    assert "candidate_rejections" in retry_messages[-1]["content"]
+
+
+def test_cn_mythic_shop_policy_rejects_not_event_and_caps_importance() -> None:
+    invalid = json.dumps(
+        {
+            "decision": "not_event",
+            "reason": "误认为例行轮换不是事件",
+        }
+    )
+    valid = json.dumps(
+        {
+            "decision": "create",
+            "reason": "创建本周国服神话商城小事件",
+            "event_key": "mythic-shop:cn:2026-w30",
+            "event_type": "activity",
+            "lifecycle_status": "live",
+            "title": "2026年第30周国服神话商城轮换",
+            "summary": "本周神话商城轮换内容已公布。",
+            "category": "国服活动",
+            "importance_score": 0.4,
+            "importance_evidence": ["国服商城常规周轮换，影响有限。"],
+        }
+    )
+    client, completions = _client_with_responses([invalid, valid])
+    policy = {
+        "policy_type": "mythic_shop_rotation",
+        "event_eligible": True,
+        "region": "cn",
+        "cadence": "weekly",
+        "importance_range": [0.3, 0.45],
+    }
+
+    result = asyncio.run(
+        client.propose_event(
+            item={"title": "神话商城每周轮换", "event_policy": policy},
+            candidates=[],
+            stable_event_key="mythic-shop:cn:2026-w30",
+            knowledge_rules=[],
+        )
+    )
+
+    assert result.decision == "create"
+    assert result.importance_score == 0.4
+    assert len(completions.calls) == 2
+
+
+def test_international_mythic_shop_policy_requires_not_event() -> None:
+    invalid = json.dumps(
+        {
+            "decision": "create",
+            "reason": "误建国际服轮换事件",
+            "title": "Mythic Shop Rotation",
+            "summary": "International rotation.",
+            "category": "皮肤资讯",
+        }
+    )
+    valid = json.dumps(
+        {
+            "decision": "not_event",
+            "reason": "X 来源的国际服轮换不进入国服事件层",
+        }
+    )
+    client, completions = _client_with_responses([invalid, valid])
+
+    result = asyncio.run(
+        client.propose_event(
+            item={
+                "title": "Mythic Shop weekly rotation",
+                "event_policy": {
+                    "policy_type": "mythic_shop_rotation",
+                    "event_eligible": False,
+                    "region": "international",
+                    "cadence": "weekly",
+                    "importance_range": [0.3, 0.45],
+                },
+            },
+            candidates=[],
+            stable_event_key=None,
+            knowledge_rules=[],
+        )
+    )
+
+    assert result.decision == "not_event"
+    assert len(completions.calls) == 2
+
+
+def test_cn_daily_mythic_shop_update_must_be_context() -> None:
+    invalid = json.dumps(
+        {
+            "decision": "update",
+            "reason": "加入本周轮换",
+            "candidate_event_id": 12,
+            "event_type": "activity",
+            "update_kind": "new_fact",
+            "importance_score": 0.4,
+        }
+    )
+    valid = json.dumps(
+        {
+            "decision": "update",
+            "reason": "每日内容作为本周轮换的补充",
+            "candidate_event_id": 12,
+            "event_type": "activity",
+            "update_kind": "context",
+            "evidence_stance": "context",
+            "importance_score": 0.35,
+        }
+    )
+    client, completions = _client_with_responses([invalid, valid])
+
+    result = asyncio.run(
+        client.propose_event(
+            item={
+                "title": "神话商城每日轮换",
+                "event_policy": {
+                    "policy_type": "mythic_shop_rotation",
+                    "event_eligible": True,
+                    "region": "cn",
+                    "cadence": "daily",
+                    "importance_range": [0.3, 0.45],
+                },
+            },
+            candidates=[{"event_id": 12, "title": "本周国服神话商城轮换"}],
+            stable_event_key="mythic-shop:cn:2026-w30",
+            knowledge_rules=[],
+        )
+    )
+
+    assert result.decision == "update"
+    assert result.update_kind == "context"
+    assert len(completions.calls) == 2
 
 
 def test_schema_business_error_is_returned_to_model_and_retried() -> None:
@@ -278,6 +542,12 @@ def test_knowledge_organization_retries_when_source_ids_are_not_fully_covered() 
 
     assert result.rules[0].source_rule_ids == [1, 2]
     assert len(completions.calls) == 2
+    first_messages = completions.calls[0]["messages"]
+    assert isinstance(first_messages, list)
+    prompt = first_messages[0]["content"]
+    assert "必须删除文章标题、具体日期、消息编号、链接" in prompt
+    assert "跨文章复用的判断原则" in prompt
+    assert "不得把文章中的偶然事实、实体或结论泛化成新规则" in prompt
 
 
 def test_translation_retries_when_structured_target_keeps_english_name() -> None:

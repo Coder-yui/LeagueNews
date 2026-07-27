@@ -8,13 +8,6 @@ import Link from "next/link";
 import { MessageFeed } from "@/components/message-feed";
 import { getPublishedItems } from "@/lib/api";
 
-const credibilityLabel: Record<string, string> = {
-  official: "官方确认",
-  corroborated: "多源印证",
-  unverified: "尚未证实",
-  rumor: "社区传闻",
-};
-
 export default async function Home() {
   const items = await getPublishedItems();
   const topItem = items[0];
@@ -50,7 +43,7 @@ export default async function Home() {
       <section className="signal-grid" aria-label="今日概览">
         <div><span>已审消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
         <div><span>高优先级</span><strong>{items.filter((item) => item.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
-        <div><span>可信信号</span><strong>{items.filter((item) => ["official", "corroborated"].includes(item.credibility)).length.toString().padStart(2, "0")}</strong></div>
+        <div><span>官方消息</span><strong>{items.filter((item) => item.credibility === "official").length.toString().padStart(2, "0")}</strong></div>
         <div className="pulse"><Activity size={18} /><span>持续更新</span></div>
       </section>
 
@@ -59,7 +52,14 @@ export default async function Home() {
           <div className="lead-meta"><Radio size={16} /> 最新消息 · 重要性 {Math.round(topItem.importance_score * 100)}</div>
           <h2><Link href={`/messages/${topItem.id}`}>{topItem.title}</Link></h2>
           <p>{topItem.summary}</p>
-          <div className="tag-row"><span>{topItem.category}</span><span className={`cred ${topItem.credibility}`}>{credibilityLabel[topItem.credibility] ?? topItem.credibility}</span></div>
+          <div className="tag-row">
+            <span>{topItem.category}</span>
+            <span className={`cred ${topItem.credibility}`}>
+              {topItem.credibility === "official"
+                ? "官方确认"
+                : `可信度 ${Math.round(topItem.credibility_score * 100)}`}
+            </span>
+          </div>
         </section>
       )}
 

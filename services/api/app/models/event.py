@@ -2,8 +2,10 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -30,6 +32,19 @@ class Event(Base):
     summary: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(60), index=True)
     status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    event_type: Mapped[str] = mapped_column(String(40), default="other", index=True)
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(40), default="developing", index=True
+    )
+    credibility_status: Mapped[str] = mapped_column(
+        String(40), default="unverified", index=True
+    )
+    credibility_score: Mapped[float] = mapped_column(Float, default=0)
+    importance_score: Mapped[float] = mapped_column(Float, default=0, index=True)
+    importance_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+    latest_development: Mapped[str] = mapped_column(Text, default="")
+    independent_source_count: Mapped[int] = mapped_column(Integer, default=0)
+    official_source_count: Mapped[int] = mapped_column(Integer, default=0)
     first_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
@@ -54,6 +69,22 @@ class Event(Base):
     __table_args__ = (
         CheckConstraint("current_revision >= 1", name="ck_events_current_revision_positive"),
         CheckConstraint(
+            "credibility_score >= 0 AND credibility_score <= 1",
+            name="ck_events_credibility_score",
+        ),
+        CheckConstraint(
+            "importance_score >= 0 AND importance_score <= 1",
+            name="ck_events_importance_score",
+        ),
+        CheckConstraint(
+            "independent_source_count >= 0",
+            name="ck_events_independent_source_count",
+        ),
+        CheckConstraint(
+            "official_source_count >= 0",
+            name="ck_events_official_source_count",
+        ),
+        CheckConstraint(
             "first_published_at IS NULL OR last_published_at IS NULL "
             "OR first_published_at <= last_published_at",
             name="ck_events_publish_range",
@@ -72,6 +103,10 @@ class EventMessage(Base):
         primary_key=True,
     )
     relation_type: Mapped[str] = mapped_column(String(30), default="primary")
+    evidence_stance: Mapped[str] = mapped_column(String(20), default="supports")
+    independence_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_official_confirmation: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_significant_update: Mapped[bool] = mapped_column(Boolean, default=True)
     source_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
@@ -85,6 +120,10 @@ class EventMessage(Base):
     __table_args__ = (
         UniqueConstraint("normalized_item_id", name="uq_event_messages_normalized_item"),
         CheckConstraint("relation_type = 'primary'", name="ck_event_messages_relation_type"),
+        CheckConstraint(
+            "evidence_stance IN ('supports', 'contradicts', 'context')",
+            name="ck_event_messages_evidence_stance",
+        ),
     )
 
 

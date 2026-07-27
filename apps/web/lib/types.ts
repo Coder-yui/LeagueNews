@@ -80,6 +80,15 @@ export type EventSummary = {
   summary: string;
   category: string;
   status: string;
+  event_type: string;
+  lifecycle_status: string;
+  credibility_status: string;
+  credibility_score: number;
+  importance_score: number;
+  importance_evidence: string[];
+  latest_development: string;
+  independent_source_count: number;
+  official_source_count: number;
   first_published_at: string | null;
   last_published_at: string | null;
   current_revision: number;
@@ -91,6 +100,9 @@ export type EventSummary = {
 export type EventMessage = {
   normalized_item_id: number;
   relation_type: string;
+  evidence_stance: string;
+  is_official_confirmation: boolean;
+  is_significant_update: boolean;
   source_published_at: string | null;
   added_at: string;
   title: string;

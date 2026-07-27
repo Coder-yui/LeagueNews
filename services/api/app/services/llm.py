@@ -29,9 +29,7 @@ class AnalysisResult(BaseModel):
     category: str = Field(min_length=1, max_length=60)
     entities: list[ExtractedEntity] = Field(max_length=5)
     importance_score: float = Field(ge=0, le=1)
-    credibility: Literal["official", "corroborated", "unverified", "rumor"]
-    credibility_score: float = Field(ge=0, le=1)
-    credibility_evidence: list[str] = Field(default_factory=list)
+    importance_evidence: list[str] = Field(min_length=1, max_length=4)
 
 
 class RelevanceResult(BaseModel):
@@ -160,16 +158,47 @@ class LLMClient:
         prompt = (
             "你是英雄联盟中文新闻编辑。请分析输入资讯，只输出一个完整的 JSON 对象，"
             "不要输出 Markdown。必须包含 title、summary、category、entities、"
-            "importance_score、credibility、credibility_score、credibility_evidence。"
+            "importance_score、importance_evidence。"
             "title、summary、category 和实体的展示名称必须使用简体中文；"
             "entities 必须是对象数组，每个对象严格使用 name、type、canonical_name "
             "三个键，禁止使用“英雄”“物品”等动态键；type 使用稳定英文类型；"
             "实体只保留理解这条资讯最重要的 2 到 4 个，确有必要时最多 5 个；"
+            "当消息核心是某个模式、英雄、赛事、版本或活动的礼包、皮肤、图标、封面、"
+            "奖励、截图、测试服资源等附属内容时，entities 必须同时保留附属对象和文本"
+            "明确指向的父级对象，不得只提取礼包或素材；父级对象使用 game_mode、champion、"
+            "tournament、patch、activity 等稳定类型。不得凭空推测文本没有指向的父级对象。"
             "版本图片里批量出现的英雄或装备不要全部作为新闻实体；"
             "事实、专有名词原文和数值不得丢失。category 使用简短中文分类；"
-            "importance_score 必须为 0 到 1；credibility 只能是 official、"
-            "corroborated、unverified、rumor；credibility_score 必须为 0 到 1；"
-            "credibility_evidence 列出支撑可信度判断的简短依据。"
+            "importance_score 必须为 0 到 1，并按以下统一尺度判断："
+            "正式版本改动、平衡调整为 0.88-1.00；新英雄或英雄重做为 0.92-1.00；"
+            "新模式、新地图或核心玩法系统为 0.85-0.98；版本预览或开发者前瞻为 0.80-0.92；"
+            "严重故障、账号安全、封禁或反作弊重大变化为 0.85-1.00。"
+            "仅限全球总决赛、MSI、先锋赛等拳头全球赛事：重大节点为 0.85-0.98；"
+            "普通场次无热门队伍为 0.58-0.66；中韩队伍默认属于热门队伍，"
+            "有中韩队伍参赛为 0.73-0.78，两支中韩或顶级热门队伍交锋为 0.76-0.80；"
+            "涉及晋级、淘汰、决赛或冠军时按重大节点评分。"
+            "LPL 决赛、冠军、世界赛资格或重大赛制变化为 0.72-0.88，"
+            "LPL 普通赛程和普通赛果如非决赛为 0.50-0.60，不得因为出现热门队伍"
+            "而突破 0.60；单一操作集锦、赛后调侃、二创视频或缺少实质赛况的信息"
+            "为 0.30-0.50。其他地方联赛应更低。"
+            "国服普通游戏活动为 0.66-0.72；国服大型活动为 0.80-0.95；"
+            "国服神话商城的常规每周或每日轮换属于低重要性小事件，为 0.30-0.45，"
+            "不得套用普通国服活动区间；"
+            "国际服普通游戏活动为 0.55-0.60；国际服大型活动为 0.70-0.85；"
+            "国服真正可免费获得皮肤的活动为 0.85-0.92，抽奖概率获得、"
+            "高额付费或条件苛刻的活动不算免费皮肤。国际服活动通常低于同类国服活动。"
+            "独立的新皮肤资讯为 0.70-0.80，根据英雄热度和皮肤品质调整；"
+            "新英雄伴生皮肤不得在新英雄高分上额外加分。明星选手转会最高 0.75；"
+            "明星选手退役为 0.70-0.80。商业合作和周边通常为 0.25-0.50，"
+            "社区招募或线下活动通常为 0.20-0.45，社交互动通常为 0.10-0.30。"
+            "按消息核心事实评分，不把多个附属主题机械相加；重复提醒和缺少实质信息应降分。"
+            "importance_evidence 用一到三条简短中文理由说明命中的内容类型、"
+            "分数区间及主要加减分因素，不要在其中讨论信源或可信度。"
+            "可信度与重要性相互独立，官方来源不代表消息一定重要。"
+            "approved_rules 仅是判断约束，不是当前消息的事实来源；其中出现的标题、"
+            "日期、实体或示例绝不能写入当前结果，除非它们也明确出现在当前 title 或 content 中。"
+            "如果当前内容信息不足，只能概括可观察内容，不得用规则中的旧消息补全。"
+            "不要判断消息可信度，可信度由系统根据信源配置确定。"
         )
         return await self._validated_json_completion(
             prompt=prompt,
@@ -205,6 +234,53 @@ class LLMClient:
                 stable_event_key,
             }:
                 return "create 不能编造稳定事件键"
+            policy = item.get("event_policy")
+            if isinstance(policy, dict) and policy.get("policy_type") == (
+                "mythic_shop_rotation"
+            ):
+                eligible = bool(policy.get("event_eligible"))
+                if not eligible and result.decision != "not_event":
+                    return "非国服神话商城轮换不进入事件层，decision 必须为 not_event"
+                if eligible and result.decision == "not_event":
+                    return "国服神话商城轮换必须形成或更新周轮换事件，不能是 not_event"
+                if eligible and result.event_type != "activity":
+                    return "国服神话商城轮换的 event_type 必须为 activity"
+                importance_range = policy.get("importance_range")
+                if (
+                    eligible
+                    and isinstance(importance_range, list)
+                    and len(importance_range) == 2
+                    and (
+                        result.importance_score is None
+                        or not (
+                            float(importance_range[0])
+                            <= result.importance_score
+                            <= float(importance_range[1])
+                        )
+                    )
+                ):
+                    return "国服神话商城轮换的重要性必须在 0.30 到 0.45"
+                if (
+                    eligible
+                    and policy.get("cadence") == "daily"
+                    and result.decision == "update"
+                    and result.update_kind != "context"
+                ):
+                    return "每日轮换加入本周事件时 update_kind 必须为 context"
+            if result.decision == "create" and candidate_ids:
+                rejected_ids = {
+                    rejection.event_id
+                    for rejection in result.candidate_rejections
+                }
+                unknown_ids = rejected_ids - candidate_ids
+                if unknown_ids:
+                    return "candidate_rejections 只能引用输入候选"
+                missing_ids = candidate_ids - rejected_ids
+                if missing_ids:
+                    return (
+                        "存在候选时选择 create，必须在 candidate_rejections 中逐一说明"
+                        f"为何不是同一事件；缺少 event_id={sorted(missing_ids)}"
+                    )
             return None
 
         prompt = (
@@ -213,7 +289,36 @@ class LLMClient:
             "not_event、create、update。update 必须引用候选 event_id；create 只能使用"
             "程序提供的 stable_event_key 或 null。不得生成 SQL，不得假设候选之外的事件。"
             "title、summary、category、change_note 和 new_facts 使用简体中文。"
-            "not_event 用于不值得进入持续事件层的孤立消息。只输出 JSON。"
+            "事件是明确的现实状态变化，不是相似消息的文件夹。普通 LPL 常规赛结果也必须"
+            "形成 match 事件，但重要性通常保持 0.50 到 0.58；只有明确影响排名、晋级或淘汰"
+            "才提高。具体到选手、动作和目标战队的单源转会爆料应立即形成 transfer 事件，"
+            "lifecycle_status 使用 unconfirmed，标题必须带“传闻”或同等不确定性措辞。"
+            "同一原始来源的转发不算多源。只有原始官方来源直接确认其权责范围内的核心事实时，"
+            "official_confirmation 才能为 true；官方账号转发他人内容不算官方确认。"
+            "update_kind=duplicate_evidence 或 context 时不得虚构新增事实；只有新增事实、确认、"
+            "否认、修正才是显著更新。官方否认使用 evidence_stance=contradicts、"
+            "update_kind=refutation、lifecycle_status=officially_refuted。"
+            "item.supersedes_raw_item_id 非空表示同一来源文档的新采集版本，不是第二个独立"
+            "消息或第二个来源。它应更新原版本所属事件；如果没有实质新事实，必须使用"
+            "update_kind=duplicate_evidence，不得增加事件 revision。"
+            "版本预览、完整预览、上线和热修复优先进入同一个 patch 主事件；新英雄、英雄重做"
+            "和核心玩法系统属于 major_gameplay_change，但当前每条消息只选择一个最主要事件。"
+            "候选包含 match_level=strong 的强身份候选和 match_level=broad 的宽召回候选。"
+            "对宽召回候选必须结合候选标题、摘要和 core_entities 判断：当前消息中的别名、"
+            "缩写、旧译名，以及礼包、皮肤、图标、封面、奖励、截图、测试服资源等附属对象，"
+            "如果明确依附于候选事件的主体，应 update 该事件而不是 create。仅有同类词、"
+            "相近日期或泛主题相似不能合并。附属素材没有改变事件核心状态时通常使用"
+            "update_kind=context，不增加 revision；只有形成可独立追踪的发布、销售或活动"
+            "事实时才考虑独立事件。只要存在候选却仍选择 create，必须通过"
+            "candidate_rejections 逐一引用每个候选 event_id 并说明不是同一事件的具体原因。"
+            "item.event_policy 是程序确定的领域约束，必须遵守。国服神话商城轮换按中国时区"
+            "ISO 周聚合为一个低重要性 activity 事件，周内每日轮换作为 context 加入同一事件，"
+            "不增加 revision，事件重要性保持 0.30-0.45。即使先处理每日消息，也应使用"
+            "stable_event_key 创建本周聚合事件。X 来源的神话商城轮换按国际服处理，"
+            "不进入本站国服轮换事件层，必须选择 not_event。"
+            "importance_score 评价事件影响，不因消息数量或官方身份加分；可信度与重要性独立。"
+            "latest_development 用一句话概括本次最新进展。"
+            "not_event 只用于没有明确事实变化的互动、二创、泛宣传或纯观点。只输出 JSON。"
         )
         return await self._validated_json_completion(
             prompt=prompt,
@@ -238,6 +343,7 @@ class LLMClient:
         glossary: list[dict[str, object]] | None = None,
         knowledge_rules: list[str] | None = None,
         media_extractions: list[dict[str, object]] | None = None,
+        document_context: dict[str, object] | None = None,
     ) -> TranslationResult:
         expected_indexes = {int(block["index"]) for block in text_blocks}
         expected_extraction_ids = {
@@ -376,6 +482,9 @@ class LLMClient:
             "“残月之肃”；若原文 target 本身是该称号，则应译为“残月之肃”。"
             "只输出完整 JSON，不要输出"
             "Markdown。translated_blocks 必须逐一返回输入中的每个 index；"
+            "document_context 仅用于保持全文术语、语气和标题一致，不是待翻译正文；"
+            "只返回当前 text_blocks 中的 index。若 preferred_translated_title 非空，"
+            "translated_title 必须沿用该标题。"
             "本阶段只翻译原始标题、正文块和图片结构化内容，不生成摘要、实体、分类或评分。"
         )
         return await self._validated_json_completion(
@@ -388,6 +497,7 @@ class LLMClient:
                 "media_extractions": media_extractions or [],
                 "approved_glossary": glossary or [],
                 "approved_rules": knowledge_rules or [],
+                "document_context": document_context or {},
             },
             max_tokens=8000,
             schema=TranslationResult,
@@ -456,6 +566,9 @@ class LLMClient:
 
         prompt = (
             "你是知识库编辑。整理所有输入规则：去除口语、背景叙述和重复表达，"
+            "必须删除文章标题、具体日期、消息编号、链接以及“这篇文章/这条消息”等"
+            "只对单条内容成立的上下文，将退回理由改写成可跨文章复用的判断原则。"
+            "不得把文章中的偶然事实、实体或结论泛化成新规则，也不得凭空增加约束。"
             "合并语义重复或可组成同一判断原则的规则，但不得丢失有效约束、例外条件"
             "或纠正结论。每条输出应是简洁、明确、可直接提供给模型执行的中文规则，"
             "通常一到三句话。只能合并 knowledge_type 与 scope 完全相同的规则。"
@@ -516,6 +629,7 @@ class LLMClient:
                 last_error = f"模型连接中断：{exc}"
                 continue
             raw_content = response.choices[0].message.content
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
             if not raw_content or not raw_content.strip():
                 continue
             try:
@@ -528,7 +642,12 @@ class LLMClient:
                     raise ValueError(business_error)
                 return result
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-                last_error = _compact_validation_error(exc)
+                validation_error = _compact_validation_error(exc)
+                last_error = (
+                    f"模型输出达到长度上限并被截断；{validation_error}"
+                    if finish_reason == "length"
+                    else validation_error
+                )
                 messages.extend(
                     [
                         {"role": "assistant", "content": raw_content[:8000]},

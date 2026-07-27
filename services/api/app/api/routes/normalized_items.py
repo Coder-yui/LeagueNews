@@ -9,13 +9,19 @@ from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
 from app.models.raw_item import RawItem
 from app.schemas.normalized_item import NormalizedItemRead, PublishedItemRead
+from app.services.raw_item_versions import latest_normalized_item_condition
 
 router = APIRouter()
 
 
 @router.get("", response_model=list[NormalizedItemRead])
 def list_normalized_items(db: Session = Depends(get_db)) -> list[NormalizedItem]:
-    statement = select(NormalizedItem).order_by(NormalizedItem.created_at.desc()).limit(100)
+    statement = (
+        select(NormalizedItem)
+        .where(latest_normalized_item_condition())
+        .order_by(NormalizedItem.created_at.desc())
+        .limit(100)
+    )
     return list(db.scalars(statement))
 
 
@@ -84,10 +90,15 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
 
 @router.get("/published", response_model=list[PublishedItemRead])
 def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    statement = _published_statement().order_by(
-        func.coalesce(RawItem.published_at, RawItem.ingested_at).desc(),
-        NormalizedItem.id.desc(),
-    ).limit(100)
+    statement = (
+        _published_statement()
+        .where(latest_normalized_item_condition())
+        .order_by(
+            func.coalesce(RawItem.published_at, RawItem.ingested_at).desc(),
+            NormalizedItem.id.desc(),
+        )
+        .limit(100)
+    )
     return [_published_payload(item) for item in db.scalars(statement)]
 
 

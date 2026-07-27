@@ -37,7 +37,13 @@ def _session() -> Session:
     return Session(engine, expire_on_commit=False)
 
 
-def _raw_item(db: Session, *, language: str | None = None) -> RawItem:
+def _raw_item(
+    db: Session,
+    *,
+    language: str | None = None,
+    native_title: str = "Patch preview",
+    content_blocks: list[dict[str, object]] | None = None,
+) -> RawItem:
     source = Source(
         name="测试信源",
         connector_type="x_twitter",
@@ -48,9 +54,10 @@ def _raw_item(db: Session, *, language: str | None = None) -> RawItem:
     db.flush()
     raw = RawItem(
         source_id=source.id,
-        native_title="Patch preview",
+        native_title=native_title,
         language=language,
-        content_blocks=[{"type": "paragraph", "text": "A test patch preview"}],
+        content_blocks=content_blocks
+        or [{"type": "paragraph", "text": "A test patch preview"}],
         published_at=datetime(2026, 7, 25, tzinfo=UTC),
     )
     db.add(raw)
@@ -387,6 +394,7 @@ def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
                     {"name": "版本预览", "type": "document_type"},
                 ],
                 "importance_score": 0.8,
+                "importance_evidence": ["属于版本预览，处于0.80至0.92区间。"],
                 "credibility": "official",
                 "credibility_score": 1.0,
                 "credibility_evidence": ["设计师官方账号"],
@@ -437,6 +445,70 @@ def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
     assert "glossary" not in captured
     assert proposal["summary"] == "厄斐琉斯将在新版本中获得增强。"
     assert proposal["normalized_text"] == "Aphelios receives buffs."
+    assert proposal["importance_evidence"] == ["属于版本预览，处于0.80至0.92区间。"]
+    assert proposal["credibility"] == "unverified"
+    assert proposal["credibility_score"] == 0.6
+    assert proposal["credibility_evidence"] == ["信源“测试信源”的配置权威度为 60"]
+
+
+def test_source_authority_uses_sixty_for_tieba_and_one_hundred_for_official() -> None:
+    with _session() as db:
+        raw = _raw_item(db)
+        raw.source.connector_type = "baidu_tieba"
+        assert reviewed_pipeline._source_authority(raw) == 60
+
+        raw.source.connector_type = "x_twitter"
+        raw.source.external_key = "LeagueOfLegends"
+        assert reviewed_pipeline._source_authority(raw) == 100
+
+
+def test_chinese_item_skips_translation_review(monkeypatch) -> None:
+    generated_item_reviews: list[int] = []
+
+    async def fake_generate_item_review(db, run):
+        generated_item_reviews.append(run.id)
+        run.status = "awaiting_review"
+        db.commit()
+
+    monkeypatch.setattr(
+        reviewed_pipeline,
+        "_generate_item_review",
+        fake_generate_item_review,
+    )
+
+    with _session() as db:
+        raw = _raw_item(
+            db,
+            language="zh-CN",
+            native_title="国服活动公告",
+            content_blocks=[{"type": "paragraph", "text": "参与活动可免费获得皮肤。"}],
+        )
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="running",
+            current_stage="translation",
+            context={},
+        )
+        db.add(run)
+        db.commit()
+
+        asyncio.run(reviewed_pipeline._generate_translation_review(db, run))
+
+        db.refresh(run)
+        assert run.current_stage == "item_analysis"
+        assert run.status == "awaiting_review"
+        assert generated_item_reviews == [run.id]
+        assert run.context["approved_translation_proposal"]["translation_status"] == "not_required"
+        translation_reviews = list(
+            db.scalars(
+                select(ReviewTask).where(
+                    ReviewTask.processing_run_id == run.id,
+                    ReviewTask.stage == "translation",
+                )
+            )
+        )
+        assert translation_reviews == []
 
 
 def test_translation_rejection_accepts_glossary_without_reason() -> None:

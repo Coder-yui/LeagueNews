@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpenCheck,
   Check,
+  ChevronLeft,
+  ChevronRight,
   FileClock,
   LoaderCircle,
   Play,
@@ -27,27 +29,32 @@ type RawItem = {
   canonical_url: string | null;
   processing_status: string;
   published_at: string | null;
+  ingested_at: string;
+};
+
+type Source = {
+  id: number;
+  name: string;
+  connector_type: string;
 };
 
 type ProcessingRun = {
   id: number;
   raw_item_id: number;
-  workflow_type: string;
   status: string;
   current_stage: string;
-  error_message: string | null;
 };
 
 type ReviewTask = {
   id: number;
   processing_run_id: number;
   stage: string;
-  status: string;
   proposal: JsonObject;
 };
 
 type NormalizedItem = {
   id: number;
+  raw_item_id: number;
   normalized_title: string;
   summary: string;
   category: string;
@@ -56,17 +63,12 @@ type NormalizedItem = {
 type EventAggregationRun = {
   id: number;
   normalized_item_id: number;
-  supersedes_run_id: number | null;
   status: string;
-  outcome: string | null;
-  current_stage: string;
-  error_message: string | null;
 };
 
 type EventReviewTask = {
   id: number;
   event_aggregation_run_id: number;
-  status: string;
   proposal: JsonObject;
 };
 
@@ -75,7 +77,6 @@ type KnowledgeRule = {
   knowledge_type: string;
   scope: string;
   rule_text: string;
-  version: number;
   is_active: boolean;
 };
 
@@ -83,11 +84,23 @@ type GlossaryTerm = {
   id: number;
   source_term: string;
   preferred_translation: string;
-  forbidden_translations: string[];
-  scope: string;
-  version: number;
   is_active: boolean;
 };
+
+const knowledgeTypes = [
+  ["relevance", "相关性"],
+  ["analysis", "内容分析"],
+  ["translation", "翻译"],
+  ["event_aggregation", "事件聚合"],
+] as const;
+
+const KNOWLEDGE_PAGE_SIZE = 8;
+const GLOSSARY_PAGE_SIZE = 12;
+const ITEM_PAGE_SIZE = 10;
+const REVIEW_PAGE_SIZE = 5;
+const EVENT_PAGE_SIZE = 10;
+
+type TimeSort = "desc" | "asc";
 
 type OCRParameters = {
   scale: number;
@@ -211,6 +224,15 @@ const stageLabels: Record<string, string> = {
   translation: "翻译与术语审核",
 };
 
+const connectorLabels: Record<string, string> = {
+  manual: "手动录入",
+  riot_official: "拳头官网",
+  tencent_lol: "腾讯英雄联盟官网",
+  x_twitter: "X",
+  weibo: "微博",
+  baidu_tieba: "百度贴吧",
+};
+
 function latestRunsByRawItem(runs: ProcessingRun[]): ProcessingRun[] {
   const latest = new Map<number, ProcessingRun>();
   for (const run of runs) {
@@ -218,6 +240,29 @@ function latestRunsByRawItem(runs: ProcessingRun[]): ProcessingRun[] {
     if (!current || run.id > current.id) latest.set(run.raw_item_id, run);
   }
   return Array.from(latest.values());
+}
+
+function rawItemTime(item: RawItem | undefined): number {
+  if (!item) return 0;
+  return new Date(item.published_at ?? item.ingested_at).getTime();
+}
+
+function sortedByMessageTime<T>(
+  items: T[],
+  rawItemFor: (item: T) => RawItem | undefined,
+  direction: TimeSort,
+): T[] {
+  const multiplier = direction === "asc" ? 1 : -1;
+  return [...items].sort((left, right) => {
+    const timeDifference =
+      rawItemTime(rawItemFor(left)) - rawItemTime(rawItemFor(right));
+    if (timeDifference) return timeDifference * multiplier;
+    return 0;
+  });
+}
+
+function pageItems<T>(items: T[], page: number, pageSize: number): T[] {
+  return items.slice((page - 1) * pageSize, page * pageSize);
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -235,6 +280,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 export function AdminConsole() {
   const [tab, setTab] = useState<Tab>("items");
   const [rawItems, setRawItems] = useState<RawItem[]>([]);
+  const [sources, setSources] = useState<Source[]>([]);
   const [runs, setRuns] = useState<ProcessingRun[]>([]);
   const [reviews, setReviews] = useState<ReviewTask[]>([]);
   const [normalizedItems, setNormalizedItems] = useState<NormalizedItem[]>([]);
@@ -253,6 +299,7 @@ export function AdminConsole() {
     try {
       const [
         raw,
+        sourceRows,
         runRows,
         reviewRows,
         normalizedRows,
@@ -267,6 +314,7 @@ export function AdminConsole() {
       ] =
         await Promise.all([
           api<RawItem[]>("/raw-items"),
+          api<Source[]>("/sources"),
           api<ProcessingRun[]>("/workflows/runs"),
           api<ReviewTask[]>("/workflows/reviews?status=pending"),
           api<NormalizedItem[]>("/normalized-items"),
@@ -280,6 +328,7 @@ export function AdminConsole() {
           api<MediaExtraction[]>("/media-assets/extractions"),
         ]);
       setRawItems(raw);
+      setSources(sourceRows);
       setRuns(runRows);
       setReviews(reviewRows);
       setNormalizedItems(normalizedRows);
@@ -369,8 +418,14 @@ export function AdminConsole() {
         />
       )}
       {tab === "reviews" && (
-        <ReviewsPanel
+        <ReviewCenterPanel
           reviews={reviews}
+          eventReviews={eventReviews}
+          runs={runs}
+          eventRuns={eventRuns}
+          normalizedItems={normalizedItems}
+          rawItems={rawItems}
+          sources={sources}
           mediaExtractions={mediaExtractions}
           ocrAssets={ocrAssets}
           busy={busy}
@@ -390,7 +445,7 @@ export function AdminConsole() {
         <EventAggregationPanel
           items={normalizedItems}
           runs={eventRuns}
-          reviews={eventReviews}
+          rawItems={rawItems}
           busy={busy}
           act={act}
         />
@@ -405,37 +460,88 @@ export function AdminConsole() {
 function EventAggregationPanel({
   items,
   runs,
-  reviews,
+  rawItems,
   busy,
   act,
 }: {
   items: NormalizedItem[];
   runs: EventAggregationRun[];
-  reviews: EventReviewTask[];
+  rawItems: RawItem[];
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
-  const latestRuns = new Map<number, EventAggregationRun>();
-  for (const run of runs) {
-    const current = latestRuns.get(run.normalized_item_id);
-    if (!current || run.id > current.id) latestRuns.set(run.normalized_item_id, run);
-  }
+  const [eventView, setEventView] = useState<"unreviewed" | "reviewed">("unreviewed");
+  const [sortDirection, setSortDirection] = useState<TimeSort>("desc");
+  const [page, setPage] = useState(1);
+  const latestRuns = useMemo(() => {
+    const values = new Map<number, EventAggregationRun>();
+    for (const run of runs) {
+      const current = values.get(run.normalized_item_id);
+      if (!current || run.id > current.id) values.set(run.normalized_item_id, run);
+    }
+    return values;
+  }, [runs]);
+  const rawById = useMemo(
+    () => new Map(rawItems.map((item) => [item.id, item])),
+    [rawItems],
+  );
+  const reviewedItems = items.filter(
+    (item) => latestRuns.get(item.id)?.status === "completed",
+  );
+  const unreviewedItems = items.filter(
+    (item) => latestRuns.get(item.id)?.status !== "completed",
+  );
+  const selectedItems = eventView === "reviewed" ? reviewedItems : unreviewedItems;
+  const sortedItems = sortedByMessageTime(
+    selectedItems,
+    (item) => rawById.get(item.raw_item_id),
+    sortDirection,
+  );
+  const pageCount = Math.max(1, Math.ceil(sortedItems.length / EVENT_PAGE_SIZE));
+  const visibleItems = pageItems(sortedItems, page, EVENT_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [eventView, sortDirection]);
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
   return (
     <section className="admin-panel">
-      {reviews.length > 0 && (
-        <div className="admin-list">
-          {reviews.map((review) => (
-            <EventReviewCard
-              key={review.id}
-              review={review}
-              busy={busy}
-              act={act}
-            />
-          ))}
+      <div className="list-controls">
+        <div className="item-status-switch" role="tablist" aria-label="事件聚合状态">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={eventView === "unreviewed"}
+            className={eventView === "unreviewed" ? "active" : ""}
+            onClick={() => setEventView("unreviewed")}
+          >
+            未审核 <span>{unreviewedItems.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={eventView === "reviewed"}
+            className={eventView === "reviewed" ? "active" : ""}
+            onClick={() => setEventView("reviewed")}
+          >
+            已审核 <span>{reviewedItems.length}</span>
+          </button>
         </div>
-      )}
+        <TimeSortControl value={sortDirection} onChange={setSortDirection} />
+      </div>
       <div className="admin-list">
-        {items.map((item) => {
+        {!visibleItems.length && (
+          <div className="admin-empty">
+            {eventView === "reviewed"
+              ? "目前没有已审核的事件聚合消息。"
+              : "目前没有待处理的事件聚合消息。"}
+          </div>
+        )}
+        {visibleItems.map((item) => {
           const run = latestRuns.get(item.id);
           const canStart = !run;
           const canRetry = run && ["failed", "rejected"].includes(run.status);
@@ -443,6 +549,15 @@ function EventAggregationPanel({
             <article className="admin-item" key={item.id}>
               <div className="admin-item-meta">
                 <span>MESSAGE #{item.id}</span>
+                <span>
+                  {(() => {
+                    const rawItem = rawById.get(item.raw_item_id);
+                    return rawItem
+                      ? new Date(rawItem.published_at ?? rawItem.ingested_at)
+                          .toLocaleString("zh-CN")
+                      : "无消息时间";
+                  })()}
+                </span>
                 <span>{item.category}</span>
                 <b>{run?.status ?? "未聚合"}</b>
               </div>
@@ -482,6 +597,12 @@ function EventAggregationPanel({
           );
         })}
       </div>
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        total={sortedItems.length}
+        onChange={setPage}
+      />
     </section>
   );
 }
@@ -570,11 +691,60 @@ function ItemsPanel({
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
+  const [itemView, setItemView] = useState<"incomplete" | "completed">("incomplete");
+  const [sortDirection, setSortDirection] = useState<TimeSort>("desc");
+  const [page, setPage] = useState(1);
   const retryRuns = latestRunsByRawItem(runs)
     .filter((run) => ["failed", "rejected"].includes(run.status));
+  const completedItems = rawItems.filter(
+    (item) => item.processing_status === "analyzed" || item.processing_status === "completed",
+  );
+  const incompleteItems = rawItems.filter(
+    (item) => item.processing_status !== "analyzed" && item.processing_status !== "completed",
+  );
+  const selectedItems = itemView === "completed" ? completedItems : incompleteItems;
+  const sortedItems = sortedByMessageTime(
+    selectedItems,
+    (item) => item,
+    sortDirection,
+  );
+  const pageCount = Math.max(1, Math.ceil(sortedItems.length / ITEM_PAGE_SIZE));
+  const visibleItems = pageItems(sortedItems, page, ITEM_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [itemView, sortDirection]);
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
   return (
     <section className="admin-panel">
-      {retryRuns.length > 0 && (
+      <div className="list-controls">
+        <div className="item-status-switch" role="tablist" aria-label="单条处理状态">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={itemView === "incomplete"}
+            className={itemView === "incomplete" ? "active" : ""}
+            onClick={() => setItemView("incomplete")}
+          >
+            未审核完成 <span>{incompleteItems.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={itemView === "completed"}
+            className={itemView === "completed" ? "active" : ""}
+            onClick={() => setItemView("completed")}
+          >
+            已审核 <span>{completedItems.length}</span>
+          </button>
+        </div>
+        <TimeSortControl value={sortDirection} onChange={setSortDirection} />
+      </div>
+      {itemView === "incomplete" && retryRuns.length > 0 && (
         <div className="retry-strip">
           <strong>需要修订或重试</strong>
           {retryRuns.map((run) => (
@@ -596,7 +766,12 @@ function ItemsPanel({
         </div>
       )}
       <div className="admin-list">
-        {rawItems.map((item) => {
+        {selectedItems.length === 0 && (
+          <div className="admin-empty">
+            {itemView === "completed" ? "目前没有已审核消息。" : "目前没有未完成的单条消息。"}
+          </div>
+        )}
+        {visibleItems.map((item) => {
           const canStart = item.processing_status === "pending";
           return (
             <article className="admin-item" key={item.id}>
@@ -630,48 +805,205 @@ function ItemsPanel({
           );
         })}
       </div>
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        total={sortedItems.length}
+        onChange={setPage}
+      />
     </section>
   );
 }
 
-function ReviewsPanel({
+const messageReviewStages = [
+  ["relevance", "相关性审核"],
+  ["image_ocr", "OCR 审核"],
+  ["translation", "翻译审核"],
+  ["item_analysis", "分析审核"],
+] as const;
+
+function ReviewCenterPanel({
   reviews,
+  eventReviews,
+  runs,
+  eventRuns,
+  normalizedItems,
+  rawItems,
+  sources,
   mediaExtractions,
   ocrAssets,
   busy,
   act,
 }: {
   reviews: ReviewTask[];
+  eventReviews: EventReviewTask[];
+  runs: ProcessingRun[];
+  eventRuns: EventAggregationRun[];
+  normalizedItems: NormalizedItem[];
+  rawItems: RawItem[];
+  sources: Source[];
   mediaExtractions: MediaExtraction[];
   ocrAssets: OCRAsset[];
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
-  if (!reviews.length) return <section className="admin-empty">目前没有待审核草稿。</section>;
+  const [reviewKind, setReviewKind] = useState<"message" | "event">("message");
+  const [messageStage, setMessageStage] =
+    useState<(typeof messageReviewStages)[number][0]>("relevance");
+  const [sortDirection, setSortDirection] = useState<TimeSort>("desc");
+  const [page, setPage] = useState(1);
+  const rawById = useMemo(
+    () => new Map(rawItems.map((item) => [item.id, item])),
+    [rawItems],
+  );
+  const sourceById = useMemo(
+    () => new Map(sources.map((source) => [source.id, source])),
+    [sources],
+  );
+  const runById = useMemo(
+    () => new Map(runs.map((run) => [run.id, run])),
+    [runs],
+  );
+  const eventRunById = useMemo(
+    () => new Map(eventRuns.map((run) => [run.id, run])),
+    [eventRuns],
+  );
+  const normalizedById = useMemo(
+    () => new Map(normalizedItems.map((item) => [item.id, item])),
+    [normalizedItems],
+  );
+  const messageReviews = reviews.filter((review) => review.stage === messageStage);
+  const sortedMessageReviews = sortedByMessageTime(
+    messageReviews,
+    (review) => {
+      const run = runById.get(review.processing_run_id);
+      return rawById.get(run?.raw_item_id ?? -1);
+    },
+    sortDirection,
+  );
+  const sortedEventReviews = sortedByMessageTime(
+    eventReviews,
+    (review) => {
+      const run = eventRunById.get(review.event_aggregation_run_id);
+      const item = normalizedById.get(run?.normalized_item_id ?? -1);
+      return rawById.get(item?.raw_item_id ?? -1);
+    },
+    sortDirection,
+  );
+  const selectedReviews =
+    reviewKind === "message" ? sortedMessageReviews : sortedEventReviews;
+  const pageCount = Math.max(1, Math.ceil(selectedReviews.length / REVIEW_PAGE_SIZE));
+  const visibleMessageReviews =
+    reviewKind === "message"
+      ? pageItems(sortedMessageReviews, page, REVIEW_PAGE_SIZE)
+      : [];
+  const visibleEventReviews =
+    reviewKind === "event"
+      ? pageItems(sortedEventReviews, page, REVIEW_PAGE_SIZE)
+      : [];
+
+  useEffect(() => {
+    setPage(1);
+  }, [reviewKind, messageStage, sortDirection]);
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
   return (
-    <section className="admin-list">
-      {reviews.map((review) => (
-        <ReviewCard
-          review={review}
-          mediaExtractions={mediaExtractions}
-          ocrAssets={ocrAssets}
-          busy={busy}
-          act={act}
-          key={review.id}
-        />
-      ))}
+    <section className="admin-panel">
+      <div className="list-controls">
+        <div className="item-status-switch" role="tablist" aria-label="审核类型">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={reviewKind === "message"}
+            className={reviewKind === "message" ? "active" : ""}
+            onClick={() => setReviewKind("message")}
+          >
+            消息审核 <span>{reviews.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={reviewKind === "event"}
+            className={reviewKind === "event" ? "active" : ""}
+            onClick={() => setReviewKind("event")}
+          >
+            事件聚合审核 <span>{eventReviews.length}</span>
+          </button>
+        </div>
+        <TimeSortControl value={sortDirection} onChange={setSortDirection} />
+      </div>
+      {reviewKind === "message" && (
+        <div className="review-stage-switch" role="tablist" aria-label="消息审核阶段">
+          {messageReviewStages.map(([stage, label]) => (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={messageStage === stage}
+              className={messageStage === stage ? "active" : ""}
+              key={stage}
+              onClick={() => setMessageStage(stage)}
+            >
+              {label}
+              <span>{reviews.filter((review) => review.stage === stage).length}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="admin-list">
+        {!selectedReviews.length && (
+          <div className="admin-empty">
+            {reviewKind === "message"
+              ? `目前没有待处理的${stageLabels[messageStage] ?? messageStage}。`
+              : "目前没有待处理的事件聚合审核。"}
+          </div>
+        )}
+        {visibleMessageReviews.map((review) => {
+          const run = runById.get(review.processing_run_id);
+          const rawItem = rawById.get(run?.raw_item_id ?? -1);
+          return (
+            <ReviewCard
+              review={review}
+              source={sourceById.get(rawItem?.source_id ?? -1) ?? null}
+              mediaExtractions={mediaExtractions}
+              ocrAssets={ocrAssets}
+              busy={busy}
+              act={act}
+              key={review.id}
+            />
+          );
+        })}
+        {visibleEventReviews.map((review) => (
+          <EventReviewCard
+            key={review.id}
+            review={review}
+            busy={busy}
+            act={act}
+          />
+        ))}
+      </div>
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        total={selectedReviews.length}
+        onChange={setPage}
+      />
     </section>
   );
 }
 
 function ReviewCard({
   review,
+  source,
   mediaExtractions,
   ocrAssets,
   busy,
   act,
 }: {
   review: ReviewTask;
+  source: Source | null;
   mediaExtractions: MediaExtraction[];
   ocrAssets: OCRAsset[];
   busy: string | null;
@@ -698,6 +1030,7 @@ function ReviewCard({
     { id: 1, source_term: "", preferred_translation: "" },
   ]);
   const [feedbackType, setFeedbackType] = useState(defaultFeedbackType);
+  const [knowledgeScope, setKnowledgeScope] = useState("global");
   const [ocrDrafts, setOcrDrafts] = useState<Record<number, OCRCorrectionDraft>>({});
   const updateOCRDraft = useCallback((draft: OCRCorrectionDraft) => {
     setOcrDrafts((current) => ({ ...current, [draft.extractionId]: draft }));
@@ -721,7 +1054,7 @@ function ReviewCard({
     feedback_type: feedbackType,
     reason: trimmedReason || null,
     knowledge_rule: learnsRule ? reason : null,
-    knowledge_scope: "global",
+    knowledge_scope: knowledgeScope,
     corrected_values: {},
     glossary_updates:
       learnsTerm
@@ -810,6 +1143,28 @@ function ReviewCard({
               }
             />
           </label>
+          {review.stage === "item_analysis" && learnsRule && (
+            <label>
+              规则适用范围
+              <select
+                value={knowledgeScope}
+                onChange={(event) => setKnowledgeScope(event.target.value)}
+              >
+                <option value="global">全局（global）</option>
+                {source && (
+                  <option value={`source:${source.id}`}>
+                    当前账号：{source.name}（source:{source.id}）
+                  </option>
+                )}
+                {source && (
+                  <option value={`connector:${source.connector_type}`}>
+                    当前采集器：{connectorLabels[source.connector_type] ?? source.connector_type}
+                    （connector:{source.connector_type}）
+                  </option>
+                )}
+              </select>
+            </label>
+          )}
           {learnsTerm && (
             <div className="glossary-corrections">
               {glossaryUpdates.map((item, index) => (
@@ -991,14 +1346,14 @@ function AnalysisReview({ proposal }: { proposal: JsonObject }) {
       <div className="review-field">
         <span>可信度</span>
         <strong>
-          {textValue(proposal.credibility)} · {scoreValue(proposal.credibility_score)}
+          {textValue(proposal.credibility) === "official" ? "官方确认" : "信源可信度"} · {scoreValue(proposal.credibility_score)}
         </strong>
       </div>
       <div className="review-field review-field-wide">
-        <span>可信度依据</span>
+        <span>重要性依据</span>
         <p>
-          {Array.isArray(proposal.credibility_evidence)
-            ? proposal.credibility_evidence.map(textValue).join("；")
+          {Array.isArray(proposal.importance_evidence)
+            ? proposal.importance_evidence.map(textValue).join("；")
             : "—"}
         </p>
       </div>
@@ -1785,9 +2140,92 @@ function KnowledgePanel({
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
+  const [knowledgeView, setKnowledgeView] = useState<"rules" | "terms">("rules");
+  const [showNewRule, setShowNewRule] = useState(false);
+  const [newRuleType, setNewRuleType] = useState("analysis");
+  const [newRuleScope, setNewRuleScope] = useState("global");
+  const [newRuleText, setNewRuleText] = useState("");
+  const [showNewTerm, setShowNewTerm] = useState(false);
+  const [newSourceTerm, setNewSourceTerm] = useState("");
+  const [newTranslation, setNewTranslation] = useState("");
+  const [rulePage, setRulePage] = useState(1);
+  const [termPage, setTermPage] = useState(1);
+
+  const rulePageCount = Math.max(1, Math.ceil(rules.length / KNOWLEDGE_PAGE_SIZE));
+  const termPageCount = Math.max(1, Math.ceil(terms.length / GLOSSARY_PAGE_SIZE));
+  const visibleRulePage = Math.min(rulePage, rulePageCount);
+  const visibleTermPage = Math.min(termPage, termPageCount);
+  const visibleRules = rules.slice(
+    (visibleRulePage - 1) * KNOWLEDGE_PAGE_SIZE,
+    visibleRulePage * KNOWLEDGE_PAGE_SIZE,
+  );
+  const visibleTerms = terms.slice(
+    (visibleTermPage - 1) * GLOSSARY_PAGE_SIZE,
+    visibleTermPage * GLOSSARY_PAGE_SIZE,
+  );
+
+  const createRule = async () => {
+    await act(
+      "create-rule",
+      () => api("/knowledge/rules", {
+        method: "POST",
+        body: JSON.stringify({
+          knowledge_type: newRuleType,
+          scope: newRuleScope.trim(),
+          rule_text: newRuleText.trim(),
+        }),
+      }),
+      "规则已添加",
+    );
+    setNewRuleText("");
+    setShowNewRule(false);
+    setRulePage(1);
+  };
+
+  const createTerm = async () => {
+    await act(
+      "create-term",
+      () => api("/knowledge/glossary", {
+        method: "POST",
+        body: JSON.stringify({
+          source_term: newSourceTerm.trim(),
+          preferred_translation: newTranslation.trim(),
+        }),
+      }),
+      "术语已添加",
+    );
+    setNewSourceTerm("");
+    setNewTranslation("");
+    setShowNewTerm(false);
+    setTermPage(1);
+  };
+
   return (
-    <section className="knowledge-grid">
-      <div>
+    <section className="knowledge-panel">
+      <div className="knowledge-switch" role="tablist" aria-label="知识与术语">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={knowledgeView === "rules"}
+          className={knowledgeView === "rules" ? "active" : ""}
+          onClick={() => setKnowledgeView("rules")}
+        >
+          判断规则
+          <span>{rules.filter((rule) => rule.is_active).length}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={knowledgeView === "terms"}
+          className={knowledgeView === "terms" ? "active" : ""}
+          onClick={() => setKnowledgeView("terms")}
+        >
+          翻译术语
+          <span>{terms.filter((term) => term.is_active).length}</span>
+        </button>
+      </div>
+      {knowledgeView === "rules" && (
+      <div className="knowledge-section" role="tabpanel">
         <div className="panel-title">
           <h2>判断规则</h2>
           <div className="panel-title-actions">
@@ -1802,25 +2240,89 @@ function KnowledgePanel({
                 void act(
                   "organize-knowledge",
                   () => api("/knowledge/rules/organize", { method: "POST" }),
-                  "AI 已完成知识去重、合并和精简；原规则已保留为停用历史",
+                  "AI 已完成规则抽象、去重和合并；原规则已保留为停用历史",
                 )
               }
             >
               <Sparkles size={13} />
-              {busy === "organize-knowledge" ? "正在整理…" : "AI 整理全部知识"}
+              {busy === "organize-knowledge" ? "正在整理…" : "AI 整理全部规则"}
+            </button>
+            <button type="button" onClick={() => setShowNewRule((value) => !value)}>
+              <Plus size={13} /> 添加规则
             </button>
           </div>
         </div>
-        {rules.map((rule) => (
+        {showNewRule && (
+          <article className="knowledge-card compact-rule-editor">
+            <label>
+              类型
+              <select value={newRuleType} onChange={(event) => setNewRuleType(event.target.value)}>
+                {knowledgeTypes.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+            </label>
+            <label title="global 表示全局；connector:类型或 source:编号表示限定信源；事件聚合也可填写消息分类">
+              范围
+              <input
+                value={newRuleScope}
+                placeholder="global"
+                onChange={(event) => setNewRuleScope(event.target.value)}
+              />
+            </label>
+            <label>规则<textarea value={newRuleText} onChange={(event) => setNewRuleText(event.target.value)} /></label>
+            <div className="admin-actions">
+              <button
+                type="button"
+                disabled={busy === "create-rule" || !newRuleScope.trim() || !newRuleText.trim()}
+                onClick={() => void createRule()}
+              >保存新规则</button>
+              <button type="button" onClick={() => setShowNewRule(false)}>取消</button>
+            </div>
+          </article>
+        )}
+        <div className="rule-table-head">
+          <span>类型</span>
+          <span title="用于决定规则适用哪些消息；命中后才会传给 LLM">范围 ⓘ</span>
+          <span>判断规则</span>
+          <span>操作</span>
+        </div>
+        {visibleRules.map((rule) => (
           <EditableRule rule={rule} busy={busy} act={act} key={rule.id} />
         ))}
+        <Pagination page={visibleRulePage} pageCount={rulePageCount} total={rules.length} onChange={setRulePage} />
       </div>
-      <div>
-        <div className="panel-title"><h2>翻译术语</h2><span>{terms.length} 条</span></div>
-        {terms.map((term) => (
+      )}
+      {knowledgeView === "terms" && (
+      <div className="knowledge-section" role="tabpanel">
+        <div className="panel-title">
+          <h2>翻译术语</h2>
+          <div className="panel-title-actions">
+            <span>{terms.filter((term) => term.is_active).length} 条生效</span>
+            <button type="button" onClick={() => setShowNewTerm((value) => !value)}>
+              <Plus size={13} /> 添加术语
+            </button>
+          </div>
+        </div>
+        {showNewTerm && (
+          <article className="knowledge-card compact-term-editor">
+            <label>原文术语<input value={newSourceTerm} onChange={(event) => setNewSourceTerm(event.target.value)} /></label>
+            <label>标准译名<input value={newTranslation} onChange={(event) => setNewTranslation(event.target.value)} /></label>
+            <div className="admin-actions">
+              <button
+                type="button"
+                disabled={busy === "create-term" || !newSourceTerm.trim() || !newTranslation.trim()}
+                onClick={() => void createTerm()}
+              >保存新术语</button>
+              <button type="button" onClick={() => setShowNewTerm(false)}>取消</button>
+            </div>
+          </article>
+        )}
+        <div className="term-table-head"><span>英文原词</span><span>标准译名</span><span>操作</span></div>
+        {visibleTerms.map((term) => (
           <EditableTerm term={term} busy={busy} act={act} key={term.id} />
         ))}
+        <Pagination page={visibleTermPage} pageCount={termPageCount} total={terms.length} onChange={setTermPage} />
       </div>
+      )}
     </section>
   );
 }
@@ -1834,15 +2336,27 @@ function EditableRule({
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
+  const [knowledgeType, setKnowledgeType] = useState(rule.knowledge_type);
+  const [scope, setScope] = useState(rule.scope);
   const [text, setText] = useState(rule.rule_text);
   return (
-    <article className={`knowledge-card ${rule.is_active ? "" : "inactive"}`}>
-      <span>{rule.knowledge_type} · {rule.scope} · v{rule.version}</span>
-      <textarea value={text} onChange={(event) => setText(event.target.value)} />
+    <article className={`rule-row ${rule.is_active ? "" : "inactive"}`}>
+      <select aria-label={`规则 ${rule.id} 类型`} value={knowledgeType} onChange={(event) => setKnowledgeType(event.target.value)}>
+        {knowledgeTypes.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+      </select>
+      <input aria-label={`规则 ${rule.id} 范围`} value={scope} onChange={(event) => setScope(event.target.value)} />
+      <textarea aria-label={`规则 ${rule.id} 正文`} value={text} onChange={(event) => setText(event.target.value)} />
       <div className="admin-actions">
-        <button type="button" disabled={busy === `rule-${rule.id}`} onClick={() => void act(
+        <button type="button" disabled={busy === `rule-${rule.id}` || !scope.trim() || !text.trim()} onClick={() => void act(
           `rule-${rule.id}`,
-          () => api(`/knowledge/rules/${rule.id}`, { method: "PATCH", body: JSON.stringify({ rule_text: text }) }),
+          () => api(`/knowledge/rules/${rule.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              knowledge_type: knowledgeType,
+              scope: scope.trim(),
+              rule_text: text.trim(),
+            }),
+          }),
           "规则已更新",
         )}>保存</button>
         <button type="button" onClick={() => void act(
@@ -1864,16 +2378,22 @@ function EditableTerm({
   busy: string | null;
   act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
+  const [sourceTerm, setSourceTerm] = useState(term.source_term);
   const [translation, setTranslation] = useState(term.preferred_translation);
   return (
-    <article className={`knowledge-card term-card ${term.is_active ? "" : "inactive"}`}>
-      <span>{term.scope} · v{term.version}</span>
-      <strong>{term.source_term}</strong>
-      <input value={translation} onChange={(event) => setTranslation(event.target.value)} />
+    <article className={`term-row ${term.is_active ? "" : "inactive"}`}>
+      <input aria-label="英文原词" value={sourceTerm} onChange={(event) => setSourceTerm(event.target.value)} />
+      <input aria-label="标准译名" value={translation} onChange={(event) => setTranslation(event.target.value)} />
       <div className="admin-actions">
-        <button type="button" disabled={busy === `term-${term.id}`} onClick={() => void act(
+        <button type="button" disabled={busy === `term-${term.id}` || !sourceTerm.trim() || !translation.trim()} onClick={() => void act(
           `term-${term.id}`,
-          () => api(`/knowledge/glossary/${term.id}`, { method: "PATCH", body: JSON.stringify({ preferred_translation: translation }) }),
+          () => api(`/knowledge/glossary/${term.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              source_term: sourceTerm.trim(),
+              preferred_translation: translation.trim(),
+            }),
+          }),
           "术语已更新",
         )}>保存</button>
         <button type="button" onClick={() => void act(
@@ -1883,5 +2403,55 @@ function EditableTerm({
         )}>{term.is_active ? "停用" : "启用"}</button>
       </div>
     </article>
+  );
+}
+
+function TimeSortControl({
+  value,
+  onChange,
+}: {
+  value: TimeSort;
+  onChange: (value: TimeSort) => void;
+}) {
+  return (
+    <label className="time-sort-control">
+      <span>消息时间</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value as TimeSort)}
+      >
+        <option value="desc">倒序（最新优先）</option>
+        <option value="asc">顺序（最早优先）</option>
+      </select>
+    </label>
+  );
+}
+
+function Pagination({
+  page,
+  pageCount,
+  total,
+  onChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  onChange: (page: number) => void;
+}) {
+  if (pageCount <= 1) {
+    return total ? <div className="pagination-summary">共 {total} 条</div> : null;
+  }
+  return (
+    <div className="pagination">
+      <span>共 {total} 条 · 第 {page}/{pageCount} 页</span>
+      <div>
+        <button type="button" disabled={page <= 1} onClick={() => onChange(page - 1)}>
+          <ChevronLeft size={14} /> 上一页
+        </button>
+        <button type="button" disabled={page >= pageCount} onClick={() => onChange(page + 1)}>
+          下一页 <ChevronRight size={14} />
+        </button>
+      </div>
+    </div>
   );
 }

@@ -126,6 +126,9 @@ class KnowledgeRuleCreate(BaseModel):
 
 
 class KnowledgeRuleUpdate(BaseModel):
+    knowledge_type: Literal[
+        "relevance", "analysis", "translation", "event_aggregation"
+    ] | None = None
     scope: str | None = None
     rule_text: str | None = Field(default=None, min_length=1)
     correction_data: dict[str, Any] | None = None
@@ -153,6 +156,7 @@ class GlossaryTermCreate(GlossaryCorrection):
 
 
 class GlossaryTermUpdate(BaseModel):
+    source_term: str | None = Field(default=None, min_length=1, max_length=255)
     preferred_translation: str | None = Field(default=None, min_length=1, max_length=255)
     forbidden_translations: list[str] | None = None
     scope: str | None = None

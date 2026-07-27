@@ -2,6 +2,12 @@ import { ArrowLeft, ExternalLink, GitBranch } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getEvent } from "@/lib/api";
+import {
+  credibilityLabel,
+  eventTypeLabel,
+  importanceLevel,
+  lifecycleLabel,
+} from "@/lib/event-labels";
 
 export default async function EventPage({
   params,
@@ -35,13 +41,27 @@ export default async function EventPage({
         <header className="event-detail-head">
           <div className="event-topline">
             <span>{event.category}</span>
-            <span>{event.event_key ?? `EVENT:${event.id}`}</span>
-            <span>{event.status}</span>
+            <span>{eventTypeLabel(event.event_type)}</span>
+            <span>{lifecycleLabel(event.lifecycle_status)}</span>
           </div>
           <h1>{event.title}</h1>
           <p>{event.summary}</p>
+          {event.latest_development && (
+            <p className="event-latest">
+              <strong>最新进展</strong>{event.latest_development}
+            </p>
+          )}
           <div className="public-event-meta">
-            <span><GitBranch size={13} /> Revision {event.current_revision}</span>
+            <span className={`importance-badge ${importanceLevel(event.importance_score)}`}>
+              重要性 {Math.round(event.importance_score * 100)}
+            </span>
+            <span className={`credibility-badge ${event.credibility_status}`}>
+              {credibilityLabel(event.credibility_status)}
+              {event.credibility_status !== "officially_refuted"
+                && ` ${Math.round(event.credibility_score * 100)}`}
+            </span>
+            <span>{event.independent_source_count} 个独立来源</span>
+            {event.official_source_count > 0 && <span>{event.official_source_count} 个官方来源</span>}
             <span>{event.message_count} 条证据消息</span>
             {event.first_published_at && <time>首次 {new Date(event.first_published_at).toLocaleString("zh-CN")}</time>}
             {event.last_published_at && <time>最近 {new Date(event.last_published_at).toLocaleString("zh-CN")}</time>}
@@ -53,7 +73,12 @@ export default async function EventPage({
             <article className="timeline-item" key={message.normalized_item_id}>
               <time>{new Date(message.source_published_at ?? message.added_at).toLocaleString("zh-CN")}</time>
               <div>
-                <span>{message.source_name}</span>
+                <span>
+                  {message.source_name}
+                  {message.is_official_confirmation && " · 官方直接确认"}
+                  {message.evidence_stance === "contradicts" && " · 反证"}
+                  {!message.is_significant_update && " · 补充证据"}
+                </span>
                 <h3><Link href={`/messages/${message.normalized_item_id}`}>{message.title}</Link></h3>
                 <p>{message.summary}</p>
                 <div className="timeline-links">
@@ -66,6 +91,10 @@ export default async function EventPage({
         </section>
         <section className="revision-history">
           <div className="section-heading"><div><span className="kicker">AUDIT HISTORY</span><h2>Revision 历史</h2></div></div>
+          <div className="event-audit-meta">
+            <span><GitBranch size={13} /> 当前 Revision {event.current_revision}</span>
+            {event.event_key && <code>{event.event_key}</code>}
+          </div>
           {event.revisions.map((revision) => (
             <article key={revision.id}>
               <strong>Revision {revision.revision}</strong>

@@ -191,7 +191,8 @@ foreach (
         "024_restore_production_ocr_profile",
         "025_reset_item_processing_state",
         "026_create_event_aggregation_v2",
-        "027_add_event_review_workflow"
+        "027_add_event_review_workflow",
+        "028_add_event_editorial_metrics"
     )
 ) {
     if ($appliedVersions -notcontains $migrationVersion) {

@@ -2,9 +2,10 @@
 
 更新时间：2026-07-26
 
-本文档是当前处理层的有效设计。采集层以不可变 `RawItem` 为边界；事件聚合和报告
-尚未进入当前流程，也没有对外处理入口。下一阶段事件聚合设计见
-[`DEVELOPMENT_HANDOFF.md`](DEVELOPMENT_HANDOFF.md)，但不得反向改变本文流程。
+本文档是当前单条处理层的有效设计。采集层以不可变 `RawItem` 为边界；事件聚合是
+消费已批准 `NormalizedItem` 的独立受审核管线，不会反向改变本文流程。事件准入、
+匹配、可信度和重要性规则见
+[`EVENT_EDITORIAL_POLICY.md`](EVENT_EDITORIAL_POLICY.md)。
 
 ## 状态机
 
@@ -103,8 +104,9 @@ POST /api/v1/workflows/reviews/{id}/correct-ocr
 POST /api/v1/workflows/runs/{id}/retry
 ```
 
-生产 API 不提供单张图片直接结构化、已批准条目直接重翻译、事件处理或报告生成
-入口。OCR Lab 仅用于算法参数调试，生产流程只读取当前激活的 OCR profile。
+生产 API 不提供单张图片直接结构化、已批准条目直接重翻译或报告生成入口。
+事件聚合通过独立的 `/api/v1/event-workflows` 受审核入口显式触发。OCR Lab 仅用于
+算法参数调试，生产流程只读取当前激活的 OCR profile。
 
 ## 有效状态
 

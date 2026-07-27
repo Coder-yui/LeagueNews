@@ -1,6 +1,12 @@
-import { ArrowUpRight, GitBranch } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import Link from "next/link";
 import { getEvents } from "@/lib/api";
+import {
+  credibilityLabel,
+  eventTypeLabel,
+  importanceLevel,
+  lifecycleLabel,
+} from "@/lib/event-labels";
 
 export default async function EventsPage() {
   const events = await getEvents();
@@ -29,13 +35,29 @@ export default async function EventsPage() {
           <article className="public-event-card" key={event.id}>
             <div className="event-topline">
               <span>{event.category}</span>
-              <span>{event.event_key ?? `EVENT:${event.id}`}</span>
+              <span>{eventTypeLabel(event.event_type)}</span>
+              <span className={`event-state ${event.lifecycle_status}`}>
+                {lifecycleLabel(event.lifecycle_status)}
+              </span>
             </div>
             <h2><Link href={`/events/${event.id}`}>{event.title}</Link></h2>
             <p>{event.summary}</p>
+            {event.latest_development && (
+              <p className="event-latest">
+                <strong>最新进展</strong>{event.latest_development}
+              </p>
+            )}
             <div className="public-event-meta">
-              <span><GitBranch size={13} /> Revision {event.current_revision}</span>
-              <span>{event.message_count} 条消息</span>
+              <span className={`importance-badge ${importanceLevel(event.importance_score)}`}>
+                重要性 {Math.round(event.importance_score * 100)}
+              </span>
+              <span className={`credibility-badge ${event.credibility_status}`}>
+                {credibilityLabel(event.credibility_status)}
+                {event.credibility_status !== "officially_refuted"
+                  && ` ${Math.round(event.credibility_score * 100)}`}
+              </span>
+              <span>{event.independent_source_count} 个独立来源</span>
+              <span>{event.message_count} 条证据</span>
               {event.first_published_at && (
                 <time dateTime={event.first_published_at}>
                   始于 {new Date(event.first_published_at).toLocaleDateString("zh-CN")}

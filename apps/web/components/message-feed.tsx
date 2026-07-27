@@ -6,20 +6,15 @@ import {
   ImageIcon,
   ShieldQuestion,
 } from "lucide-react";
+import { importanceLevel } from "@/lib/event-labels";
 import type { PublishedItem } from "@/lib/types";
-
-const credibilityLabel: Record<string, string> = {
-  official: "官方确认",
-  corroborated: "多源印证",
-  unverified: "尚未证实",
-  rumor: "社区传闻",
-};
 
 function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
   const image = item.translated_content_blocks.find(
     (block) => block.type === "image" && (block.storage_path || block.source_url),
   );
   const publishedAt = item.published_at ?? item.created_at;
+  const importance = Math.round(item.importance_score * 100);
 
   return (
     <article className="message-card">
@@ -48,7 +43,15 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
             ) : (
               <ShieldQuestion size={14} />
             )}
-            {credibilityLabel[item.credibility] ?? item.credibility}
+            {item.credibility === "official"
+              ? "官方确认"
+              : `可信度 ${Math.round(item.credibility_score * 100)}`}
+          </span>
+          <span
+            className={`importance-badge ${importanceLevel(item.importance_score)}`}
+            title={`AI 评估的重要性得分：${importance}/100`}
+          >
+            重要性 {importance}
           </span>
           {item.entities.map((entity, entityIndex) => (
             <span className="entity" key={`${entity.name}-${entityIndex}`}>

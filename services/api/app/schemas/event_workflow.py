@@ -4,16 +4,62 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class CandidateRejection(BaseModel):
+    event_id: int = Field(ge=1)
+    reason: str = Field(min_length=1)
+
+
 class EventDecisionDraft(BaseModel):
     decision: Literal["not_event", "create", "update"]
     reason: str = Field(min_length=1)
     candidate_event_id: int | None = None
+    candidate_rejections: list[CandidateRejection] = Field(
+        default_factory=list,
+        max_length=5,
+    )
     event_key: str | None = Field(default=None, max_length=160)
+    event_type: Literal[
+        "patch",
+        "major_gameplay_change",
+        "match",
+        "transfer",
+        "roster",
+        "release",
+        "activity",
+        "incident",
+        "tournament",
+        "other",
+    ] = "other"
+    lifecycle_status: Literal[
+        "scheduled",
+        "live",
+        "developing",
+        "unconfirmed",
+        "confirmed",
+        "completed",
+        "resolved",
+        "disputed",
+        "expired_unconfirmed",
+        "officially_refuted",
+    ] | None = None
+    evidence_stance: Literal["supports", "contradicts", "context"] = "supports"
+    update_kind: Literal[
+        "new_fact",
+        "confirmation",
+        "refutation",
+        "correction",
+        "context",
+        "duplicate_evidence",
+    ] = "new_fact"
+    official_confirmation: bool = False
     title: str | None = Field(default=None, max_length=500)
     summary: str | None = None
     category: str | None = Field(default=None, max_length=60)
     change_note: str | None = None
     new_facts: list[str] = Field(default_factory=list)
+    latest_development: str | None = None
+    importance_score: float | None = Field(default=None, ge=0, le=1)
+    importance_evidence: list[str] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def validate_decision_fields(self) -> "EventDecisionDraft":

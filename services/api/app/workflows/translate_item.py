@@ -8,6 +8,11 @@ from app.models.media_extraction import MediaExtraction
 from app.models.raw_item import RawItem
 from app.services.llm import LLMClient
 
+TRANSLATION_CHUNK_MAX_CHARS = 12_000
+TRANSLATION_CHUNK_MAX_BLOCKS = 60
+TRANSLATION_CONTEXT_MAX_CHARS = 4_000
+
+
 @dataclass(slots=True)
 class TranslationData:
     source_language: str
@@ -26,6 +31,46 @@ def detect_language(text: str) -> str:
         return "unknown"
     cjk_chars = sum("\u4e00" <= char <= "\u9fff" for char in visible_chars)
     return "zh-CN" if cjk_chars / len(visible_chars) >= 0.1 else "en"
+
+
+def _chunk_text_blocks(
+    text_blocks: list[dict[str, object]],
+) -> list[list[dict[str, object]]]:
+    if not text_blocks:
+        return [[]]
+    chunks: list[list[dict[str, object]]] = []
+    current: list[dict[str, object]] = []
+    current_chars = 0
+    for block in text_blocks:
+        block_chars = len(str(block.get("text") or "")) + 80
+        if current and (
+            len(current) >= TRANSLATION_CHUNK_MAX_BLOCKS
+            or current_chars + block_chars > TRANSLATION_CHUNK_MAX_CHARS
+        ):
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(block)
+        current_chars += block_chars
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _document_outline(text_blocks: list[dict[str, object]]) -> str:
+    headings = [
+        str(block.get("text") or "").strip()
+        for block in text_blocks
+        if block.get("type") == "heading" and str(block.get("text") or "").strip()
+    ]
+    return "\n".join(headings)[:TRANSLATION_CONTEXT_MAX_CHARS]
+
+
+def _neighbor_text(blocks: list[dict[str, object]], *, from_end: bool) -> str:
+    selected = blocks[-2:] if from_end else blocks[:2]
+    return "\n".join(str(block.get("text") or "") for block in selected)[
+        :TRANSLATION_CONTEXT_MAX_CHARS // 2
+    ]
 
 
 async def build_translation(
@@ -79,22 +124,60 @@ async def build_translation(
         if block.get("type") in TEXT_BLOCK_TYPES
         and (block.get("text") or block.get("items"))
     ]
-    result = await LLMClient().translate(
-        title=raw_item.display_title,
-        text_blocks=text_blocks,
-        source_language=source_language,
-        target_language=target_language,
-        glossary=glossary,
-        knowledge_rules=rules,
-        media_extractions=[
-            {
-                "extraction_id": extraction.id,
-                "structured_data": extraction.structured_data,
-            }
-            for extraction in media_extractions
-        ],
-    )
-    translations = {block.index: block.text for block in result.translated_blocks}
+    chunks = _chunk_text_blocks(text_blocks)
+    outline = _document_outline(text_blocks)
+    source_media_extractions = [
+        {
+            "extraction_id": extraction.id,
+            "structured_data": extraction.structured_data,
+        }
+        for extraction in media_extractions
+    ]
+    client = LLMClient()
+    translated_title = ""
+    translated_result_blocks = []
+    translated_result_extractions = []
+    previous_translation_tail = ""
+    for chunk_index, chunk in enumerate(chunks):
+        result = await client.translate(
+            title=raw_item.display_title,
+            text_blocks=chunk,
+            source_language=source_language,
+            target_language=target_language,
+            glossary=glossary,
+            knowledge_rules=rules,
+            media_extractions=(
+                source_media_extractions if chunk_index == 0 else []
+            ),
+            document_context={
+                "document_outline": outline,
+                "chunk_number": chunk_index + 1,
+                "total_chunks": len(chunks),
+                "previous_source_tail": (
+                    _neighbor_text(chunks[chunk_index - 1], from_end=True)
+                    if chunk_index > 0
+                    else ""
+                ),
+                "next_source_head": (
+                    _neighbor_text(chunks[chunk_index + 1], from_end=False)
+                    if chunk_index + 1 < len(chunks)
+                    else ""
+                ),
+                "preferred_translated_title": translated_title,
+                "previous_translation_tail": previous_translation_tail,
+            },
+        )
+        if not translated_title:
+            translated_title = result.translated_title
+        translated_result_blocks.extend(result.translated_blocks)
+        translated_result_extractions.extend(result.translated_media_extractions)
+        previous_translation_tail = "\n".join(
+            block.text for block in result.translated_blocks[-2:]
+        )[-TRANSLATION_CONTEXT_MAX_CHARS // 2 :]
+
+    translations = {
+        block.index: block.text for block in translated_result_blocks
+    }
     translated_blocks: list[dict[str, Any]] = []
     translated_text_parts: list[str] = []
     for index, block in enumerate(blocks):
@@ -112,12 +195,12 @@ async def build_translation(
     return TranslationData(
         source_language=source_language,
         target_language=target_language,
-        translated_title=result.translated_title or raw_item.display_title or "",
+        translated_title=translated_title or raw_item.display_title or "",
         translated_text="\n\n".join(translated_text_parts),
         translated_content_blocks=translated_blocks,
         translated_media_extractions=[
             extraction.model_dump(mode="json")
-            for extraction in result.translated_media_extractions
+            for extraction in translated_result_extractions
         ],
         translation_status="translated",
         translation_model=settings.model_name,

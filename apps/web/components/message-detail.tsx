@@ -15,13 +15,6 @@ import type {
   PublishedMediaExtraction,
 } from "@/lib/types";
 
-const credibilityLabel: Record<string, string> = {
-  official: "官方确认",
-  corroborated: "多源印证",
-  unverified: "尚未证实",
-  rumor: "社区传闻",
-};
-
 const sourceSectionLabels: Record<string, string> = {
   champion_buff: "CHAMPION BUFFS",
   champion_nerf: "CHAMPION NERFS",
@@ -192,7 +185,9 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
             ) : (
               <ShieldQuestion size={14} />
             )}
-            {credibilityLabel[item.credibility] ?? item.credibility}
+            {item.credibility === "official"
+              ? "官方确认"
+              : `可信度 ${Math.round(item.credibility_score * 100)}`}
           </span>
         </div>
         <h1>{title}</h1>

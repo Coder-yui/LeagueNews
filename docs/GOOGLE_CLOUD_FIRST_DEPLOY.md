@@ -81,18 +81,54 @@ OpenSSH 或 Google Cloud CLI。
 
 ## 第三阶段：初始化服务器
 
-通过 Google Cloud 的 SSH 进入实例，先执行：
+通过 Google Cloud 的 SSH 进入实例，先安装 Git：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y git
-git clone https://github.com/Coder-yui/LeagueNews.git
+```
+
+如果仓库是私有的，在服务器生成一个只读 Deploy Key：
+
+```bash
+ssh-keygen -t ed25519 -C "league-news-google-cloud" \
+  -f ~/.ssh/league-news-deploy -N ""
+cat ~/.ssh/league-news-deploy.pub
+```
+
+复制屏幕输出的整行公钥，然后：
+
+1. 打开 GitHub 的 `Coder-yui/LeagueNews` 仓库。
+2. Settings → Deploy keys → Add deploy key。
+3. Title 填 `Google Cloud preview server`。
+4. Key 粘贴刚才的整行公钥。
+5. 不要勾选 `Allow write access`。
+6. 点击 Add key。
+
+回到服务器，固定这个仓库使用该密钥：
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/league-news-deploy
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config ~/.ssh/league-news-deploy
+ssh -T git@github.com
+```
+
+第一次连接会询问是否信任 GitHub 主机，核对显示的是 `github.com` 后输入 `yes`。
+成功时 GitHub 会提示认证成功但不提供 shell，这是正常现象。
+
+克隆并初始化服务器：
+
+```bash
+git clone git@github.com:Coder-yui/LeagueNews.git
 cd LeagueNews
 sudo ./deploy/scripts/bootstrap-ubuntu.sh
 ```
-
-如果仓库是私有的，HTTPS clone 会要求 GitHub 凭据；更推荐给服务器配置一个只读
-Deploy Key，再用 SSH 地址 clone。
 
 脚本会：
 

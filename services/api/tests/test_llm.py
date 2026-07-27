@@ -322,10 +322,94 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
 
     assert result.decision == "update"
     assert result.update_kind == "context"
+    assert result.evidence_stance == "context"
     assert len(completions.calls) == 2
     retry_messages = completions.calls[1]["messages"]
     assert isinstance(retry_messages, list)
     assert "candidate_rejections" in retry_messages[-1]["content"]
+
+
+def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
+    duplicate_create = json.dumps(
+        {
+            "decision": "create",
+            "reason": "错误地把赛程和赛果拆开",
+            "candidate_rejections": [
+                {"event_id": 21, "reason": "生命周期不同"}
+            ],
+            "event_key": "matchday:lpl:2026-07-26",
+            "event_type": "match",
+            "lifecycle_status": "scheduled",
+            "title": "7月26日赛程预告",
+            "summary": "三场比赛即将进行。",
+            "category": "LPL赛程",
+        }
+    )
+    valid_update = json.dumps(
+        {
+            "decision": "update",
+            "reason": "赛程和赛果属于同一比赛日事件",
+            "candidate_event_id": 21,
+            "event_type": "match",
+            "lifecycle_status": "scheduled",
+        }
+    )
+    client, completions = _client_with_responses(
+        [duplicate_create, valid_update]
+    )
+
+    result = asyncio.run(
+        client.propose_event(
+            item={
+                "title": "2026LPL第三赛段7月26日赛程预告",
+                "summary": "LNG对阵NIP、TT对阵EDG、AL对阵BLG。",
+            },
+            candidates=[
+                {
+                    "event_id": 21,
+                    "event_key": "matchday:lpl:2026-07-26",
+                    "title": "2026LPL第三赛段7月26日赛果",
+                    "summary": "当日三场比赛已经结束。",
+                    "event_type": "match",
+                    "lifecycle_status": "completed",
+                }
+            ],
+            stable_event_key="matchday:lpl:2026-07-26",
+            knowledge_rules=[],
+        )
+    )
+
+    assert len(completions.calls) == 2
+    assert result.decision == "update"
+    assert result.candidate_event_id == 21
+    assert result.lifecycle_status == "completed"
+    assert result.update_kind == "context"
+    assert result.evidence_stance == "context"
+
+
+def test_event_prompt_explains_lpl_matchday_lifecycle() -> None:
+    response = json.dumps(
+        {
+            "decision": "not_event",
+            "reason": "测试提示词",
+        }
+    )
+    client, completions = _client_with_responses([response])
+
+    asyncio.run(
+        client.propose_event(
+            item={"title": "测试", "summary": "测试"},
+            candidates=[],
+            stable_event_key=None,
+            knowledge_rules=[],
+        )
+    )
+
+    messages = completions.calls[0]["messages"]
+    assert isinstance(messages, list)
+    prompt = messages[0]["content"]
+    assert "LPL 普通常规赛按比赛日聚合" in prompt
+    assert "scheduled、live、completed 是同一事件的生命周期" in prompt
 
 
 def test_cn_mythic_shop_policy_rejects_not_event_and_caps_importance() -> None:
@@ -345,7 +429,7 @@ def test_cn_mythic_shop_policy_rejects_not_event_and_caps_importance() -> None:
             "title": "2026年第30周国服神话商城轮换",
             "summary": "本周神话商城轮换内容已公布。",
             "category": "国服活动",
-            "importance_score": 0.4,
+            "importance_score": 0.9,
             "importance_evidence": ["国服商城常规周轮换，影响有限。"],
         }
     )
@@ -368,8 +452,47 @@ def test_cn_mythic_shop_policy_rejects_not_event_and_caps_importance() -> None:
     )
 
     assert result.decision == "create"
-    assert result.importance_score == 0.4
+    assert result.importance_score == 0.45
     assert len(completions.calls) == 2
+
+
+def test_cn_mythic_shop_policy_normalizes_required_event_type() -> None:
+    response = json.dumps(
+        {
+            "decision": "create",
+            "reason": "创建本周国服神话商城小事件",
+            "event_key": "mythic-shop:cn:2026-w30",
+            "event_type": "other",
+            "lifecycle_status": "live",
+            "title": "2026年第30周国服神话商城轮换",
+            "summary": "本周神话商城轮换内容已公布。",
+            "category": "国服活动",
+            "importance_score": 0.4,
+            "importance_evidence": ["国服商城常规周轮换，影响有限。"],
+        }
+    )
+    client, completions = _client_with_responses([response])
+
+    result = asyncio.run(
+        client.propose_event(
+            item={
+                "title": "神话商城每周轮换",
+                "event_policy": {
+                    "policy_type": "mythic_shop_rotation",
+                    "event_eligible": True,
+                    "required_event_type": "activity",
+                    "importance_range": [0.3, 0.45],
+                },
+            },
+            candidates=[],
+            stable_event_key="mythic-shop:cn:2026-w30",
+            knowledge_rules=[],
+        )
+    )
+
+    assert result.event_type == "activity"
+    assert result.importance_score == 0.4
+    assert len(completions.calls) == 1
 
 
 def test_international_mythic_shop_policy_requires_not_event() -> None:
@@ -456,7 +579,8 @@ def test_cn_daily_mythic_shop_update_must_be_context() -> None:
 
     assert result.decision == "update"
     assert result.update_kind == "context"
-    assert len(completions.calls) == 2
+    assert result.evidence_stance == "context"
+    assert len(completions.calls) == 1
 
 
 def test_schema_business_error_is_returned_to_model_and_retried() -> None:

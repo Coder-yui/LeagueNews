@@ -121,6 +121,8 @@ if ($LASTEXITCODE -ne 0) {
 
 $apiAlreadyRunning = Test-RecordedProcess "api"
 $webAlreadyRunning = Test-RecordedProcess "web"
+$workerAlreadyRunning = Test-RecordedProcess "pipeline-worker"
+$schedulerAlreadyRunning = Test-RecordedProcess "collection-scheduler"
 
 if (-not $apiAlreadyRunning) {
     Assert-PortAvailable 8000 "FastAPI"
@@ -192,7 +194,10 @@ foreach (
         "025_reset_item_processing_state",
         "026_create_event_aggregation_v2",
         "027_add_event_review_workflow",
-        "028_add_event_editorial_metrics"
+        "028_add_event_editorial_metrics",
+        "029_add_pipeline_corrections",
+        "030_add_automatic_pipeline_jobs",
+        "031_add_source_collection_schedules"
     )
 ) {
     if ($appliedVersions -notcontains $migrationVersion) {
@@ -201,6 +206,22 @@ foreach (
             throw "Migration $migrationVersion failed. Check PostgreSQL output above."
         }
     }
+}
+
+if (-not $workerAlreadyRunning) {
+    Write-Step "Starting automatic pipeline worker"
+    $workerCommand = "`$env:UV_CACHE_DIR='$ProjectRoot\.uv-cache'; uv run python -m scripts.run_pipeline_worker"
+    Start-TrackedProcess "pipeline-worker" $ApiDir $workerCommand | Out-Null
+} else {
+    Write-Host "Automatic pipeline worker is already tracked as running; skipping."
+}
+
+if (-not $schedulerAlreadyRunning) {
+    Write-Step "Starting source collection scheduler"
+    $schedulerCommand = "`$env:UV_CACHE_DIR='$ProjectRoot\.uv-cache'; uv run python -m scripts.run_collection_scheduler"
+    Start-TrackedProcess "collection-scheduler" $ApiDir $schedulerCommand | Out-Null
+} else {
+    Write-Host "Source collection scheduler is already tracked as running; skipping."
 }
 
 Write-Step "Upgrading RawItem semantic hashes"

@@ -60,7 +60,11 @@ class RawItem(Base):
     @property
     def processing_status(self) -> str:
         if self.normalized_item:
-            return "analyzed"
+            return (
+                "analyzed"
+                if self.normalized_item.publication_status == "published"
+                else "withdrawn"
+            )
         if not self.processing_runs:
             return "pending"
         latest = max(self.processing_runs, key=lambda run: run.id)

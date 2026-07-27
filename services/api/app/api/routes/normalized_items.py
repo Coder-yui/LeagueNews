@@ -18,7 +18,10 @@ router = APIRouter()
 def list_normalized_items(db: Session = Depends(get_db)) -> list[NormalizedItem]:
     statement = (
         select(NormalizedItem)
-        .where(latest_normalized_item_condition())
+        .where(
+            latest_normalized_item_condition(),
+            NormalizedItem.publication_status == "published",
+        )
         .order_by(NormalizedItem.created_at.desc())
         .limit(100)
     )
@@ -92,7 +95,10 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
 def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     statement = (
         _published_statement()
-        .where(latest_normalized_item_condition())
+        .where(
+            latest_normalized_item_condition(),
+            NormalizedItem.publication_status == "published",
+        )
         .order_by(
             func.coalesce(RawItem.published_at, RawItem.ingested_at).desc(),
             NormalizedItem.id.desc(),
@@ -108,7 +114,10 @@ def get_published_item(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     item = db.scalar(
-        _published_statement().where(NormalizedItem.id == item_id)
+        _published_statement().where(
+            NormalizedItem.id == item_id,
+            NormalizedItem.publication_status == "published",
+        )
     )
     if not item:
         raise HTTPException(status_code=404, detail="published item not found")

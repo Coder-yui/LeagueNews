@@ -42,6 +42,12 @@ def _message_payload(message: EventMessage) -> dict[str, Any]:
 
 
 def _summary_payload(event: Event) -> dict[str, Any]:
+    active_messages = [
+        message
+        for message in event.messages
+        if message.membership_status == "active"
+        and message.normalized_item.publication_status == "published"
+    ]
     return {
         "id": event.id,
         "event_key": event.event_key,
@@ -61,7 +67,7 @@ def _summary_payload(event: Event) -> dict[str, Any]:
         "first_published_at": event.first_published_at,
         "last_published_at": event.last_published_at,
         "current_revision": event.current_revision,
-        "message_count": len(event.messages),
+        "message_count": len(active_messages),
         "created_at": event.created_at,
         "updated_at": event.updated_at,
     }
@@ -69,7 +75,12 @@ def _summary_payload(event: Event) -> dict[str, Any]:
 
 def _detail_payload(event: Event) -> dict[str, Any]:
     messages = sorted(
-        event.messages,
+        (
+            message
+            for message in event.messages
+            if message.membership_status == "active"
+            and message.normalized_item.publication_status == "published"
+        ),
         key=lambda message: (
             message.source_published_at is not None,
             message.source_published_at or message.added_at,
@@ -96,7 +107,12 @@ def _detail_payload(event: Event) -> dict[str, Any]:
 
 
 def _get_event(db: Session, event_id: int) -> Event:
-    event = db.scalar(_event_statement().where(Event.id == event_id))
+    event = db.scalar(
+        _event_statement().where(
+            Event.id == event_id,
+            Event.status == "active",
+        )
+    )
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
     return event
@@ -104,7 +120,7 @@ def _get_event(db: Session, event_id: int) -> Event:
 
 @router.get("", response_model=list[EventSummaryRead])
 def list_events(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    statement = _event_statement().order_by(
+    statement = _event_statement().where(Event.status == "active").order_by(
         func.coalesce(Event.last_published_at, Event.created_at).desc(),
         Event.id.desc(),
     ).limit(100)

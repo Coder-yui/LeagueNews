@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, JSON, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -33,6 +33,14 @@ class NormalizedItem(Base):
     translation_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     analysis_model: Mapped[str] = mapped_column(String(120))
     analysis_version: Mapped[str] = mapped_column(String(30), default="v2")
+    current_revision: Mapped[int] = mapped_column(Integer, default=1)
+    publication_status: Mapped[str] = mapped_column(
+        String(30), default="published", index=True
+    )
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    withdrawal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -42,8 +50,24 @@ class NormalizedItem(Base):
     media_links: Mapped[list["NormalizedItemMediaExtraction"]] = relationship(
         back_populates="normalized_item", cascade="all, delete-orphan"
     )
-    event_membership: Mapped["EventMessage | None"] = relationship(  # noqa: F821
-        back_populates="normalized_item", uselist=False
+    event_memberships: Mapped[list["EventMessage"]] = relationship(  # noqa: F821
+        back_populates="normalized_item"
+    )
+    revisions: Mapped[list["NormalizedItemRevision"]] = relationship(
+        back_populates="normalized_item",
+        cascade="all, delete-orphan",
+        order_by="NormalizedItemRevision.revision",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "current_revision >= 1",
+            name="ck_normalized_items_current_revision_positive",
+        ),
+        CheckConstraint(
+            "publication_status IN ('published', 'withdrawn')",
+            name="ck_normalized_items_publication_status",
+        ),
     )
 
     @property
@@ -81,3 +105,35 @@ class NormalizedItemMediaExtraction(Base):
 
     normalized_item: Mapped[NormalizedItem] = relationship(back_populates="media_links")
     media_extraction: Mapped["MediaExtraction"] = relationship()  # noqa: F821
+
+
+class NormalizedItemRevision(Base):
+    __tablename__ = "normalized_item_revisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    normalized_item_id: Mapped[int] = mapped_column(
+        ForeignKey("normalized_items.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    processing_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    change_note: Mapped[str] = mapped_column(Text, default="published")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    normalized_item: Mapped[NormalizedItem] = relationship(back_populates="revisions")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_item_id",
+            "revision",
+            name="uq_normalized_item_revisions_item_revision",
+        ),
+        CheckConstraint(
+            "revision >= 1",
+            name="ck_normalized_item_revisions_revision_positive",
+        ),
+    )

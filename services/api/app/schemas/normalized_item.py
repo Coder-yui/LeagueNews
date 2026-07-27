@@ -30,6 +30,10 @@ class NormalizedItemRead(BaseModel):
     translation_model: str | None
     analysis_model: str
     analysis_version: str
+    current_revision: int
+    publication_status: str
+    withdrawn_at: datetime | None
+    withdrawal_reason: str | None
     created_at: datetime
     updated_at: datetime
 

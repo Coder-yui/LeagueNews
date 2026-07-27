@@ -15,12 +15,12 @@
   -> RawItemCandidate
   -> shared ingestion
   -> 不可变 RawItem + MediaAsset + provenance
-  -> 相关性 AI / 人工审核
-  -> 可选 Patch 图片 OCR / 人工修正 / 确定性结构化
-  -> 翻译 / 术语人工审核
-  -> 基于已批准中文内容的实体、摘要、重要性、可信度分析 / 人工审核
-  -> NormalizedItem
-  -> 消息列表与详情
+  -> 相关性 AI
+  -> 可选 Patch 图片 OCR / 确定性结构化
+  -> 翻译
+  -> 实体、摘要、重要性、可信度分析
+  -> 事件判断与聚合
+  -> 自动发布，或按阶段进入人工审核
 ```
 
 这条基座已经工作，事件聚合不得反向改写它。
@@ -29,7 +29,10 @@
   通常只新增 Source。
 - `raw_items.content_blocks` 是不可变原文唯一事实来源，包含文字、图片位置和外部媒体入口。
 - 图片本地化；视频等媒体以“请在原始位置查看”的链接展示。
-- 只有全部审核通过才写 `normalized_items`。
+- 新采集的 RawItem 默认进入持久化自动任务，由独立 worker 自动跑完整条链路。
+- 每个阶段的已接受输出保存为不可变 checkpoint；自动决定和人工决定明确区分。
+- 已发布消息可以选择从相关性、OCR、翻译、分析或事件判断重新开始，并选择后续人工或
+  自动模式。RawItem 始终不改写。
 - 消息列表按 `coalesce(raw_items.published_at, raw_items.ingested_at)` 降序排列。
 - 事件聚合 v2 已有核心模型、事务服务、只读路由、确定性候选检索、受审核 AI 工作流、
   管理台入口和公开事件页面；报告尚未实现。
@@ -57,19 +60,18 @@
 翻译驳回允许只提交一项或多项术语修正，不强制填写文字理由。知识整理 API 会让 AI
 压缩、去重现有规则，但保留审核来源和版本记录。
 
-### 2026-07-26 运行数据快照
+### 2026-07-27 运行数据快照
 
 通过当前本地 API 核验：
 
-- `raw_items = 86`
-- 已批准并发布的 `NormalizedItem = 2`
-- `knowledge_rules = 3`
-- `glossary_terms = 7`
-- `events = 0`
-- `event_messages = 0`
-- `event_revisions = 0`
-- 两条已发布消息分别来自 RawItem `#102`（2026-06-17，26.13 Full Preview）和
-  RawItem `#103`（2026-06-16，26.13 Preview）
+- `raw_items = 98`
+- 已发布 `NormalizedItem = 71`
+- `normalized_item_revisions = 71`（029 迁移为全部历史消息建立 revision 1）
+- `knowledge_rules = 15`
+- `glossary_terms = 32`
+- `events = 16`
+- active `event_messages = 37`
+- `pipeline_jobs = 0`（迁移完成时；新采集才入队）
 
 上述是交接时快照，不应写进业务逻辑。知识、术语和已批准消息都要保留。
 
@@ -107,13 +109,17 @@
 | `knowledge_rules` | 按 `knowledge_type` 与 scope 使用的相关性/分析/翻译规则 |
 | `glossary_terms` | 原词到标准中文术语 |
 | `media_extractions` | OCR、表格结构与人工修订版本 |
-| `normalized_items` | 全部审核通过的单条消息 |
+| `normalized_items` | 已发布消息的当前投影、当前 revision 和发布/撤回状态 |
+| `normalized_item_revisions` | 消息每次发布的不可变内容快照 |
 | `normalized_item_media_extractions` | 消息采用的图片结构及一一对应中文译文 |
 | `events` | 持续演化的事件当前状态 |
-| `event_messages` | 事件与已批准消息的一对多成员关系 |
+| `event_messages` | 事件成员及 active/withdrawn 生命周期；仅 active 成员全局唯一 |
 | `event_revisions` | 事件标题、摘要、变更原因和证据快照历史 |
 | `event_aggregation_runs` | 一条已批准消息的一次事件聚合运行及候选快照 |
 | `event_review_tasks` | AI 事件决策草稿、人工决定和反馈 |
+| `processing_checkpoints` | 每个已接受阶段的输出、引用、模型和决定来源 |
+| `pipeline_corrections` | 撤回目标、重跑阶段、人工/自动模式和状态 |
+| `pipeline_jobs` | 可持久化的全自动任务、失败阶段和最后有效 checkpoint |
 
 不要把新的事件状态塞回 `raw_items` 或 `normalized_items`。事件成员关系应由独立关联表
 表达。
@@ -165,13 +171,19 @@ POST /api/v1/event-workflows/reviews/{id}/approve
 POST /api/v1/event-workflows/reviews/{id}/reject
 POST /api/v1/event-workflows/runs/{id}/retry
 
+GET  /api/v1/pipeline/jobs
+POST /api/v1/pipeline/jobs/{id}/recover
+GET  /api/v1/pipeline/corrections
+GET  /api/v1/pipeline/checkpoints
+POST /api/v1/pipeline/normalized-items/{id}/corrections
+
 GET  /api/v1/knowledge/rules
 POST /api/v1/knowledge/rules/organize
 GET  /api/v1/knowledge/glossary
 ```
 
-事件正式数据 API 仅提供读取；事件聚合通过独立受审核工作流显式触发。不存在自动调度
-或报告生成 API。
+事件正式数据 API 仍只提供读取。新采集通过 `pipeline_jobs` 自动推进；管理台
+“自动化与撤回”页签用于查看任务、撤回已发布消息以及从失败前阶段恢复。报告生成尚未实现。
 
 ## 5. 数据库历史与不可触碰边界
 
@@ -187,6 +199,12 @@ GET  /api/v1/knowledge/glossary
 `026_create_event_aggregation_v2.sql`、`027_add_event_review_workflow.sql` 和
 `028_add_event_editorial_metrics.sql` 创建核心表、审核流程、编辑指标和约束。后续仍
 必须使用新的追加迁移。
+
+自动化与纠错底座由以下追加迁移创建：
+
+- `029_add_pipeline_corrections.sql`：消息 revision、checkpoint、correction、运行模式和
+  事件成员生命周期。
+- `030_add_automatic_pipeline_jobs.sql`：持久化自动任务及失败恢复信息。
 这里的“迁移”只表示创建或扩展新表和约束：
 
 - 不移动或重写 RawItem。
@@ -205,17 +223,18 @@ GET  /api/v1/knowledge/glossary
 事件是 `NormalizedItem` 之上的新层，不是对单条处理流程的替代。
 
 ```text
-Approved NormalizedItem
-  -> 显式触发事件聚合
+Published NormalizedItem
+  -> 自动或显式触发事件聚合
   -> 程序生成确定性检索条件和最多 5 个候选事件
   -> AI 只在候选内提出 not_event / create / update 草稿
-  -> 人工审核
+  -> 自动接受，或按运行模式等待人工审核
   -> 事务写入 Event + membership + revision
   -> 事件详情时间线
 ```
 
-第一版不要自动定时运行，不要让模型生成 SQL，不要直接批准 AI 结果，也不要把“一条消息
-自动建一个事件”作为兜底。
+模型仍不得生成 SQL，候选检索仍限定最多 5 个事件。自动模式接受结构化决策并保留
+`decision_source=automatic`、policy version、checkpoint 和 event revision；失败不吞掉，
+而是保留 job 和最后有效 checkpoint。
 
 ### 建议模型
 
@@ -280,9 +299,8 @@ event_revisions
 - `create`：建议新事件及原因。
 - `update`：只能引用给定候选 ID，并说明新增事实、标题/摘要修改和成员关系。
 
-所有决定先进入人工审核。可以复用现有审核思想，但不要强行把 event run 塞进当前
-`processing_runs.raw_item_id NOT NULL` 模型；先评估建立独立
-`event_aggregation_runs` / `event_review_tasks` 是否更清晰。
+人工模式的决定进入审核中心；自动模式由 worker 接受同一份严格结构化草稿。
+`event_aggregation_runs` / `event_review_tasks` 保持独立，不塞入消息处理运行。
 
 ## 7. 推荐实施顺序
 
@@ -328,7 +346,20 @@ event_revisions
 4. 明确显示来源、首次发生、最近更新和 revision 历史。
 5. 已通过 production build 和本地浏览器空状态、导航、管理台页签检查。
 
-报告、日报、自动调度、embedding 和大规模召回都延后到事件聚合稳定之后。
+### E. 自动化、撤回与失败恢复
+
+已于 2026-07-27 完成：
+
+1. 采集事务为每条新 RawItem 写入 queued `pipeline_job`，独立 worker 自动推进消息与事件。
+2. 审核表继续承载统一的阶段草稿；自动接受写入 `decision_source=automatic` 和
+   `policy_version=auto-approve-v1`。
+3. 每个已接受阶段写入 checkpoint；失败 job 保存当前阶段、错误和最后有效 checkpoint。
+4. 已发布结果可按阶段撤回。事件阶段只撤回 active membership；更早阶段同时隐藏消息。
+5. 重跑复用同一个 NormalizedItem ID，递增 `current_revision` 并新增不可变 revision。
+6. 重跑可选人工或自动；人工完成消息修正后会继续生成事件审核，自动模式由 worker 跑完。
+7. `scripts/start.ps1` 在迁移完成后启动并跟踪 `pipeline-worker`，停止脚本同步关闭。
+
+报告、日报、embedding 和大规模召回仍未实现。
 
 ## 8. 第一组验收样本
 
@@ -348,7 +379,7 @@ event_revisions
 - 追加迁移可从现有数据库安全应用，旧数据行数和内容不变。
 - 模型外键、唯一约束、删除策略和并发更新有测试。
 - 候选检索不执行模型生成的 SQL，候选数不超过 5。
-- AI 草稿未经人工批准不会改变正式事件。
+- 人工模式未经批准不改变正式事件；自动模式的决定来源、策略和 checkpoint 可审计。
 - create/update/reject/retry 都有审计记录。
 - 消息列表、详情、原文、OCR 中文对照展示不回归。
 - Ruff、pytest、前端 lint 和 production build 全部通过。
@@ -369,3 +400,34 @@ event_revisions
 
 实现前以实际 `git log -5 --oneline`、`git status --short`、迁移表和测试结果为准，不要
 把本文中的日期或样本 ID 当作永久事实。
+
+## 11. 按 Source 周期自动采集
+
+已于 2026-07-27 完成：
+
+1. `031_add_source_collection_schedules.sql` 为每个 Source 保存启用状态、正常周期、失败重试周期、
+   单次抓取上限、Connector 运行参数、下次执行时间、成功水位和最近运行结果。
+2. 独立 `collection-scheduler` 进程从数据库领取到期计划；行锁和带过期时间的租约避免重复执行，
+   进程异常退出后可自动重领。
+3. 首次成功前 Connector 的 `since` 为 `None`；后续使用 `last_success_at`。采集产生的新 RawItem
+   仍由既有 ingestion 事务自动写入 `pipeline_jobs`，继续走全自动消息与事件管线。
+4. `GET /api/v1/collection-schedules`、`PUT /api/v1/collection-schedules/sources/{source_id}` 和
+   `POST /api/v1/collection-schedules/sources/{source_id}/run-now` 分别用于查询、配置和单次触发。
+5. 管理台“自动化与撤回”页可以逐个非 manual Source 配置周期、重试间隔、抓取上限和 options，
+   并查看最近状态、下次执行时间与失败原因。
+6. `scripts/start.ps1` 在迁移完成后启动并跟踪 `collection-scheduler`；
+   `scripts/stop.ps1` 会同步停止它。
+
+新迁移不会自动为现有 Source 建立或启用计划。部署后必须在管理台逐项保存并启用，避免升级时
+意外向外部平台发起采集。
+
+## 12. LPL 赛事事件身份
+
+普通 LPL 常规赛按中国时区的比赛日聚合。赛程预告、进行中、赛果和赛后集锦共享
+`matchday:lpl:YYYY-MM-DD` 稳定事件键；季后赛后程的半决赛、胜者组决赛、败者组决赛和
+总决赛在能够确定双方战队时使用单场系列赛键。`scheduled -> live -> completed` 是同一事件
+的生命周期，不是拆分事件的依据；晚采集的早期赛程只能作为 context 加入，不能回退事件状态、
+标题或摘要。
+
+2026-07-27 已通过 correction #3 将误拆的事件 #26 撤回，并把消息 #134 作为 context 合并到
+事件 #21。事件 #21 和 #15 已分别补为 7 月 26 日、7 月 25 日的比赛日稳定键。

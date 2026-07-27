@@ -139,9 +139,82 @@ def test_stable_keys_cover_lpl_matches_and_transfer_claims(db: Session) -> None:
         category="游戏模式",
     )
 
-    assert stable_event_key(match) == "match:lpl:2026-07-20:blg-vs-tes"
+    assert stable_event_key(match) == "matchday:lpl:2026-07-20"
     assert stable_event_key(transfer) == "transfer:2026:knight:blg"
     assert stable_event_key(mode) == "mode:classic-mode"
+
+
+def test_lpl_schedule_and_result_share_matchday_key_out_of_order(
+    db: Session,
+) -> None:
+    source = Source(name="LPL Matchday", connector_type="weibo")
+    db.add(source)
+    db.commit()
+    teams = [
+        {"name": "LNG", "type": "team"},
+        {"name": "NIP", "type": "team"},
+        {"name": "BLG", "type": "team"},
+    ]
+    result = _add_item(
+        db,
+        source_id=source.id,
+        index=20,
+        title="2026LPL第三赛段7月26日赛果",
+        published_at=datetime(2026, 7, 26, 14, 31, tzinfo=UTC),
+        entities=teams,
+        category="LPL赛程赛果",
+    )
+    schedule = _add_item(
+        db,
+        source_id=source.id,
+        index=21,
+        title="2026LPL第三赛段7月26日赛程预告",
+        published_at=datetime(2026, 7, 26, 6, 11, tzinfo=UTC),
+        entities=teams,
+        category="LPL赛程",
+    )
+
+    key = "matchday:lpl:2026-07-26"
+    assert stable_event_key(result) == key
+    assert stable_event_key(schedule) == key
+    event = create_event(
+        db,
+        normalized_item_id=result.id,
+        event_key=key,
+        title="2026LPL第三赛段7月26日赛果",
+        summary="当日三场比赛已经结束。",
+        category="LPL赛程赛果",
+        event_type="match",
+        lifecycle_status="completed",
+    )
+
+    candidates = find_event_candidates(db, normalized_item_id=schedule.id)
+    assert candidates[0].event_id == event.id
+    assert candidates[0].event_key == key
+    assert candidates[0].score >= 100
+    assert "发布时间相距 0 天" in candidates[0].reasons
+
+
+def test_lpl_late_playoff_series_gets_individual_match_key(
+    db: Session,
+) -> None:
+    source = Source(name="LPL Playoffs", connector_type="weibo")
+    db.add(source)
+    db.commit()
+    semifinal = _add_item(
+        db,
+        source_id=source.id,
+        index=22,
+        title="2026LPL季后赛半决赛7月30日 BLG 对阵 TES",
+        published_at=datetime(2026, 7, 30, 10, tzinfo=UTC),
+        entities=[
+            {"name": "BLG", "type": "team"},
+            {"name": "TES", "type": "team"},
+        ],
+        category="LPL赛事",
+    )
+
+    assert stable_event_key(semifinal) == "match:lpl:2026-07-30:blg-vs-tes"
 
 
 def test_candidate_search_returns_exact_patch_match_with_reasons(db: Session) -> None:

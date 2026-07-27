@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.event import Event, EventMessage
@@ -11,9 +11,21 @@ from app.models.normalized_item import NormalizedItem
 from app.services.raw_item_versions import superseded_normalized_item_ids
 
 _PATCH_PATTERN = re.compile(r"(?<!\d)(\d{1,2}\.\d{1,2})(?!\d)")
+_EVENT_DATE_PATTERN = re.compile(
+    r"(?:(?P<year>20\d{2})年)?(?P<month>\d{1,2})月(?P<day>\d{1,2})日"
+)
 _WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+", re.IGNORECASE)
 _KEY_TOKEN_PATTERN = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
 _MATCH_WORDS = ("击败", "战胜", "对阵", "vs", " vs ", "比分", "赛果")
+_ESPORTS_CATEGORY_WORDS = ("赛事", "赛果", "赛程", "比赛", "集锦")
+_LATE_PLAYOFF_WORDS = (
+    "半决赛",
+    "胜者组决赛",
+    "败者组决赛",
+    "季军赛",
+    "总决赛",
+    "决赛",
+)
 _TRANSFER_WORDS = ("转会", "加盟", "离队", "续约", "试训", "接触")
 _CN_CONNECTORS = {"baidu_tieba", "weibo", "tencent_lol"}
 _MYTHIC_SHOP_TERMS = ("神话商城", "mythic shop")
@@ -34,6 +46,38 @@ class EventCandidate:
     match_level: str
     score: float
     reasons: tuple[str, ...]
+
+
+def _event_date_key(item: NormalizedItem, text: str) -> str | None:
+    published_at = item.raw_item.published_at
+    local_published_at = (
+        published_at.astimezone(ZoneInfo("Asia/Shanghai"))
+        if published_at is not None and published_at.tzinfo is not None
+        else published_at
+    )
+    match = _EVENT_DATE_PATTERN.search(text)
+    if match is not None:
+        year = int(
+            match.group("year")
+            or (
+                local_published_at.year
+                if local_published_at is not None
+                else datetime.now(ZoneInfo("Asia/Shanghai")).year
+            )
+        )
+        try:
+            return datetime(
+                year,
+                int(match.group("month")),
+                int(match.group("day")),
+            ).date().isoformat()
+        except ValueError:
+            pass
+    return (
+        local_published_at.date().isoformat()
+        if local_published_at is not None
+        else None
+    )
 
 
 def stable_event_key(item: NormalizedItem) -> str | None:
@@ -70,10 +114,23 @@ def stable_event_key(item: NormalizedItem) -> str | None:
         return f"mode:{game_modes[0]}"
 
     published_at = item.raw_item.published_at
-    date_key = published_at.date().isoformat() if published_at else None
+    date_key = _event_date_key(item, f"{text} {item.summary}")
     teams = _entity_values(item, {"team", "esports_team"})
+    is_lpl = "lpl" in lowered or "英雄联盟职业联赛" in text
+    is_esports = any(word in item.category for word in _ESPORTS_CATEGORY_WORDS)
+    if is_lpl and is_esports and date_key:
+        is_late_playoff = any(word in text for word in _LATE_PLAYOFF_WORDS)
+        if is_late_playoff:
+            if len(teams) >= 2:
+                return (
+                    f"match:lpl:{date_key}:"
+                    f"{'-vs-'.join(sorted(teams)[:2])}"
+                )
+            return None
+        return f"matchday:lpl:{date_key}"
+
     is_match = (
-        ("赛事" in item.category or "赛果" in item.category)
+        is_esports
         and len(teams) >= 2
         and any(word in lowered for word in _MATCH_WORDS)
     )
@@ -199,6 +256,8 @@ def _event_entity_names(event: Event) -> set[str]:
     return {
         name
         for message in event.messages
+        if message.membership_status == "active"
+        and message.normalized_item.publication_status == "published"
         for name in _entity_names(message.normalized_item)
     }
 
@@ -253,7 +312,14 @@ def _within_window(item: NormalizedItem, event: Event) -> tuple[bool, int | None
     event_at = event.last_published_at
     if published_at is None or event_at is None:
         return False, None
-    distance = abs((_naive_utc(published_at) - _naive_utc(event_at)).days)
+    distance = int(
+        abs(
+            (
+                _naive_utc(published_at) - _naive_utc(event_at)
+            ).total_seconds()
+        )
+        // 86_400
+    )
     category_family = _category_family(item.category)
     if category_family == "patch" or event.event_type == "patch":
         window_days = 45
@@ -278,6 +344,7 @@ def find_event_candidates(
     *,
     normalized_item_id: int,
     limit: int = 5,
+    include_event_ids: set[int] | None = None,
 ) -> list[EventCandidate]:
     if limit < 1 or limit > 5:
         raise ValueError("candidate limit must be between 1 and 5")
@@ -293,6 +360,7 @@ def find_event_candidates(
     item_key = stable_event_key(item)
     item_entities = _entity_names(item)
     superseded_item_ids = set(superseded_normalized_item_ids(db, item))
+    included_ids = include_event_ids or set()
     statement = (
         select(Event)
         .options(
@@ -300,7 +368,12 @@ def find_event_candidates(
                 EventMessage.normalized_item
             )
         )
-        .where(Event.status == "active")
+        .where(
+            or_(
+                Event.status == "active",
+                Event.id.in_(included_ids),
+            )
+        )
         .order_by(Event.id)
     )
 
@@ -308,11 +381,16 @@ def find_event_candidates(
     for event in db.scalars(statement):
         reasons: list[str] = []
         score = 0.0
+        forced_candidate = event.id in included_ids
+        if forced_candidate:
+            score += 500
+            reasons.append("该事件是本次撤回前的原事件，保留为纠正候选")
         supersedes_member = bool(
             superseded_item_ids
             & {
                 message.normalized_item_id
                 for message in event.messages
+                if message.membership_status == "active"
             }
         )
         if supersedes_member:
@@ -356,7 +434,12 @@ def find_event_candidates(
             or bool(overlapping_entities)
             or title_similarity >= 0.15
         )
-        if not supersedes_member and not exact_key and not within_window:
+        if (
+            not forced_candidate
+            and not supersedes_member
+            and not exact_key
+            and not within_window
+        ):
             continue
         match_level = "strong" if has_identity_signal else "broad"
         if not has_identity_signal:

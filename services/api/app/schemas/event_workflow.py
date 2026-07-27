@@ -85,6 +85,9 @@ class EventAggregationRunRead(BaseModel):
     status: str
     outcome: str | None
     current_stage: str
+    execution_mode: str
+    correction_id: int | None
+    restart_from_stage: str | None
     candidate_snapshot: list[dict[str, Any]]
     decision_draft: dict[str, Any]
     error_message: str | None
@@ -101,6 +104,8 @@ class EventReviewTaskRead(BaseModel):
     status: str
     proposal: dict[str, Any]
     feedback: dict[str, Any]
+    decision_source: str
+    policy_version: str | None
     created_at: datetime
     resolved_at: datetime | None
 

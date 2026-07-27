@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   BookOpenCheck,
   Check,
   ChevronLeft,
@@ -36,6 +37,42 @@ type Source = {
   id: number;
   name: string;
   connector_type: string;
+  is_active: boolean;
+};
+
+type CollectionSchedule = {
+  id: number;
+  source_id: number;
+  source_name: string;
+  connector_type: string;
+  enabled: boolean;
+  interval_minutes: number;
+  retry_delay_minutes: number;
+  fetch_limit: number;
+  options: JsonObject;
+  next_run_at: string | null;
+  run_requested_at: string | null;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  last_success_at: string | null;
+  last_connector_run_id: number | null;
+  last_status: string;
+  last_error: string | null;
+  lease_expires_at: string | null;
+};
+
+type ConnectorRun = {
+  id: number;
+  source_id: number;
+  connector_type: string;
+  status: string;
+  discovered_count: number;
+  created_count: number;
+  revised_count: number;
+  skipped_count: number;
+  error_message: string | null;
+  started_at: string;
+  finished_at: string | null;
 };
 
 type ProcessingRun = {
@@ -58,6 +95,28 @@ type NormalizedItem = {
   normalized_title: string;
   summary: string;
   category: string;
+  current_revision: number;
+  publication_status: string;
+};
+
+type PipelineJob = {
+  id: number;
+  raw_item_id: number;
+  status: string;
+  current_stage: string;
+  attempts: number;
+  error_message: string | null;
+  last_checkpoint_id: number | null;
+};
+
+type PipelineCorrection = {
+  id: number;
+  raw_item_id: number;
+  normalized_item_id: number | null;
+  restart_from_stage: string;
+  resume_mode: string;
+  reason: string;
+  status: string;
 };
 
 type EventAggregationRun = {
@@ -99,6 +158,7 @@ const GLOSSARY_PAGE_SIZE = 12;
 const ITEM_PAGE_SIZE = 10;
 const REVIEW_PAGE_SIZE = 5;
 const EVENT_PAGE_SIZE = 10;
+const AUTOMATION_LOG_PAGE_SIZE = 10;
 
 type TimeSort = "desc" | "asc";
 
@@ -213,7 +273,7 @@ type OCRProfile = {
   is_active: boolean;
 };
 
-type Tab = "items" | "reviews" | "events" | "ocr" | "knowledge";
+type Tab = "items" | "reviews" | "events" | "automation" | "ocr" | "knowledge";
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -238,6 +298,15 @@ function latestRunsByRawItem(runs: ProcessingRun[]): ProcessingRun[] {
   for (const run of runs) {
     const current = latest.get(run.raw_item_id);
     if (!current || run.id > current.id) latest.set(run.raw_item_id, run);
+  }
+  return Array.from(latest.values());
+}
+
+function latestPipelineJobsByRawItem(jobs: PipelineJob[]): PipelineJob[] {
+  const latest = new Map<number, PipelineJob>();
+  for (const job of jobs) {
+    const current = latest.get(job.raw_item_id);
+    if (!current || job.id > current.id) latest.set(job.raw_item_id, job);
   }
   return Array.from(latest.values());
 }
@@ -286,6 +355,10 @@ export function AdminConsole() {
   const [normalizedItems, setNormalizedItems] = useState<NormalizedItem[]>([]);
   const [eventRuns, setEventRuns] = useState<EventAggregationRun[]>([]);
   const [eventReviews, setEventReviews] = useState<EventReviewTask[]>([]);
+  const [pipelineJobs, setPipelineJobs] = useState<PipelineJob[]>([]);
+  const [corrections, setCorrections] = useState<PipelineCorrection[]>([]);
+  const [collectionSchedules, setCollectionSchedules] = useState<CollectionSchedule[]>([]);
+  const [connectorRuns, setConnectorRuns] = useState<ConnectorRun[]>([]);
   const [rules, setRules] = useState<KnowledgeRule[]>([]);
   const [terms, setTerms] = useState<GlossaryTerm[]>([]);
   const [ocrAssets, setOcrAssets] = useState<OCRAsset[]>([]);
@@ -311,6 +384,10 @@ export function AdminConsole() {
         ocrRunRows,
         ocrProfileRows,
         extractionRows,
+        pipelineJobRows,
+        correctionRows,
+        collectionScheduleRows,
+        connectorRunRows,
       ] =
         await Promise.all([
           api<RawItem[]>("/raw-items"),
@@ -326,6 +403,10 @@ export function AdminConsole() {
           api<OCRTestRun[]>("/ocr-lab/runs"),
           api<OCRProfile[]>("/ocr-lab/profiles"),
           api<MediaExtraction[]>("/media-assets/extractions"),
+          api<PipelineJob[]>("/pipeline/jobs"),
+          api<PipelineCorrection[]>("/pipeline/corrections"),
+          api<CollectionSchedule[]>("/collection-schedules"),
+          api<ConnectorRun[]>("/connectors/runs"),
         ]);
       setRawItems(raw);
       setSources(sourceRows);
@@ -340,6 +421,10 @@ export function AdminConsole() {
       setOcrRuns(ocrRunRows);
       setOcrProfiles(ocrProfileRows);
       setMediaExtractions(extractionRows);
+      setPipelineJobs(pipelineJobRows);
+      setCorrections(correctionRows);
+      setCollectionSchedules(collectionScheduleRows);
+      setConnectorRuns(connectorRunRows);
       setMessage(null);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "加载失败");
@@ -372,8 +457,10 @@ export function AdminConsole() {
       retry: latestRunsByRawItem(runs)
         .filter((run) => ["failed", "rejected"].includes(run.status)).length,
       knowledge: rules.filter((rule) => rule.is_active).length + terms.filter((term) => term.is_active).length,
+      failedJobs: latestPipelineJobsByRawItem(pipelineJobs)
+        .filter((job) => job.status === "failed").length,
     }),
-    [rawItems, reviews, eventReviews, runs, rules, terms],
+    [rawItems, reviews, eventReviews, runs, rules, terms, pipelineJobs],
   );
 
   return (
@@ -382,6 +469,7 @@ export function AdminConsole() {
         <div><span>等待开始</span><strong>{counts.pending}</strong></div>
         <div><span>待人工审核</span><strong>{counts.reviews + counts.eventReviews}</strong></div>
         <div><span>等待重试</span><strong>{counts.retry}</strong></div>
+        <div><span>自动管线失败</span><strong>{counts.failedJobs}</strong></div>
         <div><span>生效知识</span><strong>{counts.knowledge}</strong></div>
       </section>
 
@@ -390,6 +478,7 @@ export function AdminConsole() {
           ["items", "单条处理", FileClock],
           ["reviews", "审核中心", Check],
           ["events", "事件聚合", Sparkles],
+          ["automation", "自动化与撤回", Activity],
           ["ocr", "OCR 测试台", ScanText],
           ["knowledge", "知识与术语", BookOpenCheck],
         ] as const).map(([value, label, Icon]) => (
@@ -441,6 +530,18 @@ export function AdminConsole() {
           act={act}
         />
       )}
+      {tab === "automation" && (
+        <PipelinePanel
+          sources={sources}
+          schedules={collectionSchedules}
+          connectorRuns={connectorRuns}
+          items={normalizedItems}
+          jobs={pipelineJobs}
+          corrections={corrections}
+          busy={busy}
+          act={act}
+        />
+      )}
       {tab === "events" && (
         <EventAggregationPanel
           items={normalizedItems}
@@ -454,6 +555,548 @@ export function AdminConsole() {
         <KnowledgePanel rules={rules} terms={terms} busy={busy} act={act} />
       )}
     </>
+  );
+}
+
+function SourceScheduleCard({
+  source,
+  schedule,
+  busy,
+  act,
+}: {
+  source: Source;
+  schedule: CollectionSchedule | undefined;
+  busy: string | null;
+  act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
+}) {
+  const [enabled, setEnabled] = useState(schedule?.enabled ?? false);
+  const [intervalMinutes, setIntervalMinutes] = useState(
+    String(schedule?.interval_minutes ?? 60),
+  );
+  const [retryDelayMinutes, setRetryDelayMinutes] = useState(
+    String(schedule?.retry_delay_minutes ?? 15),
+  );
+  const [fetchLimit, setFetchLimit] = useState(String(schedule?.fetch_limit ?? 10));
+  const [optionsText, setOptionsText] = useState(
+    JSON.stringify(schedule?.options ?? {}, null, 2),
+  );
+  const saveKey = `schedule-save-${source.id}`;
+  const runKey = `schedule-run-${source.id}`;
+
+  useEffect(() => {
+    setEnabled(schedule?.enabled ?? false);
+    setIntervalMinutes(String(schedule?.interval_minutes ?? 60));
+    setRetryDelayMinutes(String(schedule?.retry_delay_minutes ?? 15));
+    setFetchLimit(String(schedule?.fetch_limit ?? 10));
+    setOptionsText(JSON.stringify(schedule?.options ?? {}, null, 2));
+  }, [schedule]);
+
+  const save = async () => {
+    const parsed = JSON.parse(optionsText) as unknown;
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error("运行参数必须是 JSON 对象");
+    }
+    return api(`/collection-schedules/sources/${source.id}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled,
+        interval_minutes: Number(intervalMinutes),
+        retry_delay_minutes: Number(retryDelayMinutes),
+        fetch_limit: Number(fetchLimit),
+        options: parsed,
+      }),
+    });
+  };
+
+  return (
+    <article className="admin-item collection-schedule-card">
+      <div className="admin-item-meta">
+        <span>SOURCE #{source.id}</span>
+        <span>{connectorLabels[source.connector_type] ?? source.connector_type}</span>
+        <b>{schedule?.last_status ?? "未配置"}</b>
+      </div>
+      <h3>{source.name}</h3>
+      <div className="review-form collection-schedule-form">
+        <label className="schedule-enabled">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+          启用周期采集
+        </label>
+        <label>
+          采集周期（分钟）
+          <input
+            type="number"
+            min="5"
+            max="10080"
+            value={intervalMinutes}
+            onChange={(event) => setIntervalMinutes(event.target.value)}
+          />
+        </label>
+        <label>
+          失败重试（分钟）
+          <input
+            type="number"
+            min="1"
+            max="1440"
+            value={retryDelayMinutes}
+            onChange={(event) => setRetryDelayMinutes(event.target.value)}
+          />
+        </label>
+        <label>
+          单次上限
+          <input
+            type="number"
+            min="1"
+            max="50"
+            value={fetchLimit}
+            onChange={(event) => setFetchLimit(event.target.value)}
+          />
+        </label>
+        <label className="schedule-options">
+          Connector 运行参数（JSON）
+          <textarea
+            value={optionsText}
+            onChange={(event) => setOptionsText(event.target.value)}
+          />
+        </label>
+      </div>
+      <div className="collection-schedule-state">
+        <span>
+          下次执行：
+          {schedule?.run_requested_at
+            ? " 已进入立即运行队列"
+            : schedule?.next_run_at
+              ? new Date(schedule.next_run_at).toLocaleString("zh-CN")
+              : " 未安排"}
+        </span>
+        <span>
+          上次成功：
+          {schedule?.last_success_at
+            ? new Date(schedule.last_success_at).toLocaleString("zh-CN")
+            : " 暂无"}
+        </span>
+        {schedule?.last_connector_run_id && (
+          <span>Connector Run #{schedule.last_connector_run_id}</span>
+        )}
+      </div>
+      {schedule?.last_error && <pre>{schedule.last_error}</pre>}
+      {!source.is_active && <p className="review-note">该来源已停用，无法调度或立即运行。</p>}
+      <div className="admin-actions">
+        <button
+          type="button"
+          disabled={!source.is_active || busy === saveKey}
+          onClick={() => void act(saveKey, save, "采集计划已保存")}
+        >
+          <Check size={14} /> 保存计划
+        </button>
+        <button
+          className="approve"
+          type="button"
+          disabled={!source.is_active || busy === runKey}
+          onClick={() =>
+            void act(
+              runKey,
+              () =>
+                api(`/collection-schedules/sources/${source.id}/run-now`, {
+                  method: "POST",
+                }),
+              "已加入立即采集队列",
+            )
+          }
+        >
+          <Play size={14} /> 立即运行
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function PipelinePanel({
+  sources,
+  schedules,
+  connectorRuns,
+  items,
+  jobs,
+  corrections,
+  busy,
+  act,
+}: {
+  sources: Source[];
+  schedules: CollectionSchedule[];
+  connectorRuns: ConnectorRun[];
+  items: NormalizedItem[];
+  jobs: PipelineJob[];
+  corrections: PipelineCorrection[];
+  busy: string | null;
+  act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void>;
+}) {
+  const [itemId, setItemId] = useState("");
+  const [failedJobId, setFailedJobId] = useState("");
+  const [stage, setStage] = useState("event_decision");
+  const [mode, setMode] = useState("manual");
+  const [reason, setReason] = useState("");
+  const [automationView, setAutomationView] = useState<
+    "collection" | "pipeline" | "recovery"
+  >("collection");
+  const [selectedSourceId, setSelectedSourceId] = useState<number | null>(null);
+  const [showCollectionLogs, setShowCollectionLogs] = useState(false);
+  const [collectionLogPage, setCollectionLogPage] = useState(1);
+  const [pipelineLogPage, setPipelineLogPage] = useState(1);
+  const [correctionLogPage, setCorrectionLogPage] = useState(1);
+  const collectionSources = sources.filter(
+    (source) => source.connector_type !== "manual",
+  );
+  const selectedSource =
+    collectionSources.find((source) => source.id === selectedSourceId) ??
+    collectionSources[0];
+  const selectedSourceRuns = connectorRuns.filter(
+    (run) => run.source_id === selectedSource?.id,
+  );
+  const collectionLogPageCount = Math.max(
+    1,
+    Math.ceil(selectedSourceRuns.length / AUTOMATION_LOG_PAGE_SIZE),
+  );
+  const visibleCollectionRuns = pageItems(
+    selectedSourceRuns,
+    collectionLogPage,
+    AUTOMATION_LOG_PAGE_SIZE,
+  );
+  const pipelineLogPageCount = Math.max(
+    1,
+    Math.ceil(jobs.length / AUTOMATION_LOG_PAGE_SIZE),
+  );
+  const visiblePipelineJobs = pageItems(
+    jobs,
+    pipelineLogPage,
+    AUTOMATION_LOG_PAGE_SIZE,
+  );
+  const correctionLogPageCount = Math.max(
+    1,
+    Math.ceil(corrections.length / AUTOMATION_LOG_PAGE_SIZE),
+  );
+  const visibleCorrections = pageItems(
+    corrections,
+    correctionLogPage,
+    AUTOMATION_LOG_PAGE_SIZE,
+  );
+  const failedJobs = latestPipelineJobsByRawItem(jobs)
+    .filter((job) => job.status === "failed");
+  const payload = {
+    restart_from_stage: stage,
+    resume_mode: mode,
+    reason: reason.trim(),
+  };
+
+  useEffect(() => {
+    if (selectedSource && selectedSourceId === null) {
+      setSelectedSourceId(selectedSource.id);
+    }
+  }, [selectedSource, selectedSourceId]);
+
+  useEffect(() => {
+    setCollectionLogPage(1);
+  }, [selectedSourceId]);
+
+  useEffect(() => {
+    if (collectionLogPage > collectionLogPageCount) {
+      setCollectionLogPage(collectionLogPageCount);
+    }
+  }, [collectionLogPage, collectionLogPageCount]);
+
+  useEffect(() => {
+    if (pipelineLogPage > pipelineLogPageCount) {
+      setPipelineLogPage(pipelineLogPageCount);
+    }
+  }, [pipelineLogPage, pipelineLogPageCount]);
+
+  useEffect(() => {
+    if (correctionLogPage > correctionLogPageCount) {
+      setCorrectionLogPage(correctionLogPageCount);
+    }
+  }, [correctionLogPage, correctionLogPageCount]);
+
+  return (
+    <section className="admin-panel automation-workbench">
+      <div className="automation-view-tabs" role="tablist" aria-label="自动化功能">
+        <button
+          className={automationView === "collection" ? "active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={automationView === "collection"}
+          onClick={() => setAutomationView("collection")}
+        >
+          自动化采集
+        </button>
+        <button
+          className={automationView === "pipeline" ? "active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={automationView === "pipeline"}
+          onClick={() => setAutomationView("pipeline")}
+        >
+          自动化管线日志 <b>{jobs.length}</b>
+        </button>
+        <button
+          className={automationView === "recovery" ? "active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={automationView === "recovery"}
+          onClick={() => setAutomationView("recovery")}
+        >
+          撤回与恢复 <b>{corrections.length}</b>
+        </button>
+      </div>
+      <article
+        className="review-card automation-column automation-collection-column"
+        hidden={automationView !== "collection"}
+      >
+        <div className="review-heading">
+          <div>
+            <span>COLLECTION SCHEDULER</span>
+            <h3>按来源配置自动采集周期</h3>
+          </div>
+        </div>
+        <p>
+          启用后由独立调度进程周期采集；首次采集不设时间水位，之后从上次成功时间继续。
+          “立即运行”不改变启用状态，失败后按重试间隔再次执行。
+        </p>
+        <div className="collection-source-grid">
+          {collectionSources.map((source) => {
+            const sourceSchedule = schedules.find(
+              (row) => row.source_id === source.id,
+            );
+            return (
+              <button
+                className={selectedSource?.id === source.id ? "active" : ""}
+                key={source.id}
+                type="button"
+                onClick={() => {
+                  setSelectedSourceId(source.id);
+                  setShowCollectionLogs(false);
+                }}
+              >
+                <span>{connectorLabels[source.connector_type] ?? source.connector_type}</span>
+                <strong>{source.name}</strong>
+                <small>
+                  {sourceSchedule?.enabled
+                    ? sourceSchedule.last_status === "running"
+                      ? "采集中"
+                      : "已启用"
+                    : "未启用"}
+                </small>
+              </button>
+            );
+          })}
+        </div>
+        {selectedSource && (
+          <>
+            <SourceScheduleCard
+              source={selectedSource}
+              schedule={schedules.find((row) => row.source_id === selectedSource.id)}
+              busy={busy}
+              act={act}
+            />
+            <button
+              className="collection-log-toggle"
+              type="button"
+              onClick={() => setShowCollectionLogs((value) => !value)}
+            >
+              <FileClock size={14} />
+              {showCollectionLogs ? "收起采集日志" : "打开采集日志"}
+              <b>{selectedSourceRuns.length}</b>
+            </button>
+            {showCollectionLogs && (
+              <div className="collection-run-list">
+                {visibleCollectionRuns.map((run) => (
+                  <article className="automation-log-entry" key={run.id}>
+                    <div className="admin-item-meta">
+                      <span>RUN #{run.id}</span>
+                      <span>{new Date(run.started_at).toLocaleString("zh-CN")}</span>
+                      <b>{run.status}</b>
+                    </div>
+                    <p>
+                      发现 {run.discovered_count} · 新增 {run.created_count} · 修订{" "}
+                      {run.revised_count} · 跳过 {run.skipped_count}
+                    </p>
+                    {run.error_message && <pre>{run.error_message}</pre>}
+                  </article>
+                ))}
+                {!selectedSourceRuns.length && (
+                  <p className="automation-empty">该信源还没有采集记录。</p>
+                )}
+                <Pagination
+                  page={collectionLogPage}
+                  pageCount={collectionLogPageCount}
+                  total={selectedSourceRuns.length}
+                  onChange={setCollectionLogPage}
+                />
+              </div>
+            )}
+          </>
+        )}
+      </article>
+
+      <article
+        className="review-card automation-column automation-recovery-column"
+        hidden={automationView !== "recovery"}
+      >
+        <div className="review-heading">
+          <div>
+            <span>PIPELINE RECOVERY</span>
+            <h3>撤回已发布结果，或恢复失败的自动任务</h3>
+          </div>
+        </div>
+        <p>
+          选择“事件判断”只撤回事件成员；选择更早阶段会立即隐藏消息，重新发布后再进入事件聚合。
+        </p>
+        <div className="review-form">
+          <label>
+            已发布消息
+            <select value={itemId} onChange={(event) => setItemId(event.target.value)}>
+              <option value="">选择消息</option>
+              {items.map((item) => (
+                <option key={item.id} value={item.id}>
+                  #{item.id} · {item.normalized_title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            失败任务
+            <select
+              value={failedJobId}
+              onChange={(event) => setFailedJobId(event.target.value)}
+            >
+              <option value="">选择失败任务</option>
+              {failedJobs.map((job) => (
+                <option key={job.id} value={job.id}>
+                  Job #{job.id} · Raw #{job.raw_item_id} · {job.current_stage}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            从哪一步重新开始
+            <select value={stage} onChange={(event) => setStage(event.target.value)}>
+              <option value="relevance">相关性</option>
+              <option value="image_ocr">图片 OCR</option>
+              <option value="translation">翻译</option>
+              <option value="item_analysis">摘要与分析</option>
+              <option value="event_decision">事件判断</option>
+            </select>
+          </label>
+          <label>
+            后续模式
+            <select value={mode} onChange={(event) => setMode(event.target.value)}>
+              <option value="manual">人工审核</option>
+              <option value="automatic">自动跑完</option>
+            </select>
+          </label>
+          <textarea
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="填写撤回或恢复原因"
+          />
+        </div>
+        <div className="admin-actions">
+          <button
+            className="reject"
+            type="button"
+            disabled={!itemId || !reason.trim() || busy === "pipeline-correct"}
+            onClick={() =>
+              void act(
+                "pipeline-correct",
+                () =>
+                  api(`/pipeline/normalized-items/${itemId}/corrections`, {
+                    method: "POST",
+                    body: JSON.stringify(payload),
+                  }),
+                "已撤回并按所选模式启动纠正流程",
+              )
+            }
+          >
+            <RotateCcw size={14} /> 撤回并重跑
+          </button>
+          <button
+            type="button"
+            disabled={!failedJobId || !reason.trim() || busy === "pipeline-recover"}
+            onClick={() =>
+              void act(
+                "pipeline-recover",
+                () =>
+                  api(`/pipeline/jobs/${failedJobId}/recover`, {
+                    method: "POST",
+                    body: JSON.stringify(payload),
+                  }),
+                "失败任务已从所选阶段恢复",
+              )
+            }
+          >
+            <Play size={14} /> 恢复失败任务
+          </button>
+        </div>
+        <div className="automation-sublog">
+          <h4>最近撤回记录</h4>
+          {visibleCorrections.map((correction) => (
+            <article className="automation-log-entry" key={`correction-${correction.id}`}>
+              <div className="admin-item-meta">
+                <span>CORRECTION #{correction.id}</span>
+                <span>{correction.restart_from_stage}</span>
+                <span>{correction.resume_mode}</span>
+                <b>{correction.status}</b>
+              </div>
+              <p>{correction.reason}</p>
+            </article>
+          ))}
+          {!corrections.length && <p className="automation-empty">暂无撤回记录。</p>}
+          <Pagination
+            page={correctionLogPage}
+            pageCount={correctionLogPageCount}
+            total={corrections.length}
+            onChange={setCorrectionLogPage}
+          />
+        </div>
+      </article>
+
+      <div
+        className="admin-list automation-column automation-pipeline-column"
+        hidden={automationView !== "pipeline"}
+      >
+        <div className="review-heading">
+          <div>
+            <span>AUTOMATIC PIPELINE</span>
+            <h3>自动化管线日志</h3>
+          </div>
+        </div>
+        {visiblePipelineJobs.map((job) => (
+          <article className="admin-item" key={job.id}>
+            <div className="admin-item-meta">
+              <span>JOB #{job.id}</span>
+              <span>RAW #{job.raw_item_id}</span>
+              <span>{job.current_stage}</span>
+              <b>{job.status}</b>
+            </div>
+            <p>
+              尝试 {job.attempts} 次
+              {job.last_checkpoint_id
+                ? ` · 最后检查点 #${job.last_checkpoint_id}`
+                : " · 尚无有效检查点"}
+            </p>
+            {job.error_message && <pre>{job.error_message}</pre>}
+          </article>
+        ))}
+        {!jobs.length && <p className="automation-empty">暂无自动化管线日志。</p>}
+        <Pagination
+          page={pipelineLogPage}
+          pageCount={pipelineLogPageCount}
+          total={jobs.length}
+          onChange={setPipelineLogPage}
+        />
+      </div>
+    </section>
   );
 }
 

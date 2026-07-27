@@ -11,6 +11,7 @@ from app.models.event import (
     EventReviewTask,
 )
 from app.models.normalized_item import NormalizedItem
+from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.workflow import KnowledgeRule
 from app.schemas.event_workflow import EventDecisionDraft, EventReviewRejection
 from app.services.event_aggregation import add_message_to_event, create_event
@@ -33,11 +34,18 @@ async def start_event_aggregation(
     item: NormalizedItem,
     *,
     supersedes_run_id: int | None = None,
+    execution_mode: str = "manual",
+    correction_id: int | None = None,
 ) -> EventAggregationRun:
     if not is_latest_normalized_item(db, item):
         raise ValueError("normalized item has been superseded by a newer raw revision")
+    if item.publication_status != "published":
+        raise ValueError("withdrawn normalized item cannot enter event aggregation")
     if db.scalar(
-        select(EventMessage).where(EventMessage.normalized_item_id == item.id)
+        select(EventMessage).where(
+            EventMessage.normalized_item_id == item.id,
+            EventMessage.membership_status == "active",
+        )
     ):
         raise ValueError("normalized item already belongs to an event")
     active = db.scalar(
@@ -53,6 +61,9 @@ async def start_event_aggregation(
         supersedes_run_id=supersedes_run_id,
         status="running",
         current_stage=EVENT_STAGE,
+        execution_mode=execution_mode,
+        correction_id=correction_id,
+        restart_from_stage=EVENT_STAGE if correction_id else None,
     )
     db.add(run)
     db.commit()
@@ -85,7 +96,18 @@ async def retry_event_aggregation(
 
 async def _generate_review(db: Session, run: EventAggregationRun) -> None:
     item = run.normalized_item
-    candidates = find_event_candidates(db, normalized_item_id=item.id)
+    correction = (
+        db.get(PipelineCorrection, run.correction_id)
+        if run.correction_id
+        else None
+    )
+    candidates = find_event_candidates(
+        db,
+        normalized_item_id=item.id,
+        include_event_ids={correction.event_id}
+        if correction is not None and correction.event_id is not None
+        else None,
+    )
     candidate_payloads = [asdict(candidate) for candidate in candidates]
     rules = list(
         db.scalars(
@@ -166,6 +188,8 @@ def approve_event_review(
     run = review.run
     if not is_latest_normalized_item(db, run.normalized_item):
         raise ValueError("normalized item was superseded before event review approval")
+    if run.normalized_item.publication_status != "published":
+        raise ValueError("normalized item was withdrawn before event review approval")
     decision = EventDecisionDraft.model_validate(run.decision_draft)
     candidate_ids = {
         int(candidate["event_id"]) for candidate in run.candidate_snapshot
@@ -236,10 +260,32 @@ def approve_event_review(
         run.outcome = "not_event"
 
     review.status = "approved"
+    db.add(
+        ProcessingCheckpoint(
+            raw_item_id=run.normalized_item.raw_item_id,
+            normalized_item_id=run.normalized_item_id,
+            event_aggregation_run_id=run.id,
+            correction_id=run.correction_id,
+            stage=EVENT_STAGE,
+            output_snapshot=dict(run.decision_draft),
+            artifact_references={
+                "candidate_event_ids": sorted(candidate_ids),
+                "outcome": run.outcome,
+            },
+            knowledge_snapshot={},
+            model_name=None,
+            decision_source=review.decision_source,
+        )
+    )
     review.feedback = {"note": note} if note else {}
     review.resolved_at = now
     run.status = "completed"
     run.completed_at = now
+    if run.correction_id:
+        correction = db.get(PipelineCorrection, run.correction_id)
+        if correction is not None:
+            correction.status = "completed"
+            correction.completed_at = now
     db.commit()
     db.refresh(run)
     return run

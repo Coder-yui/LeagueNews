@@ -9,6 +9,12 @@ from app.models.event import Event, EventMessage, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.services.raw_item_versions import superseded_normalized_item_ids
 
+_MATCH_LIFECYCLE_RANK = {
+    "scheduled": 0,
+    "live": 1,
+    "completed": 2,
+}
+
 
 class EventAggregationError(RuntimeError):
     pass
@@ -45,7 +51,8 @@ def _membership_snapshot(
 def _existing_membership(db: Session, normalized_item_id: int) -> EventMessage | None:
     return db.scalar(
         select(EventMessage).where(
-            EventMessage.normalized_item_id == normalized_item_id
+            EventMessage.normalized_item_id == normalized_item_id,
+            EventMessage.membership_status == "active",
         )
     )
 
@@ -60,7 +67,8 @@ def _superseded_memberships(
     return list(
         db.scalars(
             select(EventMessage).where(
-                EventMessage.normalized_item_id.in_(normalized_item_ids)
+                EventMessage.normalized_item_id.in_(normalized_item_ids),
+                EventMessage.membership_status == "active",
             )
         )
     )
@@ -71,7 +79,10 @@ def _refresh_publish_range(db: Session, event: Event) -> None:
         select(
             func.min(EventMessage.source_published_at),
             func.max(EventMessage.source_published_at),
-        ).where(EventMessage.event_id == event.id)
+        ).where(
+            EventMessage.event_id == event.id,
+            EventMessage.membership_status == "active",
+        )
     ).one()
     event.first_published_at = first_published_at
     event.last_published_at = last_published_at
@@ -85,7 +96,10 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
     memberships = list(
         db.scalars(
             select(EventMessage)
-            .where(EventMessage.event_id == event.id)
+            .where(
+                EventMessage.event_id == event.id,
+                EventMessage.membership_status == "active",
+            )
         )
     )
     if not memberships:
@@ -160,6 +174,19 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
             event.credibility_status = "single_source"
         else:
             event.credibility_status = "unverified"
+
+
+def refresh_event_projection(db: Session, event: Event) -> None:
+    """Recompute derived fields after an event membership is withdrawn or restored."""
+    _refresh_publish_range(db, event)
+    _refresh_editorial_metrics(db, event)
+    active_count = db.scalar(
+        select(func.count(EventMessage.normalized_item_id)).where(
+            EventMessage.event_id == event.id,
+            EventMessage.membership_status == "active",
+        )
+    )
+    event.status = "active" if active_count else "withdrawn"
 
 
 
@@ -317,6 +344,18 @@ def add_message_to_event(
     )
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found")
+    lifecycle_regression = (
+        event.event_type == "match"
+        and event.lifecycle_status in _MATCH_LIFECYCLE_RANK
+        and lifecycle_status in _MATCH_LIFECYCLE_RANK
+        and _MATCH_LIFECYCLE_RANK[lifecycle_status]
+        < _MATCH_LIFECYCLE_RANK[event.lifecycle_status]
+    )
+    if lifecycle_regression:
+        is_significant_update = False
+        lifecycle_status = None
+        title = None
+        summary = None
 
     try:
         replaced_normalized_item_ids = [
@@ -332,18 +371,34 @@ def add_message_to_event(
             if is_official_confirmation is None
             else is_official_confirmation
         )
-        db.add(
-            EventMessage(
-                event_id=event.id,
-                normalized_item_id=item.id,
-                relation_type="primary",
-                evidence_stance=evidence_stance,
-                independence_key=independence_key or _default_independence_key(item),
-                is_official_confirmation=official_confirmation,
-                is_significant_update=is_significant_update,
-                source_published_at=item.raw_item.published_at,
+        historical_membership = db.scalar(
+            select(EventMessage).where(
+                EventMessage.event_id == event.id,
+                EventMessage.normalized_item_id == item.id,
             )
         )
+        membership_values = {
+            "relation_type": "primary",
+            "evidence_stance": evidence_stance,
+            "independence_key": independence_key or _default_independence_key(item),
+            "is_official_confirmation": official_confirmation,
+            "is_significant_update": is_significant_update,
+            "source_published_at": item.raw_item.published_at,
+            "membership_status": "active",
+            "withdrawn_at": None,
+            "withdrawal_reason": None,
+            "source_correction_id": None,
+        }
+        if historical_membership is None:
+            db.add(EventMessage(
+                event_id=event.id,
+                normalized_item_id=item.id,
+                **membership_values,
+            ))
+        else:
+            for key, value in membership_values.items():
+                setattr(historical_membership, key, value)
+        event.status = "active"
         if is_significant_update:
             event.current_revision += 1
             if title is not None:

@@ -21,6 +21,11 @@ class Source(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     raw_items: Mapped[list["RawItem"]] = relationship(back_populates="source")  # noqa: F821
+    collection_schedule: Mapped["SourceCollectionSchedule | None"] = relationship(  # noqa: F821
+        back_populates="source",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (
         Index(

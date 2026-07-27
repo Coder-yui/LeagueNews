@@ -111,15 +111,37 @@ class EventMessage(Base):
         DateTime(timezone=True), nullable=True, index=True
     )
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    membership_status: Mapped[str] = mapped_column(
+        String(20), default="active", index=True
+    )
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    withdrawal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_correction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pipeline_corrections.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     event: Mapped[Event] = relationship(back_populates="messages")
     normalized_item: Mapped["NormalizedItem"] = relationship(  # noqa: F821
-        back_populates="event_membership"
+        back_populates="event_memberships"
     )
 
     __table_args__ = (
-        UniqueConstraint("normalized_item_id", name="uq_event_messages_normalized_item"),
+        Index(
+            "uq_event_messages_active_normalized_item",
+            "normalized_item_id",
+            unique=True,
+            postgresql_where=text("membership_status = 'active'"),
+            sqlite_where=text("membership_status = 'active'"),
+        ),
         CheckConstraint("relation_type = 'primary'", name="ck_event_messages_relation_type"),
+        CheckConstraint(
+            "membership_status IN ('active', 'withdrawn')",
+            name="ck_event_messages_membership_status",
+        ),
         CheckConstraint(
             "evidence_stance IN ('supports', 'contradicts', 'context')",
             name="ck_event_messages_evidence_stance",
@@ -164,6 +186,13 @@ class EventAggregationRun(Base):
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
     outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
     current_stage: Mapped[str] = mapped_column(String(40), default="event_decision")
+    execution_mode: Mapped[str] = mapped_column(String(20), default="manual", index=True)
+    correction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pipeline_corrections.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    restart_from_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
     candidate_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     decision_draft: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -199,6 +228,8 @@ class EventReviewTask(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     proposal: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     feedback: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decision_source: Mapped[str] = mapped_column(String(20), default="manual", index=True)
+    policy_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

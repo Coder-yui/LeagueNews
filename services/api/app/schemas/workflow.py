@@ -14,6 +14,9 @@ class ProcessingRunRead(BaseModel):
     status: str
     outcome: str | None
     current_stage: str
+    execution_mode: str
+    correction_id: int | None
+    restart_from_stage: str | None
     context: dict[str, Any]
     error_message: str | None
     created_at: datetime
@@ -30,6 +33,8 @@ class ReviewTaskRead(BaseModel):
     status: str
     proposal: dict[str, Any]
     feedback: dict[str, Any]
+    decision_source: str
+    policy_version: str | None
     created_at: datetime
     resolved_at: datetime | None
 

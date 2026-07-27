@@ -8,7 +8,12 @@ from sqlalchemy.orm import Session
 from app.content_blocks import has_quoted_post, text_from_content_blocks
 from app.core.config import settings
 from app.models.media_extraction import MediaExtraction
-from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
+from app.models.normalized_item import (
+    NormalizedItem,
+    NormalizedItemMediaExtraction,
+    NormalizedItemRevision,
+)
+from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
@@ -41,9 +46,23 @@ async def start_item_processing(
     raw_item: RawItem,
     *,
     supersedes_run_id: int | None = None,
+    execution_mode: str = "manual",
+    correction_id: int | None = None,
+    restart_from_stage: str = RELEVANCE_STAGE,
+    context: dict[str, Any] | None = None,
 ) -> ProcessingRun:
-    if raw_item.normalized_item:
+    if raw_item.normalized_item and not (
+        correction_id is not None
+        and raw_item.normalized_item.publication_status == "withdrawn"
+    ):
         raise ValueError("raw item already has an approved normalized item")
+    if restart_from_stage not in {
+        RELEVANCE_STAGE,
+        OCR_STAGE,
+        TRANSLATION_STAGE,
+        ITEM_STAGE,
+    }:
+        raise ValueError(f"unsupported restart stage: {restart_from_stage}")
     active = db.scalar(
         select(ProcessingRun).where(
             ProcessingRun.raw_item_id == raw_item.id,
@@ -69,12 +88,23 @@ async def start_item_processing(
         supersedes_run_id=supersedes_run_id,
         workflow_type="item",
         status="running",
-        current_stage=RELEVANCE_STAGE,
+        current_stage=restart_from_stage,
+        execution_mode=execution_mode,
+        correction_id=correction_id,
+        restart_from_stage=restart_from_stage if correction_id else None,
+        context=context or {},
     )
     db.add(run)
     db.commit()
     db.refresh(run)
-    await _generate_relevance_review(db, run)
+    if restart_from_stage == RELEVANCE_STAGE:
+        await _generate_relevance_review(db, run)
+    elif restart_from_stage == OCR_STAGE:
+        await _generate_ocr_review(db, run)
+    elif restart_from_stage == TRANSLATION_STAGE:
+        await _generate_translation_review(db, run)
+    else:
+        await _generate_item_review(db, run)
     return run
 
 
@@ -134,6 +164,7 @@ async def approve_review(
     run = review.processing_run
 
     if review.stage == RELEVANCE_STAGE:
+        _record_checkpoint(db, review)
         if bool(review.proposal.get("is_lol_relevant")):
             run.status = "running"
             if is_patch_preview(run.raw_item):
@@ -148,6 +179,11 @@ async def approve_review(
             run.status = "completed"
             run.outcome = "irrelevant"
             run.completed_at = now
+            if run.correction_id:
+                correction = db.get(PipelineCorrection, run.correction_id)
+                if correction is not None:
+                    correction.status = "completed"
+                    correction.completed_at = now
             db.commit()
     elif review.stage == OCR_STAGE:
         extraction_ids = _extraction_ids(review.proposal)
@@ -166,21 +202,42 @@ async def approve_review(
             **run.context,
             "approved_media_extraction_ids": extraction_ids,
         }
+        _record_checkpoint(
+            db,
+            review,
+            artifact_references={"approved_media_extraction_ids": extraction_ids},
+        )
         run.status = "running"
         run.current_stage = TRANSLATION_STAGE
         db.commit()
         await _generate_translation_review(db, run)
     elif review.stage == ITEM_STAGE:
-        _apply_normalized_item(db, run.raw_item, review.proposal)
+        item = _apply_normalized_item(
+            db,
+            run.raw_item,
+            review.proposal,
+            processing_run_id=run.id,
+        )
+        _record_checkpoint(db, review, normalized_item_id=item.id)
         run.status = "completed"
         run.outcome = "approved"
         run.completed_at = now
         db.commit()
+        if run.correction_id:
+            from app.workflows.event_aggregation import start_event_aggregation
+
+            await start_event_aggregation(
+                db,
+                item,
+                execution_mode=run.execution_mode,
+                correction_id=run.correction_id,
+            )
     elif review.stage == TRANSLATION_STAGE:
         run.context = {
             **run.context,
             "approved_translation_proposal": review.proposal,
         }
+        _record_checkpoint(db, review)
         run.status = "running"
         run.current_stage = ITEM_STAGE
         db.commit()
@@ -521,9 +578,8 @@ def _apply_normalized_item(
     db: Session,
     raw_item: RawItem,
     proposal: dict[str, Any],
+    processing_run_id: int | None = None,
 ) -> NormalizedItem:
-    if raw_item.normalized_item:
-        raise ValueError("raw item already has an approved normalized item")
     allowed_fields = {
         "normalized_title",
         "normalized_text",
@@ -545,9 +601,7 @@ def _apply_normalized_item(
         "analysis_model",
         "analysis_version",
     }
-    item = NormalizedItem(
-        raw_item_id=raw_item.id,
-        **{
+    values = {
             key: (
                 _normalize_entities(value)
                 if key == "entities" and isinstance(value, list)
@@ -555,9 +609,22 @@ def _apply_normalized_item(
             )
             for key, value in proposal.items()
             if key in allowed_fields
-        },
-    )
-    db.add(item)
+        }
+    item = raw_item.normalized_item
+    if item is None:
+        item = NormalizedItem(raw_item_id=raw_item.id, **values)
+        db.add(item)
+    elif item.publication_status != "withdrawn":
+        raise ValueError("raw item already has an approved normalized item")
+    else:
+        for key, value in values.items():
+            setattr(item, key, value)
+        item.current_revision += 1
+        item.publication_status = "published"
+        item.withdrawn_at = None
+        item.withdrawal_reason = None
+        for link in list(item.media_links):
+            db.delete(link)
     db.flush()
 
     translated_by_id = {
@@ -576,8 +643,55 @@ def _apply_normalized_item(
                 translation_model=proposal.get("translation_model"),
             )
         )
+    db.add(
+        NormalizedItemRevision(
+            normalized_item_id=item.id,
+            revision=item.current_revision,
+            snapshot={
+                **values,
+                "approved_media_extraction_ids": _extraction_ids(proposal),
+                "translated_media_extractions": proposal.get(
+                    "translated_media_extractions", []
+                ),
+            },
+            processing_run_id=processing_run_id,
+            change_note=(
+                "corrected and republished"
+                if item.current_revision > 1
+                else "initial publication"
+            ),
+        )
+    )
     db.flush()
     return item
+
+
+def _record_checkpoint(
+    db: Session,
+    review: ReviewTask,
+    *,
+    normalized_item_id: int | None = None,
+    artifact_references: dict[str, Any] | None = None,
+) -> ProcessingCheckpoint:
+    run = review.processing_run
+    checkpoint = ProcessingCheckpoint(
+        raw_item_id=run.raw_item_id,
+        normalized_item_id=normalized_item_id,
+        processing_run_id=run.id,
+        correction_id=run.correction_id,
+        stage=review.stage,
+        output_snapshot=dict(review.proposal),
+        artifact_references=artifact_references or {},
+        knowledge_snapshot={},
+        model_name=(
+            review.proposal.get("analysis_model")
+            or review.proposal.get("translation_model")
+            or review.proposal.get("model")
+        ),
+        decision_source=review.decision_source,
+    )
+    db.add(checkpoint)
+    return checkpoint
 
 
 def _replace_pending_review(

@@ -1,4 +1,4 @@
-import { ArrowUpRight } from "lucide-react";
+import { ArrowUpRight, ChevronLeft, ChevronRight } from "lucide-react";
 import Link from "next/link";
 import { getEvents } from "@/lib/api";
 import {
@@ -8,8 +8,25 @@ import {
   lifecycleLabel,
 } from "@/lib/event-labels";
 
-export default async function EventsPage() {
+const EVENT_PAGE_SIZE = 10;
+
+export default async function EventsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string }>;
+}) {
   const events = await getEvents();
+  const params = await searchParams;
+  const requestedPage = Number.parseInt(params.page ?? "1", 10);
+  const pageCount = Math.max(1, Math.ceil(events.length / EVENT_PAGE_SIZE));
+  const page = Math.min(
+    pageCount,
+    Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 1,
+  );
+  const visibleEvents = events.slice(
+    (page - 1) * EVENT_PAGE_SIZE,
+    page * EVENT_PAGE_SIZE,
+  );
   return (
     <main>
       <header className="site-header">
@@ -31,7 +48,7 @@ export default async function EventsPage() {
       </section>
       <section className="public-event-list">
         {!events.length && <div className="message-empty">目前还没有完成审核的事件。</div>}
-        {events.map((event) => (
+        {visibleEvents.map((event) => (
           <article className="public-event-card" key={event.id}>
             <div className="event-topline">
               <span>{event.category}</span>
@@ -67,6 +84,28 @@ export default async function EventsPage() {
             </div>
           </article>
         ))}
+        {pageCount > 1 && (
+          <div className="public-pagination">
+            <span>共 {events.length} 个事件</span>
+            <div>
+              <Link
+                className={page === 1 ? "disabled" : ""}
+                aria-disabled={page === 1}
+                href={`/events?page=${Math.max(1, page - 1)}`}
+              >
+                <ChevronLeft size={13} /> 上一页
+              </Link>
+              <span>{page} / {pageCount}</span>
+              <Link
+                className={page === pageCount ? "disabled" : ""}
+                aria-disabled={page === pageCount}
+                href={`/events?page=${Math.min(pageCount, page + 1)}`}
+              >
+                下一页 <ChevronRight size={13} />
+              </Link>
+            </div>
+          </div>
+        )}
       </section>
       <footer><span>LoL Daily Intel · Reviewed events</span><span>Messages remain independent evidence.</span></footer>
     </main>

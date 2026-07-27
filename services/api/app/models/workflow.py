@@ -21,6 +21,11 @@ class ProcessingRun(Base):
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
     outcome: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     current_stage: Mapped[str] = mapped_column(String(40), index=True)
+    execution_mode: Mapped[str] = mapped_column(String(20), default="manual", index=True)
+    correction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pipeline_corrections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    restart_from_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
     context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -46,6 +51,8 @@ class ReviewTask(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     proposal: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     feedback: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decision_source: Mapped[str] = mapped_column(String(20), default="manual", index=True)
+    policy_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

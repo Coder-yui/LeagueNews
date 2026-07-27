@@ -451,6 +451,56 @@ def test_official_confirmation_overrides_event_credibility() -> None:
         assert event.official_source_count == 1
 
 
+def test_late_schedule_cannot_regress_completed_match_event() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="LPL Official", connector_type="weibo")
+        db.add(source)
+        db.commit()
+        result = _add_normalized_item(
+            db,
+            source=source,
+            external_id="result",
+            title="7月26日赛果",
+            published_at=datetime(2026, 7, 26, 14, 31, tzinfo=UTC),
+        )
+        schedule = _add_normalized_item(
+            db,
+            source=source,
+            external_id="schedule",
+            title="7月26日赛程预告",
+            published_at=datetime(2026, 7, 26, 6, 11, tzinfo=UTC),
+        )
+        event = create_event(
+            db,
+            normalized_item_id=result.id,
+            event_key="matchday:lpl:2026-07-26",
+            title="7月26日赛果",
+            summary="三场比赛已经结束。",
+            category="LPL赛程赛果",
+            event_type="match",
+            lifecycle_status="completed",
+        )
+
+        event, added = add_message_to_event(
+            db,
+            event_id=event.id,
+            normalized_item_id=schedule.id,
+            title="7月26日赛程预告",
+            summary="三场比赛即将开始。",
+            lifecycle_status="scheduled",
+            is_significant_update=True,
+        )
+
+        assert added is True
+        assert event.lifecycle_status == "completed"
+        assert event.title == "7月26日赛果"
+        assert event.summary == "三场比赛已经结束。"
+        assert event.current_revision == 1
+        assert len(event.messages) == 2
+
+
 def test_new_raw_revision_replaces_event_member_without_duplicate_revision() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)

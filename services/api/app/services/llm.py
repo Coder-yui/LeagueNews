@@ -222,6 +222,14 @@ class LLMClient:
         knowledge_rules: list[str],
     ) -> EventDecisionDraft:
         candidate_ids = {int(candidate["event_id"]) for candidate in candidates}
+        candidates_by_id = {
+            int(candidate["event_id"]): candidate for candidate in candidates
+        }
+        match_lifecycle_rank = {
+            "scheduled": 0,
+            "live": 1,
+            "completed": 2,
+        }
 
         def validate_candidate(result: EventDecisionDraft) -> str | None:
             if (
@@ -234,39 +242,71 @@ class LLMClient:
                 stable_event_key,
             }:
                 return "create 不能编造稳定事件键"
+            if result.decision == "create" and stable_event_key is not None:
+                exact_candidate = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if candidate.get("event_key") == stable_event_key
+                    ),
+                    None,
+                )
+                if exact_candidate is not None:
+                    return (
+                        f"稳定事件键 {stable_event_key} 已对应候选事件 "
+                        f"{exact_candidate['event_id']}，不能重复创建"
+                    )
+            if result.decision == "update":
+                candidate = candidates_by_id.get(result.candidate_event_id or -1)
+                if (
+                    candidate is not None
+                    and result.event_type == "match"
+                    and candidate.get("event_type") == "match"
+                    and result.lifecycle_status in match_lifecycle_rank
+                    and candidate.get("lifecycle_status") in match_lifecycle_rank
+                    and match_lifecycle_rank[result.lifecycle_status]
+                    < match_lifecycle_rank[
+                        str(candidate["lifecycle_status"])
+                    ]
+                ):
+                    result.lifecycle_status = str(candidate["lifecycle_status"])
+                    result.update_kind = "context"
+                    result.evidence_stance = "context"
+                    result.title = None
+                    result.summary = None
+                    result.category = None
+                    result.new_facts = []
             policy = item.get("event_policy")
             if isinstance(policy, dict) and policy.get("policy_type") == (
                 "mythic_shop_rotation"
             ):
                 eligible = bool(policy.get("event_eligible"))
+                if eligible:
+                    result.event_type = str(
+                        policy.get("required_event_type") or "activity"
+                    )
+                    importance_range = policy.get("importance_range")
+                    if (
+                        isinstance(importance_range, list)
+                        and len(importance_range) == 2
+                    ):
+                        low = float(importance_range[0])
+                        high = float(importance_range[1])
+                        result.importance_score = (
+                            (low + high) / 2
+                            if result.importance_score is None
+                            else min(high, max(low, result.importance_score))
+                        )
+                    if (
+                        policy.get("cadence") == "daily"
+                        and result.decision == "update"
+                    ):
+                        result.update_kind = "context"
+                        result.evidence_stance = "context"
                 if not eligible and result.decision != "not_event":
                     return "非国服神话商城轮换不进入事件层，decision 必须为 not_event"
                 if eligible and result.decision == "not_event":
                     return "国服神话商城轮换必须形成或更新周轮换事件，不能是 not_event"
-                if eligible and result.event_type != "activity":
-                    return "国服神话商城轮换的 event_type 必须为 activity"
-                importance_range = policy.get("importance_range")
-                if (
-                    eligible
-                    and isinstance(importance_range, list)
-                    and len(importance_range) == 2
-                    and (
-                        result.importance_score is None
-                        or not (
-                            float(importance_range[0])
-                            <= result.importance_score
-                            <= float(importance_range[1])
-                        )
-                    )
-                ):
-                    return "国服神话商城轮换的重要性必须在 0.30 到 0.45"
-                if (
-                    eligible
-                    and policy.get("cadence") == "daily"
-                    and result.decision == "update"
-                    and result.update_kind != "context"
-                ):
-                    return "每日轮换加入本周事件时 update_kind 必须为 context"
             if result.decision == "create" and candidate_ids:
                 rejected_ids = {
                     rejection.event_id
@@ -293,6 +333,11 @@ class LLMClient:
             "形成 match 事件，但重要性通常保持 0.50 到 0.58；只有明确影响排名、晋级或淘汰"
             "才提高。具体到选手、动作和目标战队的单源转会爆料应立即形成 transfer 事件，"
             "lifecycle_status 使用 unconfirmed，标题必须带“传闻”或同等不确定性措辞。"
+            "LPL 普通常规赛按比赛日聚合：同一天的赛程预告、进行中、赛果和赛后集锦属于"
+            "同一个 match 事件。季后赛后程的半决赛、胜者组决赛、败者组决赛和总决赛才"
+            "按单场系列赛独立建事件。scheduled、live、completed 是同一事件的生命周期，"
+            "不是拆分事件的依据。晚采集到的较早赛程只能作为 context 加入已经 completed "
+            "的事件，不得回退生命周期、标题或摘要。"
             "同一原始来源的转发不算多源。只有原始官方来源直接确认其权责范围内的核心事实时，"
             "official_confirmation 才能为 true；官方账号转发他人内容不算官方确认。"
             "update_kind=duplicate_evidence 或 context 时不得虚构新增事实；只有新增事实、确认、"

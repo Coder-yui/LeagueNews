@@ -14,7 +14,6 @@ from app.api.errors import (
 )
 from app.api.router import api_router
 from app.core.config import settings
-from app.core.database import Base, engine
 from app.services.llm import LLMAnalysisError, LLMConfigurationError
 from app.services.media_ocr import OCRProcessingError
 import app.models  # noqa: F401
@@ -22,7 +21,6 @@ import app.models  # noqa: F401
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
     yield
 
 

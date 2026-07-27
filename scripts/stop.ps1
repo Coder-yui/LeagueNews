@@ -24,6 +24,8 @@ function Stop-TrackedProcess([string]$Name) {
 
 Set-Location $ProjectRoot
 Stop-TrackedProcess "web"
+Stop-TrackedProcess "pipeline-worker"
+Stop-TrackedProcess "collection-scheduler"
 Stop-TrackedProcess "api"
 
 Write-Host "Stopping PostgreSQL and pgAdmin containers..."

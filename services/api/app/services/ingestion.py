@@ -14,6 +14,7 @@ from app.models.media_asset import MediaAsset
 from app.models.raw_item import RawItem
 from app.models.raw_item_source_payload import RawItemSourcePayload
 from app.models.source import Source
+from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_storage import MediaStorage
 
 
@@ -111,6 +112,7 @@ async def ingest_connector_items(
             result.created.append(raw_item)
             if latest_revision:
                 result.revised.append(raw_item)
+            enqueue_pipeline_job(db, raw_item_id=raw_item.id)
         db.commit()
     except BaseException:
         db.rollback()

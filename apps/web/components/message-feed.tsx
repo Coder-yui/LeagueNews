@@ -83,6 +83,7 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
             width={520}
             height={360}
             sizes="(max-width: 760px) 100vw, 320px"
+            unoptimized
           />
         </Link>
       )}

@@ -123,6 +123,7 @@ function ContentBlocks({
                   height={1000}
                   sizes="(max-width: 900px) 100vw, 900px"
                   priority={index === 0}
+                  unoptimized
                 />
                 {block.caption && <figcaption>{block.caption}</figcaption>}
               </figure>

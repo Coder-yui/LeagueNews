@@ -1,0 +1,147 @@
+name: league-news
+
+x-api-environment: &api-environment
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  API_CORS_ORIGINS: ${PUBLIC_ORIGIN}
+  API_DOCS_ENABLED: "false"
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  MODEL_NAME: ${MODEL_NAME}
+  MEDIA_ROOT: /data/media
+  MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-20971520}
+  CONNECTOR_USER_AGENT: ${CONNECTOR_USER_AGENT}
+  X_COOKIE_FILE: /run/secrets/x-cookies.json
+  X_FETCH_LIMIT: ${X_FETCH_LIMIT:-10}
+  WEIBO_BROWSER_PROFILE: /data/weibo-profile
+  WEIBO_BROWSER_CHANNEL: ""
+  WEIBO_BROWSER_HEADLESS: "true"
+  PIPELINE_AUTOMATION_ENABLED: ${PIPELINE_AUTOMATION_ENABLED:-true}
+  PIPELINE_WORKER_POLL_SECONDS: ${PIPELINE_WORKER_POLL_SECONDS:-2}
+  COLLECTION_SCHEDULER_POLL_SECONDS: ${COLLECTION_SCHEDULER_POLL_SECONDS:-5}
+  COLLECTION_SCHEDULER_LEASE_MINUTES: ${COLLECTION_SCHEDULER_LEASE_MINUTES:-30}
+
+x-api-service: &api-service
+  image: ${API_IMAGE:-league-news-api}:${IMAGE_TAG:-latest}
+  build:
+    context: ../services/api
+    dockerfile: Dockerfile
+  environment: *api-environment
+  volumes:
+    - media_data:/data/media
+    - ${SECRETS_DIR:-../.secrets}/x-cookies.json:/run/secrets/x-cookies.json:ro
+    - ${SECRETS_DIR:-../.secrets}/weibo-browser-profile:/data/weibo-profile
+  init: true
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    image: ${API_IMAGE:-league-news-api}:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    environment:
+      <<: *api-environment
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      - ../infra/postgres/migrations:/migrations:ro
+    command: ["python", "-m", "scripts.migrate_database"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *api-service
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/ready', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  pipeline-worker:
+    <<: *api-service
+    command: ["python", "-m", "scripts.run_pipeline_worker"]
+
+  collection-scheduler:
+    <<: *api-service
+    command: ["python", "-m", "scripts.run_collection_scheduler"]
+
+  web:
+    image: ${WEB_IMAGE:-league-news-web}:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: /api/v1
+    environment:
+      NODE_ENV: production
+      INTERNAL_API_URL: http://api:8000/api/v1
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+      ACME_EMAIL: ${ACME_EMAIL}
+      ADMIN_USERNAME: ${ADMIN_USERNAME}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH}
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${BIND_ADDRESS:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+      - "${BIND_ADDRESS:-0.0.0.0}:${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - media_data:/srv/media:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  media_data:
+  caddy_data:
+  caddy_config:

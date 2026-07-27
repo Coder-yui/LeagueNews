@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.production
+.secrets
+.run
+.uv-cache
+.pnpm-store
+node_modules
+**/node_modules
+**/.next
+**/__pycache__
+**/.venv
+apps/web/public/media
+backups

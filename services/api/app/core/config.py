@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "LoL Daily Intel API"
     api_v1_prefix: str = "/api/v1"
+    api_docs_enabled: bool = True
     database_url: str = "postgresql+psycopg://lol:lol_local_password@localhost:5432/lol_daily_intel"
     api_cors_origins: str = "http://localhost:3000"
     openai_api_key: str = ""

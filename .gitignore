@@ -31,3 +31,7 @@ Thumbs.db
 # Local data
 postgres_data/
 apps/web/public/media/
+backups/
+
+# Production deployment environment
+.env.production

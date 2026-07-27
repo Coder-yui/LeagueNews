@@ -1,0 +1,50 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	@adminPage path /admin /admin/*
+	basic_auth @adminPage {
+		{$ADMIN_USERNAME} {$ADMIN_PASSWORD_HASH}
+	}
+
+	@privateApi {
+		path /api/*
+		not {
+			method GET
+			path /api/v1/health /api/v1/ready /api/v1/normalized-items/published /api/v1/normalized-items/*/published /api/v1/events /api/v1/events/*
+		}
+	}
+	basic_auth @privateApi {
+		{$ADMIN_USERNAME} {$ADMIN_PASSWORD_HASH}
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle /media/* {
+		root * /srv
+		file_server
+		header Cache-Control "public, max-age=86400"
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

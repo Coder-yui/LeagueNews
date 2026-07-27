@@ -1,6 +1,9 @@
 import type { EventDetail, EventSummary, PublishedItem } from "./types";
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const apiUrl =
+  process.env.INTERNAL_API_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:8000/api/v1";
 
 export async function getPublishedItems(): Promise<PublishedItem[]> {
   try {

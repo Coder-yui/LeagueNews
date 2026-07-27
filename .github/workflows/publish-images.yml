@@ -1,0 +1,81 @@
+name: Build and publish production images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-images.yml"
+      - ".dockerignore"
+      - "apps/web/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "services/api/**"
+  workflow_dispatch:
+
+concurrency:
+  group: production-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Compute lowercase image names
+        id: images
+        shell: bash
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "api=ghcr.io/${repository}-api" >> "$GITHUB_OUTPUT"
+          echo "web=ghcr.io/${repository}-web" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish API image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: ./services/api
+          file: ./services/api/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.images.outputs.api }}:latest
+            ${{ steps.images.outputs.api }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build and publish Web image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: .
+          file: ./apps/web/Dockerfile
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=/api/v1
+          tags: |
+            ${{ steps.images.outputs.web }}:latest
+            ${{ steps.images.outputs.web }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web

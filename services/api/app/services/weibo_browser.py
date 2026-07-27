@@ -24,7 +24,7 @@ class WeiboBrowserSession:
         headless: bool | None = None,
     ) -> None:
         self.profile_path = profile_path or settings.resolved_weibo_browser_profile
-        self.channel = channel or settings.weibo_browser_channel
+        self.channel = channel or settings.weibo_browser_channel or None
         self.headless = settings.weibo_browser_headless if headless is None else headless
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
@@ -40,7 +40,7 @@ class WeiboBrowserSession:
                 self._playwright = None
             self._executor.shutdown(wait=True)
             raise WeiboBrowserError(
-                "Unable to start the dedicated Weibo Edge profile; "
+                "Unable to start the dedicated Weibo browser profile; "
                 "close any previous Weibo setup window and retry "
                 f"({type(exc).__name__}: {exc})"
             ) from exc

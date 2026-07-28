@@ -15,6 +15,26 @@ class WeiboBrowserError(RuntimeError):
     """A persistent browser session could not be started or queried."""
 
 
+def _load_cookie_file(path: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WeiboBrowserError(f"Weibo cookie file is invalid JSON: {path}") from exc
+    if not isinstance(payload, list) or not all(
+        isinstance(cookie, dict)
+        and cookie.get("name")
+        and cookie.get("value")
+        and cookie.get("domain")
+        and cookie.get("path")
+        for cookie in payload
+    ):
+        raise WeiboBrowserError(
+            "Weibo cookie file must contain a list of browser cookies "
+            "with name, value, domain, and path"
+        )
+    return payload
+
+
 class WeiboBrowserSession:
     def __init__(
         self,
@@ -72,6 +92,9 @@ class WeiboBrowserSession:
             viewport={"width": 1440, "height": 1000},
             args=["--disable-blink-features=AutomationControlled"],
         )
+        cookie_file = settings.resolved_weibo_cookie_file
+        if cookie_file is not None:
+            self._context.add_cookies(_load_cookie_file(cookie_file))
 
     def _open_weibo(self, url: str) -> None:
         page = self._page()
@@ -81,26 +104,32 @@ class WeiboBrowserSession:
         page = self._page()
         if not page.url.startswith("https://weibo.com/"):
             page.goto("https://weibo.com/", wait_until="domcontentloaded", timeout=60_000)
-        result = page.evaluate(
-            """
-            async (url) => {
-              const response = await fetch(url, {
-                method: "GET",
-                credentials: "include",
-                headers: {
-                  "Accept": "application/json, text/plain, */*",
-                  "X-Requested-With": "XMLHttpRequest"
+        try:
+            result = page.evaluate(
+                """
+                async (url) => {
+                  const response = await fetch(url, {
+                    method: "GET",
+                    credentials: "include",
+                    headers: {
+                      "Accept": "application/json, text/plain, */*",
+                      "X-Requested-With": "XMLHttpRequest"
+                    }
+                  });
+                  return {
+                    status: response.status,
+                    contentType: response.headers.get("content-type") || "",
+                    text: await response.text()
+                  };
                 }
-              });
-              return {
-                status: response.status,
-                contentType: response.headers.get("content-type") || "",
-                text: await response.text()
-              };
-            }
-            """,
-            url,
-        )
+                """,
+                url,
+            )
+        except Exception as exc:
+            raise WeiboBrowserError(
+                f"Weibo browser request failed from {page.url} "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
         if not isinstance(result, dict):
             raise WeiboBrowserError("Weibo browser returned an invalid response")
         status = int(result.get("status") or 0)

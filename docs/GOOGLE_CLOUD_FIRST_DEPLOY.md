@@ -162,8 +162,9 @@ cd ~/LeagueNews
 cp .env.preview.example .env.production
 mkdir -p .secrets/weibo-browser-profile
 printf '{}\n' > .secrets/x-cookies.json
+printf '[]\n' > .secrets/weibo-cookies.json
 chmod 700 .secrets .secrets/weibo-browser-profile
-chmod 600 .env.production .secrets/x-cookies.json
+chmod 600 .env.production .secrets/x-cookies.json .secrets/weibo-cookies.json
 ```
 
 生成数据库密码：
@@ -271,6 +272,7 @@ http://localhost:8080/admin
 - `backups/*.dump`
 - `apps/web/public/media`
 - `.secrets/x-cookies.json`
+- `.secrets/weibo-cookies.json`
 - `.secrets/weibo-browser-profile`
 
 数据库导出使用开发电脑上的：

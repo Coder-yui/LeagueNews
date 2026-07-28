@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     x_cookie_file: str = ".secrets/x-cookies.json"
     x_fetch_limit: int = 10
     weibo_browser_profile: str = ".secrets/weibo-browser-profile"
+    weibo_cookie_file: str = ""
     weibo_browser_channel: str = "msedge"
     weibo_browser_headless: bool = True
     weibo_browser_user_agent: str = ""
@@ -66,6 +67,14 @@ class Settings(BaseSettings):
     @property
     def resolved_weibo_browser_profile(self) -> Path:
         return self._resolve_project_path(self.weibo_browser_profile)
+
+    @property
+    def resolved_weibo_cookie_file(self) -> Path | None:
+        return (
+            self._resolve_project_path(self.weibo_cookie_file)
+            if self.weibo_cookie_file.strip()
+            else None
+        )
 
 
 @lru_cache

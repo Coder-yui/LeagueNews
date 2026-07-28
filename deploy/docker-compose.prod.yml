@@ -13,6 +13,7 @@ x-api-environment: &api-environment
   X_COOKIE_FILE: /run/secrets/x-cookies.json
   X_FETCH_LIMIT: ${X_FETCH_LIMIT:-10}
   WEIBO_BROWSER_PROFILE: /data/weibo-profile
+  WEIBO_COOKIE_FILE: /run/secrets/weibo-cookies.json
   WEIBO_BROWSER_CHANNEL: ""
   WEIBO_BROWSER_HEADLESS: "true"
   WEIBO_BROWSER_USER_AGENT: ${WEIBO_BROWSER_USER_AGENT:-}
@@ -30,6 +31,7 @@ x-api-service: &api-service
   volumes:
     - media_data:/data/media
     - ${SECRETS_DIR:-../.secrets}/x-cookies.json:/run/secrets/x-cookies.json:ro
+    - ${SECRETS_DIR:-../.secrets}/weibo-cookies.json:/run/secrets/weibo-cookies.json:ro
     - ${SECRETS_DIR:-../.secrets}/weibo-browser-profile:/data/weibo-profile
   init: true
   restart: unless-stopped

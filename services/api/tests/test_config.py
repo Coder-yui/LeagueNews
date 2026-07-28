@@ -27,3 +27,9 @@ def test_weibo_browser_user_agent_is_configurable() -> None:
     configured = Settings(weibo_browser_user_agent=user_agent)
 
     assert configured.weibo_browser_user_agent == user_agent
+
+
+def test_empty_weibo_cookie_file_disables_cookie_injection() -> None:
+    configured = Settings(weibo_cookie_file="")
+
+    assert configured.resolved_weibo_cookie_file is None

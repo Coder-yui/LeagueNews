@@ -36,8 +36,9 @@ cd league-news
 cp .env.production.example .env.production
 mkdir -p .secrets/weibo-browser-profile
 touch .secrets/x-cookies.json
+printf '[]\n' > .secrets/weibo-cookies.json
 chmod 700 .secrets .secrets/weibo-browser-profile
-chmod 600 .env.production .secrets/x-cookies.json
+chmod 600 .env.production .secrets/x-cookies.json .secrets/weibo-cookies.json
 ```
 
 生成管理端密码哈希：
@@ -77,6 +78,7 @@ Git 不包含数据库业务数据、媒体文件或平台登录会话。正式�
 
 - `apps/web/public/media` 的全部内容；
 - `.secrets/x-cookies.json`；
+- 从已登录浏览器导出的 `.secrets/weibo-cookies.json`；
 - `.secrets/weibo-browser-profile`。
 
 在服务器只启动 PostgreSQL：

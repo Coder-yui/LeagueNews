@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     weibo_browser_profile: str = ".secrets/weibo-browser-profile"
     weibo_browser_channel: str = "msedge"
     weibo_browser_headless: bool = True
+    weibo_browser_user_agent: str = ""
     pipeline_automation_enabled: bool = True
     pipeline_worker_poll_seconds: float = 2.0
     collection_scheduler_poll_seconds: float = 5.0

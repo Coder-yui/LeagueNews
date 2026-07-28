@@ -396,6 +396,7 @@ E:\leagueNews\.secrets\weibo-browser-profile
 WEIBO_BROWSER_PROFILE=.secrets/weibo-browser-profile
 WEIBO_BROWSER_CHANNEL=msedge
 WEIBO_BROWSER_HEADLESS=true
+WEIBO_BROWSER_USER_AGENT=
 ```
 
 ### 7.2 调用

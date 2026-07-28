@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.core.config import _find_project_root
+from app.core.config import Settings, _find_project_root
 
 
 def test_find_project_root_uses_monorepo_marker(tmp_path: Path) -> None:
@@ -19,3 +19,11 @@ def test_find_project_root_falls_back_to_api_root_in_image(tmp_path: Path) -> No
     module_file.touch()
 
     assert _find_project_root(module_file) == api_root
+
+
+def test_weibo_browser_user_agent_is_configurable() -> None:
+    user_agent = "Mozilla/5.0 deployment-session"
+
+    configured = Settings(weibo_browser_user_agent=user_agent)
+
+    assert configured.weibo_browser_user_agent == user_agent

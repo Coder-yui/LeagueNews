@@ -115,8 +115,10 @@ uv run python scripts/setup_weibo_browser.py
 在打开的 Edge 窗口中完成一次微博登录；检测到账号时间线可访问后窗口会自动关闭。
 登录信息只保存在 Git 忽略的 `.secrets/weibo-browser-profile`，不会进入数据库、日志
 或 `raw_payload`。运行 Connector 时不能同时打开登录脚本，否则 Edge Profile 会被锁定。
-可通过 `WEIBO_BROWSER_PROFILE`、`WEIBO_BROWSER_CHANNEL` 和
-`WEIBO_BROWSER_HEADLESS` 覆盖 Profile 路径、浏览器通道与运行模式。
+可通过 `WEIBO_BROWSER_PROFILE`、`WEIBO_BROWSER_CHANNEL`、
+`WEIBO_BROWSER_HEADLESS` 和 `WEIBO_BROWSER_USER_AGENT` 覆盖 Profile 路径、
+浏览器通道、运行模式与登录时使用的 User-Agent。把登录态迁移到其他操作系统或云服务器
+时，User-Agent 应与建立登录态的浏览器保持一致，否则微博可能清除登录 Cookie。
 
 微博图片会进入正常媒体落盘流程；视频、投票和其他附加内容只保存用户可打开的页面
 链接，不下载媒体文件。转发微博保存当前账号的转发语、原微博摘要和原微博链接，不会

@@ -67,6 +67,7 @@ class WeiboBrowserSession:
             user_data_dir=str(self.profile_path),
             channel=self.channel,
             headless=self.headless,
+            user_agent=settings.weibo_browser_user_agent or None,
             locale="zh-CN",
             viewport={"width": 1440, "height": 1000},
             args=["--disable-blink-features=AutomationControlled"],

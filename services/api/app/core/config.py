@@ -4,6 +4,16 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _find_project_root(module_file: Path) -> Path:
+    resolved = module_file.resolve()
+    for parent in resolved.parents:
+        if (parent / "pnpm-workspace.yaml").is_file():
+            return parent
+    # Production images contain only the API project under /app, without the
+    # monorepo marker. app/core/config.py is two directories below that root.
+    return resolved.parents[2]
+
+
 class Settings(BaseSettings):
     app_name: str = "LoL Daily Intel API"
     api_v1_prefix: str = "/api/v1"
@@ -42,7 +52,7 @@ class Settings(BaseSettings):
 
     @property
     def project_root(self) -> Path:
-        return Path(__file__).resolve().parents[4]
+        return _find_project_root(Path(__file__))
 
     def _resolve_project_path(self, value: str) -> Path:
         path = Path(value)

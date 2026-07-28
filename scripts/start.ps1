@@ -119,6 +119,24 @@ if ($LASTEXITCODE -ne 0) {
     throw "docker compose up -d failed."
 }
 
+Write-Step "Applying database migrations"
+$previousMigrationsDir = $env:MIGRATIONS_DIR
+Push-Location $ApiDir
+try {
+    $env:MIGRATIONS_DIR = Join-Path $ProjectRoot "infra\postgres\migrations"
+    & ".venv\Scripts\python.exe" -m scripts.migrate_database
+    if ($LASTEXITCODE -ne 0) {
+        throw "Database migration failed. Check the output above."
+    }
+} finally {
+    if ($null -eq $previousMigrationsDir) {
+        Remove-Item Env:MIGRATIONS_DIR -ErrorAction SilentlyContinue
+    } else {
+        $env:MIGRATIONS_DIR = $previousMigrationsDir
+    }
+    Pop-Location
+}
+
 $apiAlreadyRunning = Test-RecordedProcess "api"
 $webAlreadyRunning = Test-RecordedProcess "web"
 $workerAlreadyRunning = Test-RecordedProcess "pipeline-worker"
@@ -152,62 +170,6 @@ if (-not $apiReady -or -not $webReady) {
     exit 1
 }
 
-Write-Step "Applying database migrations"
-& docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /migrations/007_add_connector_ingestion.sql'
-if ($LASTEXITCODE -ne 0) {
-    throw "Migration 007 failed. Check PostgreSQL output above."
-}
-$postgresUser = (& docker compose exec -T postgres printenv POSTGRES_USER | Out-String).Trim()
-$postgresDatabase = (& docker compose exec -T postgres printenv POSTGRES_DB | Out-String).Trim()
-if (-not $postgresUser -or -not $postgresDatabase) {
-    throw "Could not read PostgreSQL connection settings from the container."
-}
-$appliedVersions = @(
-    & docker compose exec -T postgres psql `
-        -U $postgresUser `
-        -d $postgresDatabase `
-        -tA `
-        -c "SELECT version FROM schema_migrations"
-)
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not inspect applied database migrations."
-}
-foreach (
-    $migrationVersion in @(
-        "008_seed_web_connector_sources",
-        "009_source_identity_per_publisher",
-        "010_add_weibo_tieba_sources",
-        "011_add_reviewed_ai_workflows",
-        "012_track_approved_media_extractions",
-        "013_add_ocr_lab",
-        "014_add_patch_table_structure",
-        "015_raw_items_content_blocks_v2",
-        "016_normalize_legacy_embed_urls",
-        "017_simplify_raw_item_identity",
-        "018_normalize_x_author_names",
-        "019_version_raw_item_ingestion",
-        "020_reset_processing_data",
-        "021_remove_legacy_raw_item_identity_index",
-        "022_refine_reviewed_item_pipeline",
-        "023_remove_deferred_event_reporting",
-        "024_restore_production_ocr_profile",
-        "025_reset_item_processing_state",
-        "026_create_event_aggregation_v2",
-        "027_add_event_review_workflow",
-        "028_add_event_editorial_metrics",
-        "029_add_pipeline_corrections",
-        "030_add_automatic_pipeline_jobs",
-        "031_add_source_collection_schedules"
-    )
-) {
-    if ($appliedVersions -notcontains $migrationVersion) {
-        & docker compose exec -T postgres sh -c "psql -v ON_ERROR_STOP=1 -U `"`$POSTGRES_USER`" -d `"`$POSTGRES_DB`" -f /migrations/$migrationVersion.sql"
-        if ($LASTEXITCODE -ne 0) {
-            throw "Migration $migrationVersion failed. Check PostgreSQL output above."
-        }
-    }
-}
-
 if (-not $workerAlreadyRunning) {
     Write-Step "Starting automatic pipeline worker"
     $workerCommand = "`$env:UV_CACHE_DIR='$ProjectRoot\.uv-cache'; uv run python -m scripts.run_pipeline_worker"
@@ -222,17 +184,6 @@ if (-not $schedulerAlreadyRunning) {
     Start-TrackedProcess "collection-scheduler" $ApiDir $schedulerCommand | Out-Null
 } else {
     Write-Host "Source collection scheduler is already tracked as running; skipping."
-}
-
-Write-Step "Upgrading RawItem semantic hashes"
-Push-Location $ApiDir
-try {
-    & ".venv\Scripts\python.exe" -m scripts.rebuild_raw_item_hashes
-    if ($LASTEXITCODE -ne 0) {
-        throw "RawItem hash upgrade failed."
-    }
-} finally {
-    Pop-Location
 }
 
 Write-Host "`nLoL Daily Intel is running:" -ForegroundColor Green

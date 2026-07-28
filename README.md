@@ -1,63 +1,71 @@
 # LoL Daily Intel
 
-英雄联盟垂直领域的多信源采集、人工审核和消息展示项目。
+英雄联盟垂直领域的多信源采集、AI 处理、事件聚合与发布系统。
 
-当前已启用的完整链路是：
+## 当前能力
 
 ```text
-Source
+Source 周期调度或手工触发
   -> 平台 Connector
-  -> 不可变 RawItem + MediaAsset
-  -> LoL 相关性 AI / 人工审核
-  -> 可选版本图片 OCR / 人工修正
-  -> 翻译 / 术语审核
-  -> 基于已批准中文内容的分析与摘要 / 人工审核
-  -> NormalizedItem
-  -> 消息卡片与消息详情
+  -> 不可变 RawItem + MediaAsset + provenance
+  -> 持久化 Pipeline Job
+  -> 相关性
+  -> 可选版本图片 OCR
+  -> 翻译
+  -> 摘要、实体、重要性与可信度分析
+  -> NormalizedItem 发布
+  -> 事件判断与聚合
 ```
 
-事件聚合 v2 已有核心数据模型、事务服务、确定性候选检索、受审核 AI 工作流、管理台
-以及公开事件列表和详情时间线；报告尚未实现。后续边界与实施顺序见
-[`docs/DEVELOPMENT_HANDOFF.md`](docs/DEVELOPMENT_HANDOFF.md)。
+- 已接入 Riot 官网、腾讯 LOL 官网、X、微博、百度贴吧和手工导入。
+- 新内容默认由独立 Worker 自动跑完整链路；各阶段仍保留草稿、决定来源和 checkpoint。
+- 已发布消息可以按阶段撤回，并选择人工审核或自动模式重跑。
+- 事件层支持确定性候选、AI 结构化决策、人工/自动接受、稳定事件键和 revision 历史。
+- 管理台提供审核、采集计划、采集日志、管线日志、失败恢复、撤回、知识与 OCR Lab。
+- 已有单机 Docker Compose 生产部署、Caddy 边界认证、GHCR 镜像发布、备份与恢复脚本。
+- 日报、embedding/向量召回和应用内多用户权限尚未实现。
 
 ## 架构边界
 
-- Connector 是平台级采集能力，如 `x_twitter`、`tencent_lol`、`riot_official`。
-- Source 是具体账号或站点。多个 X 账号共享同一个 Connector，但各自拥有独立 Source。
-- Connector 只把平台数据映射为统一 `RawItemCandidate`；共享 ingestion 负责校验、去重、
-  媒体落盘和入库。
-- `raw_items.content_blocks` 是原始图文的唯一事实来源，处理层不得回写。
-- `normalized_items` 只保存经过全部人工审核的单条消息结果。
-- 事件聚合只消费已批准的 `NormalizedItem`，不得改变采集和单条处理基座。
-
-详细设计：
-
-- [Connector 架构](docs/CONNECTOR_ARCHITECTURE.md)
-- [RawItem 与 ContentBlock v2](docs/RAW_ITEM_CONTENT_MODEL.md)
-- [人工审核单条处理流程](docs/REVIEWED_AI_WORKFLOW.md)
-- [本地运行手册](docs/LOCAL_RUNBOOK.md)
-- [Connector 运行与排障](docs/CONNECTOR_OPERATIONS_GUIDE.md)
-- [开发 Handoff](docs/DEVELOPMENT_HANDOFF.md)
+- Connector 是平台级采集能力；Source 是具体账号或站点。
+- Connector 只映射统一 `RawItemCandidate`；共享 ingestion 负责校验、去重、媒体落盘和入库。
+- `raw_items.content_blocks` 是不可变原文事实来源，后续处理不得回写。
+- `normalized_items` 是单条消息当前投影，历史版本保存在 `normalized_item_revisions`。
+- 事件是 `NormalizedItem` 之上的独立层，成员关系和历史不写回 RawItem。
+- 自动与人工流程使用相同结构化草稿；区别记录在决定来源和运行模式中。
 
 ## 目录
 
-- `apps/web`：Next.js 消息页和管理台
-- `services/api/app/connectors`：平台 Connector 与映射
-- `services/api/app/services`：共享 ingestion、媒体、LLM 等服务
-- `services/api/app/workflows`：显式的受审核处理流程
+- `apps/web`：Next.js 公开页面与管理台
+- `services/api/app/connectors`：平台 Connector
+- `services/api/app/services`：ingestion、调度、管线、媒体、LLM 与事件服务
+- `services/api/app/workflows`：人工审核和 AI 工作流
 - `services/api/app/models`：SQLAlchemy 模型
-- `infra/postgres/migrations`：不可删除或改写的数据库迁移历史
+- `infra/postgres/migrations`：只追加、不可改写的迁移历史
+- `deploy`：生产 Compose、Caddy、部署/备份/恢复脚本
+- `docs`：权威运行、架构与交接文档
 
 ## 本地启动
 
-首次安装依赖并配置 `.env` 后：
+首次准备：
 
 ```powershell
-Set-Location E:\leagueNews
+Copy-Item .env.example .env
+
+Set-Location services\api
+uv sync --dev
+
+Set-Location ..\..
+pnpm install
+```
+
+在 `.env` 配置数据库和 OpenAI-compatible LLM，然后：
+
+```powershell
 .\scripts\start.ps1
 ```
 
-不自动打开浏览器：
+不打开浏览器：
 
 ```powershell
 .\scripts\start.ps1 -SkipBrowser
@@ -69,31 +77,32 @@ Set-Location E:\leagueNews
 .\scripts\stop.ps1
 ```
 
-地址：
+本地地址：
 
 - 网站：http://localhost:3000
 - 管理台：http://localhost:3000/admin
 - API 文档：http://localhost:8000/docs
 - pgAdmin：http://localhost:5050
 
-当前主要读取接口：
+未配置 `OPENAI_API_KEY` 时仍可采集入库，但自动与人工 AI 流程会明确失败，不生成兜底结果。
 
-```text
-GET /api/v1/raw-items
-GET /api/v1/media-assets
-GET /api/v1/normalized-items
-GET /api/v1/normalized-items/published
-GET /api/v1/normalized-items/{id}/published
-GET /api/v1/events
-GET /api/v1/events/{id}
-GET /api/v1/events/{id}/messages
-GET /api/v1/event-workflows/runs
-GET /api/v1/event-workflows/reviews
-GET /api/v1/workflows/runs
-GET /api/v1/workflows/reviews
-GET /api/v1/knowledge/rules
-GET /api/v1/knowledge/glossary
+## 验证
+
+```powershell
+services\api\.venv\Scripts\python.exe -m ruff check services/api/app services/api/scripts services/api/tests
+services\api\.venv\Scripts\python.exe -m pytest services/api/tests -q
+pnpm lint:web
+pnpm build:web
 ```
 
-未配置 `OPENAI_API_KEY` 时采集和 RawItem 入库仍可工作，但 AI 处理会返回明确错误，
-不会生成兜底结果。
+## 文档入口
+
+- [开发交接与当前状态](docs/DEVELOPMENT_HANDOFF.md)
+- [本地运行](docs/LOCAL_RUNBOOK.md)
+- [Connector 操作与排障](docs/CONNECTOR_OPERATIONS_GUIDE.md)
+- [Connector 架构](docs/CONNECTOR_ARCHITECTURE.md)
+- [RawItem 内容模型](docs/RAW_ITEM_CONTENT_MODEL.md)
+- [人工审核工作流](docs/REVIEWED_AI_WORKFLOW.md)
+- [事件编辑规则](docs/EVENT_EDITORIAL_POLICY.md)
+- [Google Cloud 首次预发布](docs/GOOGLE_CLOUD_FIRST_DEPLOY.md)
+- [生产部署](docs/PRODUCTION_DEPLOYMENT.md)

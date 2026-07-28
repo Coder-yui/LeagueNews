@@ -1,10 +1,11 @@
 # 人工审核单条处理流程
 
-更新时间：2026-07-26
+更新时间：2026-07-28
 
-本文档是当前单条处理层的有效设计。采集层以不可变 `RawItem` 为边界；事件聚合是
-消费已批准 `NormalizedItem` 的独立受审核管线，不会反向改变本文流程。事件准入、
-匹配、可信度和重要性规则见
+本文档描述人工审核模式的单条处理设计。自动模式复用相同阶段草稿、校验和接受逻辑，
+由 Worker 写入 `decision_source=automatic` 和 checkpoint，不等待人工点击。采集层以
+不可变 `RawItem` 为边界；事件聚合消费已发布 `NormalizedItem`，不会反向修改 RawItem。
+事件准入、匹配、可信度和重要性规则见
 [`EVENT_EDITORIAL_POLICY.md`](EVENT_EDITORIAL_POLICY.md)。
 
 ## 状态机
@@ -105,8 +106,9 @@ POST /api/v1/workflows/runs/{id}/retry
 ```
 
 生产 API 不提供单张图片直接结构化、已批准条目直接重翻译或报告生成入口。
-事件聚合通过独立的 `/api/v1/event-workflows` 受审核入口显式触发。OCR Lab 仅用于
-算法参数调试，生产流程只读取当前激活的 OCR profile。
+人工模式通过独立的 `/api/v1/event-workflows` 入口显式触发事件聚合；自动模式在消息发布
+后继续执行同一事件决策工作流。OCR Lab 仅用于算法参数调试，生产流程只读取当前激活的
+OCR profile。
 
 ## 有效状态
 

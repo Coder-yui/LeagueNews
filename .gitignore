@@ -32,6 +32,7 @@ Thumbs.db
 postgres_data/
 apps/web/public/media/
 backups/
+leagueNewsdeploy.txt
 
 # Production deployment environment
 .env.production

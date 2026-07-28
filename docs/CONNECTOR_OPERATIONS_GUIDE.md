@@ -27,21 +27,23 @@
   → 图片尝试下载到本地媒体目录
   → 写入 raw_items 和 media_assets
   → 创建 connector_runs 运行记录
+  → 为新增 RawItem 创建持久化 pipeline_job
 ```
 
-Connector 只负责采集和原始入库，不会自动执行翻译、LLM 分析、标准化或事件聚合。
-`raw_items` 不保存处理状态；未创建 `processing_runs` 的新内容在 API 中显示为
-`processing_status=pending`。完整字段设计见
+Connector 本身只负责采集和原始入库；默认启用的独立 Pipeline Worker 会消费
+`pipeline_jobs`，自动继续执行相关性、可选 OCR、翻译、分析、发布和事件判断。
+`raw_items` 仍是不可变原文，不保存可变处理状态。完整字段设计见
 [RawItem 与 ContentBlock v2](RAW_ITEM_CONTENT_MODEL.md)。
 
-如需继续处理某条 RawItem，调用：
+只有在需要显式进入人工审核链路时，才直接调用：
 
 ```http
 POST /api/v1/raw-items/{raw_item_id}/process
 ```
 
-该步骤需要 `.env` 中配置可用的 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和
-`MODEL_NAME`，与 Connector 采集是两个独立阶段。
+自动和人工处理都需要 `.env` 中配置可用的 `OPENAI_API_KEY`、
+`OPENAI_BASE_URL` 和 `MODEL_NAME`。已发布结果有误时，应从管理台选择撤回阶段，再选择
+人工或自动模式重跑，不要修改 RawItem。
 
 ## 2. 启动与基础检查
 
@@ -106,8 +108,8 @@ Invoke-RestMethod http://localhost:8000/api/v1/sources |
 调用时推荐始终显式传 `source_id`。如果某个 `connector_type` 有多个启用的 Source，
 省略 `source_id` 会返回 `409 multiple sources match; provide source_id`。
 
-当前开发数据库中的 Source 如下。其他环境的 ID 可能不同，应以上述 `/sources` 返回值
-为准。
+当前迁移数据库中的 Source ID 如下。全新数据库会创建相同的 15 个内置信源，但 ID 不属于
+API 契约；其他环境始终以上述 `/sources` 返回值为准。
 
 | ID | Connector | Source |
 |---:|---|---|
@@ -317,13 +319,17 @@ E:\leagueNews\.secrets\x-cookies.json
 ### 6.2 调用
 
 ```powershell
-$body = @{source_id=4; limit=5} | ConvertTo-Json
+$sourceId = (
+    Invoke-RestMethod http://localhost:8000/api/v1/sources |
+    Where-Object external_key -eq "riotphroxzon"
+).id
+$body = @{source_id=$sourceId; limit=5} | ConvertTo-Json
 Invoke-RestMethod `
     -Uri "http://localhost:8000/api/v1/connectors/x_twitter/run" `
     -Method Post -ContentType "application/json" -Body $body
 ```
 
-其他现有账号只需替换 `source_id` 为 7、8、12 或 16。
+其他账号按它的 `external_key` 查询 Source ID，不要把某个数据库中的数字 ID 写进脚本。
 
 ### 采集行为
 
@@ -399,16 +405,35 @@ WEIBO_BROWSER_HEADLESS=true
 WEIBO_BROWSER_USER_AGENT=
 ```
 
+生产环境不能依赖从 Windows 复制 Chromium Profile 后继续读取加密 Cookie。应把本地已登录
+上下文的 `context.cookies()` 导出为 Playwright Cookie JSON，保存为服务器
+`.secrets/weibo-cookies.json`，并通过 `WEIBO_COOKIE_FILE` 挂载。云端还要使用建立该登录态时
+的 `WEIBO_BROWSER_USER_AGENT`；每个浏览器上下文启动时都会重新注入 Cookie。
+
+关闭占用专用 Profile 的 Edge 后导出：
+
+```powershell
+Set-Location E:\leagueNews\services\api
+.venv\Scripts\python.exe -m scripts.export_weibo_cookies
+```
+
+Cookie JSON 是敏感凭据，只能放在 Git 已忽略的 `.secrets`，上传服务器后删除 `/tmp` 等
+中间副本。
+
 ### 7.2 调用
 
 ```powershell
-$body = @{source_id=17; limit=5} | ConvertTo-Json
+$sourceId = (
+    Invoke-RestMethod http://localhost:8000/api/v1/sources |
+    Where-Object external_key -eq "5756404150"
+).id
+$body = @{source_id=$sourceId; limit=5} | ConvertTo-Json
 Invoke-RestMethod `
     -Uri "http://localhost:8000/api/v1/connectors/weibo/run" `
     -Method Post -ContentType "application/json" -Body $body
 ```
 
-替换 `source_id` 可采集 18、19、20、21 对应账号。
+替换数字 UID 可采集其他微博账号。
 
 ### 采集行为
 
@@ -461,7 +486,11 @@ Invoke-RestMethod `
 小老鼠小伟：
 
 ```powershell
-$body = @{source_id=22; limit=5} | ConvertTo-Json
+$sourceId = (
+    Invoke-RestMethod http://localhost:8000/api/v1/sources |
+    Where-Object external_key -eq "86124184"
+).id
+$body = @{source_id=$sourceId; limit=5} | ConvertTo-Json
 Invoke-RestMethod `
     -Uri "http://localhost:8000/api/v1/connectors/baidu_tieba/run" `
     -Method Post -ContentType "application/json" -Body $body
@@ -470,7 +499,11 @@ Invoke-RestMethod `
 凤舞天_惊鸿恋：
 
 ```powershell
-$body = @{source_id=23; limit=5} | ConvertTo-Json
+$sourceId = (
+    Invoke-RestMethod http://localhost:8000/api/v1/sources |
+    Where-Object external_key -eq "770437943"
+).id
+$body = @{source_id=$sourceId; limit=5} | ConvertTo-Json
 Invoke-RestMethod `
     -Uri "http://localhost:8000/api/v1/connectors/baidu_tieba/run" `
     -Method Post -ContentType "application/json" -Body $body
@@ -568,13 +601,39 @@ Invoke-RestMethod `
 
 至少需要 `content`、`content_blocks` 或 `url` 之一。
 
+导入成功后与自动 Connector 一样：若 `PIPELINE_AUTOMATION_ENABLED=true`，新增 RawItem
+会自动进入 `pipeline_jobs` 并跑完整链路；不再需要逐阶段手工点击。只有需要人工控制时才
+暂停自动化或通过撤回功能选择人工模式。
+
 **返回 `409 duplicate raw item`**
 
 相同 Source 下已经存在相同 `external_id` 或正文哈希。响应会提供
 `existing_raw_item_id`。如果这是同一内容，不需要重复导入；如果确实是不同内容，应使用
 真实且唯一的 `external_id`，不要通过随机改正文规避去重。
 
-## 10. 新增账号 Source
+## 10. 周期自动采集
+
+管理台 `/admin` 的“自动化与撤回 → 自动化采集”按 Source 配置：
+
+- 是否启用；
+- 正常采集周期；
+- 失败重试间隔；
+- 单次抓取上限；
+- Connector 专用 `options`。
+
+对应 API：
+
+```text
+GET  /api/v1/collection-schedules
+PUT  /api/v1/collection-schedules/sources/{source_id}
+POST /api/v1/collection-schedules/sources/{source_id}/run-now
+```
+
+`collection-scheduler` 使用数据库租约串行领取到期任务。首次成功前不传 `since`；后续使用
+`last_success_at` 作为采集水位。网络超时会记录失败并按 `retry_delay_minutes` 重试。
+全新数据库只创建内置信源，不自动启用任何周期，避免部署后立即访问外部平台。
+
+## 11. 新增账号 Source
 
 Connector 与账号 Source 分离。同一个 Connector 可以服务多个账号，但每次 Run 只归属
 一个具体 Source。
@@ -638,7 +697,7 @@ Invoke-RestMethod `
 
 Source 名称必须唯一；同一 `connector_type + external_key` 也必须唯一。
 
-## 11. 检查运行记录和入库结果
+## 12. 检查运行记录和入库结果
 
 ### API 检查
 
@@ -690,7 +749,7 @@ LIMIT 30;
 不要通过直接修改 `raw_items` 来“修复”采集错误。应先修正 Source、登录态或 Connector，
 再重新运行，让统一去重与入库逻辑处理数据。
 
-## 12. 通用错误对照
+## 13. 通用错误对照
 
 | HTTP/现象 | 含义 | 处理 |
 |---|---|---|
@@ -734,7 +793,7 @@ MEDIA_MAX_BYTES=20971520
 这是预期的事务行为。采集或批量入库过程中发生未处理异常时，数据库事务会回滚，本次新建
 的本地媒体文件也会被清理。修复原因后重新运行即可。
 
-## 13. 运行建议
+## 14. 运行建议
 
 - 所有账号类 Connector 都显式传 `source_id`；
 - 首次先用 `limit=1` 验证，再提高到 5 或 10；
@@ -746,7 +805,7 @@ MEDIA_MAX_BYTES=20971520
 - 修改 Connector 解析逻辑时先更新 fixture 测试，再进行一次 `limit=1` 的真实验证；
 - 视频只保留原帖/播放页链接，不在 Connector 中下载。
 
-## 14. 开发验证
+## 15. 开发验证
 
 Connector 默认测试只使用 fixture，不访问真实平台：
 

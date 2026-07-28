@@ -6,8 +6,9 @@
 
 ## 不变量
 
-采集链路到 `raw_items` 为止，不能执行翻译、OCR、LLM 分析、审核、事件聚合或报告生成。
-后续处理只能读取 RawItem，不能修改它。
+Connector 和 ingestion 不能同步执行翻译、OCR、LLM 分析、审核或事件聚合。ingestion
+只保存不可变原文及 provenance，并可在同一事务写入 queued `pipeline_job` 作为下游交接；
+后续 Worker 只能读取 RawItem，不能修改它。
 
 ```text
 ConnectorRequest
@@ -17,6 +18,7 @@ ConnectorRequest
   -> 经过校验的 RawItemCandidate
   -> ingest_connector_items()
   -> raw_items + raw_item_source_payloads + media_assets
+  -> queued pipeline_job（启用自动化时）
 ```
 
 ## 四个边界
@@ -25,6 +27,7 @@ ConnectorRequest
 2. **fetch**：只访问平台并返回平台形状的 record，不构造 RawItem，不访问数据库。
 3. **map_record**：纯映射。把一个平台 record 转成 `RawItemCandidate`，不访问网络或数据库。
 4. **ingestion**：与平台无关，统一校验、计算语义哈希、识别 revision、下载图片并事务入库。
+   启用自动化时只额外创建 queued job，不在请求内执行 AI。
 
 `RawItemCandidate` 构造时会通过同一套 ContentBlock Pydantic 契约校验。Connector 不能
 返回旧的 `video` block、非 HTTP embed、空文字块或任意未知字段。
@@ -54,9 +57,11 @@ ConnectorRequest
 - `raw_items`
 - `raw_item_source_payloads`
 - `media_assets`
+- 新内容对应的 queued `pipeline_jobs`
 
-`raw_item_source_payloads.payload` 是去除凭据和无关大字段后的 provenance/诊断快照，
-不是平台响应的逐字节归档。provider 和采集时间由表字段保存，不在 JSON 中重复。
+`pipeline_jobs` 在这里仅是下游工作交接，不承载原文。`raw_item_source_payloads.payload`
+是去除凭据和无关大字段后的 provenance/诊断快照，不是平台响应的逐字节归档。provider
+和采集时间由表字段保存，不在 JSON 中重复。
 
 其余表不属于采集基座，但并非可随意清理。当前知识、术语、OCR 修订、审核记录和已批准
 `NormalizedItem` 都是后续开发的现有数据；除非用户另行明确要求，不得删除或重建。

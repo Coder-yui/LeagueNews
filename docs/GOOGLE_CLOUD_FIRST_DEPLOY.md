@@ -274,7 +274,7 @@ http://localhost:8080/admin
 - `apps/web/public/media`
 - `.secrets/x-cookies.json`
 - `.secrets/weibo-cookies.json`
-- `.secrets/weibo-browser-profile`
+- `.secrets/weibo-browser-profile`（仅作为云端运行目录）
 
 数据库导出使用开发电脑上的：
 
@@ -284,6 +284,10 @@ http://localhost:8080/admin
 
 上传和恢复步骤见 `docs/PRODUCTION_DEPLOYMENT.md`。恢复前应先暂停
 `pipeline-worker` 和 `collection-scheduler`，避免恢复期间产生新任务。
+
+微博不要只复制 Windows 浏览器 Profile。先按生产部署手册运行
+`scripts.export_weibo_cookies`，上传 Cookie JSON，并配置与本地登录一致的
+`WEIBO_BROWSER_USER_AGENT`。
 
 ## 第八阶段：以后购买域名
 

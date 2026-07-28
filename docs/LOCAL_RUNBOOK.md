@@ -4,8 +4,8 @@
 
 | 服务 | 地址 | 用途 |
 | --- | --- | --- |
-| Next.js | http://localhost:3000 | 已审核消息列表与详情 |
-| 管理台 | http://localhost:3000/admin | RawItem 处理、审核、知识与 OCR Lab |
+| Next.js | http://localhost:3000 | 已发布消息、事件列表与详情 |
+| 管理台 | http://localhost:3000/admin | 审核、自动化日志、采集配置、撤回、知识与 OCR Lab |
 | FastAPI Swagger | http://localhost:8000/docs | API 文档与调试 |
 | FastAPI health | http://localhost:8000/api/v1/health | 后端健康检查 |
 | pgAdmin | http://localhost:5050 | PostgreSQL 管理 |
@@ -36,8 +36,9 @@ pnpm install
 .\scripts\start.ps1
 ```
 
-脚本检查依赖和 Docker daemon，启动 PostgreSQL、pgAdmin、FastAPI、Next.js，并执行尚未
-应用的迁移。无需打开浏览器时：
+脚本检查依赖和 Docker daemon，启动 PostgreSQL、pgAdmin，使用与生产环境相同的迁移入口
+应用全部待执行迁移，然后启动 FastAPI、Next.js、Pipeline Worker 和采集调度器。无需打开
+浏览器时：
 
 ```powershell
 .\scripts\start.ps1 -SkipBrowser
@@ -45,7 +46,8 @@ pnpm install
 
 后台日志位于 `E:\leagueNews\.run\logs`。
 
-也可以分别启动：
+排障时可以分别启动基础服务，但还需要自行启动迁移、Pipeline Worker 和采集调度器；
+日常开发优先使用 `scripts/start.ps1`：
 
 ```powershell
 Set-Location E:\leagueNews
@@ -70,10 +72,13 @@ GET /api/v1/normalized-items
 GET /api/v1/normalized-items/published
 GET /api/v1/workflows/runs
 GET /api/v1/workflows/reviews?status=pending
+GET /api/v1/pipeline/jobs
+GET /api/v1/collection-schedules
 ```
 
-`POST /api/v1/raw-items/{id}/process` 只创建受审核的处理运行。它不会直接发布消息，
-也不会创建事件；通过相关性、翻译和分析审核后才生成 `NormalizedItem`。
+新采集或手工导入的 RawItem 默认创建持久化 `pipeline_job`，由 Worker 自动完成消息发布和
+事件判断。`POST /api/v1/raw-items/{id}/process` 是显式人工审核入口，不会直接发布消息。
+已发布结果有误时，从管理台选择撤回阶段和后续人工/自动模式。
 
 ## 关闭
 
@@ -93,7 +98,7 @@ Set-Location E:\leagueNews
 
 ```powershell
 Set-Location E:\leagueNews\services\api
-.venv\Scripts\python.exe -m ruff check app tests
+.venv\Scripts\python.exe -m ruff check app scripts tests
 .venv\Scripts\python.exe -m pytest -q
 ```
 

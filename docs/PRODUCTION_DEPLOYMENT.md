@@ -6,7 +6,7 @@
 - Next.js、FastAPI、自动管线 Worker、采集调度器分别运行。
 - PostgreSQL、API 和 Web 不直接暴露宿主机端口。
 - PostgreSQL 数据、媒体文件和 Caddy 证书使用 Docker Volume 持久化。
-- X Cookie 和微博浏览器 Profile 从服务器 `.secrets` 目录挂载，不进入 Git。
+- X Cookie、微博 Cookie 和浏览器运行目录从服务器 `.secrets` 挂载，不进入 Git。
 
 ## 1. 服务器和域名
 
@@ -80,7 +80,8 @@ Git 不包含数据库业务数据、媒体文件或平台登录会话。正式�
 - `apps/web/public/media` 的全部内容；
 - `.secrets/x-cookies.json`；
 - 从已登录浏览器导出的 `.secrets/weibo-cookies.json`；
-- `.secrets/weibo-browser-profile`。
+- `.secrets/weibo-browser-profile` 只作为云端 Chromium 的运行目录，不应被视为可移植的
+  登录凭据。
 
 在服务器只启动 PostgreSQL：
 
@@ -105,16 +106,29 @@ docker compose --env-file .env.production \
   -c 'cp -a /import/. /data/media/'
 ```
 
-如果不恢复 dump，迁移容器会用当前 SQLAlchemy 模型创建一套空数据库、登记历史迁移，
-并建立生产 OCR Profile；信源和采集周期需要重新在管理台配置。
+如果不恢复 dump，迁移容器会用当前 SQLAlchemy 模型创建空数据库、登记历史迁移、建立
+生产 OCR Profile，并创建当前 15 个内置信源。采集周期仍全部保持关闭，必须在管理台逐项
+确认后启用。
 
 ## 4. 微博与 X 会话
 
-Linux 生产镜像使用 Playwright Chromium，而不是本地 Edge。直接复制浏览器 Profile
-有可能因为平台安全策略失效，上线前必须实际运行一次微博采集验证。
+Linux 生产镜像使用 Playwright Chromium，而不是本地 Edge。Chromium Profile 中的 Cookie
+可能受操作系统或容器实例的加密保护，不能依赖直接复制 Profile。
 
-如果微博要求重新登录，建议先在受控的 Linux 图形环境中完成 Profile 登录，再复制到
-服务器 `.secrets/weibo-browser-profile`。不要把 Profile、Cookie 或截图提交到 Git。
+先在本地使用专用 Profile 完成登录，然后关闭所有占用该 Profile 的 Edge 进程并导出：
+
+```powershell
+Set-Location E:\leagueNews\services\api
+.venv\Scripts\python.exe -m scripts.export_weibo_cookies
+```
+
+把生成的 `.secrets/weibo-cookies.json` 上传到服务器同名位置，权限设为 `644`，使容器内
+非 root 用户能够通过只读挂载读取；父目录仍保持 `700`。同时把本地登录时的完整
+User-Agent 填入生产 `WEIBO_BROWSER_USER_AGENT`。容器每次启动浏览器上下文都会重新注入
+Cookie，避免 API 与调度器容器各自的 Profile 加密状态不一致。
+
+Cookie 文件属于账号凭据。不要打印内容、提交 Git 或长期放在 `/tmp`；迁移完成后删除中间
+副本。上线前至少对一个微博 Source 执行低 `limit` 实际采集验证。
 
 ## 5. 第一次启动
 

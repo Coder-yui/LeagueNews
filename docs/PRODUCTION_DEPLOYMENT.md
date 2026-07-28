@@ -38,7 +38,8 @@ mkdir -p .secrets/weibo-browser-profile
 touch .secrets/x-cookies.json
 printf '[]\n' > .secrets/weibo-cookies.json
 chmod 700 .secrets .secrets/weibo-browser-profile
-chmod 600 .env.production .secrets/x-cookies.json .secrets/weibo-cookies.json
+chmod 600 .env.production
+chmod 644 .secrets/x-cookies.json .secrets/weibo-cookies.json
 ```
 
 生成管理端密码哈希：

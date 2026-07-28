@@ -18,7 +18,9 @@ class WeiboBrowserError(RuntimeError):
 def _load_cookie_file(path: Path) -> list[dict[str, Any]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except OSError as exc:
+        raise WeiboBrowserError(f"Weibo cookie file cannot be read: {path}") from exc
+    except json.JSONDecodeError as exc:
         raise WeiboBrowserError(f"Weibo cookie file is invalid JSON: {path}") from exc
     if not isinstance(payload, list) or not all(
         isinstance(cookie, dict)

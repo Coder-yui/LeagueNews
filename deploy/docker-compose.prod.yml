@@ -1,15 +1,17 @@
 name: league-news
 
-x-api-environment: &api-environment
+x-common-environment: &common-environment
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-  API_CORS_ORIGINS: ${PUBLIC_ORIGIN}
-  API_DOCS_ENABLED: "false"
-  OPENAI_API_KEY: ${OPENAI_API_KEY}
-  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-  MODEL_NAME: ${MODEL_NAME}
   MEDIA_ROOT: /data/media
   MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-20971520}
   CONNECTOR_USER_AGENT: ${CONNECTOR_USER_AGENT}
+
+x-llm-environment: &llm-environment
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  MODEL_NAME: ${MODEL_NAME}
+
+x-collector-environment: &collector-environment
   X_COOKIE_FILE: /run/secrets/x-cookies.json
   X_FETCH_LIMIT: ${X_FETCH_LIMIT:-10}
   WEIBO_BROWSER_PROFILE: /data/weibo-profile
@@ -17,17 +19,17 @@ x-api-environment: &api-environment
   WEIBO_BROWSER_CHANNEL: ""
   WEIBO_BROWSER_HEADLESS: "true"
   WEIBO_BROWSER_USER_AGENT: ${WEIBO_BROWSER_USER_AGENT:-}
-  PIPELINE_AUTOMATION_ENABLED: ${PIPELINE_AUTOMATION_ENABLED:-true}
-  PIPELINE_WORKER_POLL_SECONDS: ${PIPELINE_WORKER_POLL_SECONDS:-2}
-  COLLECTION_SCHEDULER_POLL_SECONDS: ${COLLECTION_SCHEDULER_POLL_SECONDS:-5}
-  COLLECTION_SCHEDULER_LEASE_MINUTES: ${COLLECTION_SCHEDULER_LEASE_MINUTES:-30}
 
 x-api-service: &api-service
   image: ${API_IMAGE:-league-news-api}:${IMAGE_TAG:-latest}
   build:
     context: ../services/api
     dockerfile: Dockerfile
-  environment: *api-environment
+  environment:
+    <<: [*common-environment, *llm-environment, *collector-environment]
+    API_CORS_ORIGINS: ${PUBLIC_ORIGIN}
+    API_DOCS_ENABLED: "false"
+    PIPELINE_AUTOMATION_ENABLED: ${PIPELINE_AUTOMATION_ENABLED:-true}
   volumes:
     - media_data:/data/media
     - ${SECRETS_DIR:-../.secrets}/x-cookies.json:/run/secrets/x-cookies.json:ro
@@ -63,7 +65,7 @@ services:
       context: ../services/api
       dockerfile: Dockerfile
     environment:
-      <<: *api-environment
+      <<: *common-environment
       MIGRATIONS_DIR: /migrations
     volumes:
       - ../infra/postgres/migrations:/migrations:ro
@@ -89,11 +91,50 @@ services:
       start_period: 30s
 
   pipeline-worker:
-    <<: *api-service
+    image: ${API_IMAGE:-league-news-api}:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    environment:
+      <<: [*common-environment, *llm-environment]
+      PIPELINE_AUTOMATION_ENABLED: ${PIPELINE_AUTOMATION_ENABLED:-true}
+      PIPELINE_WORKER_POLL_SECONDS: ${PIPELINE_WORKER_POLL_SECONDS:-2}
+      PIPELINE_WORKER_LEASE_SECONDS: ${PIPELINE_WORKER_LEASE_SECONDS:-300}
+      PIPELINE_WORKER_HEARTBEAT_SECONDS: ${PIPELINE_WORKER_HEARTBEAT_SECONDS:-30}
+    volumes:
+      - media_data:/data/media
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "scripts.run_pipeline_worker"]
 
   collection-scheduler:
-    <<: *api-service
+    image: ${API_IMAGE:-league-news-api}:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    environment:
+      <<: [*common-environment, *collector-environment]
+      PIPELINE_AUTOMATION_ENABLED: ${PIPELINE_AUTOMATION_ENABLED:-true}
+      COLLECTION_SCHEDULER_POLL_SECONDS: ${COLLECTION_SCHEDULER_POLL_SECONDS:-5}
+      COLLECTION_SCHEDULER_LEASE_MINUTES: ${COLLECTION_SCHEDULER_LEASE_MINUTES:-30}
+      COLLECTION_SCHEDULER_HEARTBEAT_SECONDS: ${COLLECTION_SCHEDULER_HEARTBEAT_SECONDS:-60}
+    volumes:
+      - media_data:/data/media
+      - ${SECRETS_DIR:-../.secrets}/x-cookies.json:/run/secrets/x-cookies.json:ro
+      - ${SECRETS_DIR:-../.secrets}/weibo-cookies.json:/run/secrets/weibo-cookies.json:ro
+      - ${SECRETS_DIR:-../.secrets}/weibo-browser-profile:/data/weibo-profile
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "scripts.run_collection_scheduler"]
 
   web:

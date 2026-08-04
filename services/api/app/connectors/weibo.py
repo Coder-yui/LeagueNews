@@ -12,6 +12,7 @@ from selectolax.parser import HTMLParser
 from app.connectors.base import (
     BaseConnector,
     ConnectorRequest,
+    FetchBatch,
     RawItemCandidate,
 )
 from app.connectors.web_content import clean_text
@@ -45,7 +46,9 @@ class WeiboConnector(BaseConnector[WeiboStatusRecord]):
     ) -> None:
         self.browser_session_factory = browser_session_factory
 
-    async def fetch(self, request: ConnectorRequest) -> list[WeiboStatusRecord]:
+    async def fetch(
+        self, request: ConnectorRequest
+    ) -> FetchBatch[WeiboStatusRecord]:
         source = request.source
         if source.connector_type != self.connector_type:
             raise WeiboConnectorConfigurationError(
@@ -65,7 +68,13 @@ class WeiboConnector(BaseConnector[WeiboStatusRecord]):
                 await browser.open_weibo(f"https://weibo.com/u/{uid}")
                 records: list[WeiboStatusRecord] = []
                 seen: set[str] = set()
-                for page in range(1, 6):
+                pending_ids = {
+                    str(value)
+                    for value in (request.cursor or {}).get("pending_ids", [])
+                }
+                reached_boundary = False
+                exhausted_scan_limit = False
+                for page in range(1, 51):
                     payload = _accepted_payload(await browser.get_json(_timeline_url(uid, page)))
                     tweets = _timeline_tweets(payload)
                     for mblog in tweets:
@@ -90,13 +99,28 @@ class WeiboConnector(BaseConnector[WeiboStatusRecord]):
                         published_at = _weibo_datetime(mblog.get("created_at"))
                         if isinstance(since, datetime) and published_at:
                             if published_at < since:
+                                reached_boundary = True
                                 continue
+                        if status_id in pending_ids:
+                            continue
                         records.append(WeiboStatusRecord(mblog, full_text, uid))
-                        if len(records) >= limit:
-                            return records
+                        if len(records) > limit:
+                            return FetchBatch(
+                                records=records[:limit],
+                                truncated=True,
+                            )
                     if not tweets:
                         break
-                return records
+                    if len(tweets) < 20:
+                        break
+                    if reached_boundary:
+                        break
+                    if page == 50:
+                        exhausted_scan_limit = True
+                return FetchBatch(
+                    records=records,
+                    truncated=exhausted_scan_limit and not reached_boundary,
+                )
         except (WeiboConnectorConfigurationError, WeiboConnectorCollectionError):
             raise
         except WeiboBrowserError as exc:

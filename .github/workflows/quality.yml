@@ -1,0 +1,90 @@
+name: Quality gates
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: lol
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: league_fresh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lol -d league_fresh"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: "11.9.0"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          uv sync --project services/api --dev --locked
+          pnpm install --frozen-lockfile
+
+      - name: Fresh database initialization
+        env:
+          DATABASE_URL: postgresql+psycopg://lol:test-password@localhost:5432/league_fresh
+          MIGRATIONS_DIR: ${{ github.workspace }}/infra/postgres/migrations
+        working-directory: services/api
+        run: |
+          .venv/bin/python -m scripts.migrate_database
+          .venv/bin/python -m scripts.migrate_database
+
+      - name: Backend quality
+        env:
+          EVENT_TEST_DATABASE_URL: postgresql+psycopg://lol:test-password@localhost:5432/league_fresh
+        run: |
+          services/api/.venv/bin/python -m ruff check services/api/app services/api/scripts services/api/tests
+          services/api/.venv/bin/python -m pytest services/api/tests -q
+
+      - name: Frontend quality
+        run: |
+          pnpm lint:web
+          pnpm build:web
+
+      - name: Upgrade legacy 031 structure
+        env:
+          PGPASSWORD: test-password
+        run: |
+          createdb -h localhost -U lol league_upgrade
+          psql -h localhost -U lol -d league_upgrade -v ON_ERROR_STOP=1 \
+            -f services/api/tests/fixtures/migrations/legacy_031.sql
+          DATABASE_URL=postgresql+psycopg://lol:test-password@localhost:5432/league_upgrade \
+            MIGRATIONS_DIR="${GITHUB_WORKSPACE}/infra/postgres/migrations" \
+            services/api/.venv/bin/python -m scripts.migrate_database
+          psql -h localhost -U lol -d league_upgrade -v ON_ERROR_STOP=1 -c \
+            "SELECT collection_cursor, overlap_minutes FROM source_collection_schedules LIMIT 0"
+          psql -h localhost -U lol -d league_upgrade -v ON_ERROR_STOP=1 -c \
+            "SELECT worker_id, lease_expires_at, recovery_count FROM pipeline_jobs LIMIT 0"

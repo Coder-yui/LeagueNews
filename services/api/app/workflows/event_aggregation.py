@@ -2,6 +2,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.content_blocks import has_quoted_post
@@ -20,7 +21,7 @@ from app.services.event_candidates import (
     find_event_candidates,
     stable_event_key,
 )
-from app.services.llm import LLMClient
+from app.services.llm import LLMClient, execution_metadata
 from app.services.raw_item_versions import (
     is_latest_normalized_item,
     superseded_normalized_item_ids,
@@ -66,7 +67,19 @@ async def start_event_aggregation(
         restart_from_stage=EVENT_STAGE if correction_id else None,
     )
     db.add(run)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        concurrent = db.scalar(
+            select(EventAggregationRun).where(
+                EventAggregationRun.normalized_item_id == item.id,
+                EventAggregationRun.status.in_(["running", "awaiting_review"]),
+            )
+        )
+        if concurrent is None:
+            raise
+        return concurrent
     db.refresh(run)
     try:
         await _generate_review(db, run)
@@ -94,6 +107,39 @@ async def retry_event_aggregation(
     return await start_event_aggregation(db, item, supersedes_run_id=run.id)
 
 
+async def resume_event_aggregation(
+    db: Session, run: EventAggregationRun
+) -> EventAggregationRun:
+    if run.status != "running":
+        return run
+    pending = db.scalar(
+        select(EventReviewTask).where(
+            EventReviewTask.event_aggregation_run_id == run.id,
+            EventReviewTask.status == "pending",
+        )
+    )
+    if pending is not None:
+        run.status = "awaiting_review"
+        db.commit()
+        return run
+    try:
+        await _generate_review(db, run)
+    except IntegrityError:
+        db.rollback()
+        pending = db.scalar(
+            select(EventReviewTask).where(
+                EventReviewTask.event_aggregation_run_id == run.id,
+                EventReviewTask.status == "pending",
+            )
+        )
+        if pending is None:
+            raise
+        run = db.get(EventAggregationRun, run.id)
+        run.status = "awaiting_review"
+        db.commit()
+    return run
+
+
 async def _generate_review(db: Session, run: EventAggregationRun) -> None:
     item = run.normalized_item
     correction = (
@@ -109,9 +155,9 @@ async def _generate_review(db: Session, run: EventAggregationRun) -> None:
         else None,
     )
     candidate_payloads = [asdict(candidate) for candidate in candidates]
-    rules = list(
+    selected_rules = list(
         db.scalars(
-            select(KnowledgeRule.rule_text)
+            select(KnowledgeRule)
             .where(
                 KnowledgeRule.knowledge_type == "event_aggregation",
                 KnowledgeRule.is_active.is_(True),
@@ -120,6 +166,7 @@ async def _generate_review(db: Session, run: EventAggregationRun) -> None:
             .order_by(KnowledgeRule.updated_at.desc())
         )
     )
+    rules = [rule.rule_text for rule in selected_rules]
     decision = await LLMClient().propose_event(
         item={
             "normalized_item_id": item.id,
@@ -157,7 +204,14 @@ async def _generate_review(db: Session, run: EventAggregationRun) -> None:
         knowledge_rules=rules,
     )
     run.candidate_snapshot = candidate_payloads
-    run.decision_draft = decision.model_dump(mode="json")
+    run.decision_draft = {
+        **decision.model_dump(mode="json"),
+        "_execution_metadata": execution_metadata(decision),
+        "knowledge_rule_ids": [
+            {"id": rule.id, "version": rule.version}
+            for rule in selected_rules
+        ],
+    }
     run.status = "awaiting_review"
     db.add(
         EventReviewTask(
@@ -271,8 +325,18 @@ def approve_event_review(
             artifact_references={
                 "candidate_event_ids": sorted(candidate_ids),
                 "outcome": run.outcome,
+                "workflow_version": "event-aggregation-v2",
+                "policy_version": review.policy_version,
+                "execution_metadata": run.decision_draft.get(
+                    "_execution_metadata", {}
+                ),
             },
-            knowledge_snapshot={},
+            knowledge_snapshot={
+                "candidate_event_ids": sorted(candidate_ids),
+                "knowledge_rule_ids": run.decision_draft.get(
+                    "knowledge_rule_ids", []
+                ),
+            },
             model_name=None,
             decision_source=review.decision_source,
         )
@@ -317,7 +381,8 @@ def reject_event_review(
                     "decision_draft": run.decision_draft,
                 },
                 source_event_review_id=review.id,
-                is_active=True,
+                lifecycle_status="draft",
+                is_active=False,
             )
         )
     db.commit()

@@ -35,8 +35,11 @@ class Settings(BaseSettings):
     weibo_browser_user_agent: str = ""
     pipeline_automation_enabled: bool = True
     pipeline_worker_poll_seconds: float = 2.0
+    pipeline_worker_lease_seconds: int = 300
+    pipeline_worker_heartbeat_seconds: int = 30
     collection_scheduler_poll_seconds: float = 5.0
     collection_scheduler_lease_minutes: int = 30
+    collection_scheduler_heartbeat_seconds: int = 60
 
     model_config = SettingsConfigDict(env_file=("../../.env", ".env"), extra="ignore")
 

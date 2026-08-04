@@ -49,7 +49,6 @@ class PipelineCorrection(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-
     checkpoints: Mapped[list["ProcessingCheckpoint"]] = relationship(
         back_populates="correction",
         foreign_keys="ProcessingCheckpoint.correction_id",
@@ -166,6 +165,16 @@ class PipelineJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    worker_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    recovery_count: Mapped[int] = mapped_column(Integer, default=0)
+    recovery_provenance: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 
     __table_args__ = (
         CheckConstraint(
@@ -173,6 +182,7 @@ class PipelineJob(Base):
             name="ck_pipeline_jobs_status",
         ),
         CheckConstraint("attempts >= 0", name="ck_pipeline_jobs_attempts"),
+        CheckConstraint("recovery_count >= 0", name="ck_pipeline_jobs_recovery_count"),
         Index(
             "uq_pipeline_jobs_active_raw_item",
             "raw_item_id",

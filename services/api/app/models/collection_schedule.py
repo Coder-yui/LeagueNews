@@ -45,11 +45,14 @@ class SourceCollectionSchedule(Base):
     last_success_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    collection_cursor: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    overlap_minutes: Mapped[int] = mapped_column(Integer, default=10)
     last_connector_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("connector_runs.id", ondelete="SET NULL"), nullable=True
     )
     last_status: Mapped[str] = mapped_column(String(30), default="idle", index=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -90,7 +93,15 @@ class SourceCollectionSchedule(Base):
             name="ck_source_collection_schedules_fetch_limit",
         ),
         CheckConstraint(
+            "overlap_minutes >= 0 AND overlap_minutes <= 1440",
+            name="ck_source_collection_schedules_overlap",
+        ),
+        CheckConstraint(
             "last_status IN ('idle', 'running', 'succeeded', 'failed')",
             name="ck_source_collection_schedules_status",
+        ),
+        CheckConstraint(
+            "consecutive_failures >= 0",
+            name="ck_source_collection_schedules_consecutive_failures",
         ),
     )

@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
@@ -361,6 +361,17 @@ def find_event_candidates(
     item_entities = _entity_names(item)
     superseded_item_ids = set(superseded_normalized_item_ids(db, item))
     included_ids = include_event_ids or set()
+    reference_at = item.raw_item.published_at or datetime.now(UTC)
+    if reference_at.tzinfo is not None:
+        reference_at = reference_at.astimezone(UTC).replace(tzinfo=None)
+    indexed_cutoff = reference_at - timedelta(days=180)
+    recall_filters = [
+        Event.id.in_(included_ids),
+        Event.category == item.category,
+        Event.last_published_at >= indexed_cutoff,
+    ]
+    if item_key is not None:
+        recall_filters.append(Event.event_key == item_key)
     statement = (
         select(Event)
         .options(
@@ -369,12 +380,14 @@ def find_event_candidates(
             )
         )
         .where(
+            or_(*recall_filters),
             or_(
                 Event.status == "active",
                 Event.id.in_(included_ids),
             )
         )
-        .order_by(Event.id)
+        .order_by(Event.last_published_at.desc().nullslast(), Event.id.desc())
+        .limit(200)
     )
 
     candidates: list[EventCandidate] = []

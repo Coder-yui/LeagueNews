@@ -188,3 +188,73 @@ def test_x_rejects_wrong_source_type() -> None:
 
     with pytest.raises(ValueError, match="cannot collect weibo source"):
         asyncio.run(connector.collect(request(wrong_source)))
+
+
+def test_x_cursor_scans_past_already_ingested_capped_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cookie_file = tmp_path / "x-cookies.json"
+    cookie_file.write_text('{"auth_token":"a","ct0":"b"}', encoding="utf-8")
+    monkeypatch.setattr(settings, "x_cookie_file", str(cookie_file))
+    fixture = json.loads(
+        (FIXTURES / "x_user_tweets.json").read_text(encoding="utf-8")
+    )[0]
+    records = []
+    for offset in range(4):
+        tweet = dict(fixture)
+        tweet["id_str"] = str(1945200000000000000 - offset)
+        tweet["date"] = datetime.fromisoformat(f"2026-07-14T1{8-offset}:00:00+00:00")
+        tweet["rawContent"] = f"tweet {offset}"
+        tweet["media"] = {"photos": [], "videos": []}
+        tweet["quotedTweet"] = None
+        records.append(tweet)
+
+    class Pool:
+        async def delete_accounts(self, *_: object) -> None:
+            return None
+
+        async def add_account_cookies(self, *_: object) -> None:
+            return None
+
+    class API:
+        pool = Pool()
+
+        async def user_by_login(self, _username: str):
+            return type("User", (), {"id": 1})()
+
+        async def user_tweets(self, _uid: int, *, limit: int):
+            for tweet in records[:limit]:
+                yield tweet
+
+    connector = XTwitterConnector(api_factory=lambda *_args, **_kwargs: API())
+    first = asyncio.run(
+        connector.collect(
+            ConnectorRequest(
+                source=x_source(), limit=2, since=None, options={}, cursor={}
+            )
+        )
+    )
+    assert first.truncated is True
+    assert [item.external_id for item in first] == [
+        "1945200000000000000",
+        "1945199999999999999",
+    ]
+
+    second = asyncio.run(
+        connector.collect(
+            ConnectorRequest(
+                source=x_source(),
+                limit=2,
+                since=None,
+                options={},
+                cursor=first.next_cursor,
+            )
+        )
+    )
+    assert [item.external_id for item in second] == [
+        "1945199999999999998",
+        "1945199999999999997",
+    ]
+    assert set(first.next_cursor["pending_ids"]).isdisjoint(
+        item.external_id for item in second
+    )

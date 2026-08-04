@@ -1,4 +1,5 @@
 import asyncio
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -14,6 +15,7 @@ class ConnectorHTTPClient:
         self.max_attempts = max_attempts
         self._client = httpx.AsyncClient(
             follow_redirects=True,
+            trust_env=False,
             timeout=httpx.Timeout(30, connect=10),
             headers={"User-Agent": settings.connector_user_agent},
         )
@@ -36,7 +38,12 @@ class ConnectorHTTPClient:
                     return response
                 last_error = f"HTTP {response.status_code}"
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-                last_error = str(exc)
+                last_error = type(exc).__name__
             if attempt < self.max_attempts:
                 await asyncio.sleep(0.5 * 2 ** (attempt - 1))
-        raise ConnectorHTTPError(f"GET {url} failed after {self.max_attempts} attempts: {last_error}")
+        parsed = urlsplit(url)
+        safe_target = f"{parsed.scheme}://{parsed.hostname or 'unknown'}{parsed.path}"
+        raise ConnectorHTTPError(
+            f"GET {safe_target} failed after {self.max_attempts} attempts: "
+            f"{last_error}"
+        )

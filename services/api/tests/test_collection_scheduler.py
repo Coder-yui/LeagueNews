@@ -60,7 +60,6 @@ def test_schedule_validation_and_run_request(db: Session) -> None:
             fetch_limit=6,
         ),
     )
-
     assert schedule.enabled is True
     assert schedule.next_run_at is not None
     assert schedule.fetch_limit == 6
@@ -173,7 +172,9 @@ async def test_successful_run_uses_watermark_and_schedules_next_run(
     assert finished.lease_token is None
     assert finished.next_run_at is not None
     assert received["limit"] == 4
-    assert received["since"].replace(tzinfo=UTC) == previous_success
+    assert received["since"].replace(tzinfo=UTC) == previous_success - timedelta(
+        minutes=10
+    )
 
 
 @pytest.mark.anyio
@@ -191,6 +192,12 @@ async def test_failed_run_records_error_and_uses_retry_delay(
             retry_delay_minutes=8,
         ),
     )
+    schedule.collection_cursor = {
+        "version": 1,
+        "watermark": "2026-07-26T08:30:00+00:00",
+        "pending_ids": ["already-stored"],
+    }
+    db.commit()
 
     async def fake_run_connector(
         session: Session,
@@ -222,6 +229,7 @@ async def test_failed_run_records_error_and_uses_retry_delay(
     assert failed is not None
     assert failed.last_status == "failed"
     assert failed.last_error == "upstream unavailable"
+    assert failed.collection_cursor["pending_ids"] == ["already-stored"]
     assert failed.lease_token is None
     assert failed.next_run_at is not None
     next_run = failed.next_run_at.replace(tzinfo=UTC)

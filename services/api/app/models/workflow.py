@@ -1,7 +1,18 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    JSON,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -39,6 +50,20 @@ class ProcessingRun(Base):
         back_populates="processing_run", cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        Index(
+            "uq_processing_runs_active_raw_item",
+            "raw_item_id",
+            unique=True,
+            postgresql_where=text(
+                "workflow_type = 'item' AND status IN ('running', 'awaiting_review')"
+            ),
+            sqlite_where=text(
+                "workflow_type = 'item' AND status IN ('running', 'awaiting_review')"
+            ),
+        ),
+    )
+
 
 class ReviewTask(Base):
     __tablename__ = "review_tasks"
@@ -58,6 +83,16 @@ class ReviewTask(Base):
 
     processing_run: Mapped[ProcessingRun] = relationship(back_populates="reviews")
 
+    __table_args__ = (
+        Index(
+            "uq_review_tasks_pending_run",
+            "processing_run_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
 
 class KnowledgeRule(Base):
     __tablename__ = "knowledge_rules"
@@ -74,10 +109,34 @@ class KnowledgeRule(Base):
         ForeignKey("event_review_tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
     version: Mapped[int] = mapped_column(default=1)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(20), default="draft", index=True
+    )
+    evaluation_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    promoted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_status IN ('draft', 'evaluated', 'active', 'retired')",
+            name="ck_knowledge_rules_lifecycle",
+        ),
+        CheckConstraint(
+            "(lifecycle_status = 'active') = is_active",
+            name="ck_knowledge_rules_active_lifecycle",
+        ),
     )
 
 

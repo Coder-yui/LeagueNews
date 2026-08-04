@@ -1,9 +1,12 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.workflow import GlossaryTerm, KnowledgeRule
+from app.models.workflow import ReviewTask
 from app.schemas.workflow import (
     GlossaryTermCreate,
     GlossaryTermRead,
@@ -13,9 +16,50 @@ from app.schemas.workflow import (
     KnowledgeRuleUpdate,
 )
 from app.services.llm import LLMAnalysisError, LLMConfigurationError
+from app.services.knowledge_governance import detect_active_knowledge_conflicts
 from app.workflows.organize_knowledge import organize_active_knowledge_rules
 
 router = APIRouter()
+
+
+@router.get("/conflicts")
+def list_knowledge_conflicts(
+    db: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    return detect_active_knowledge_conflicts(db)
+
+
+@router.get("/evaluation-export")
+def export_review_evaluation_cases(
+    review_ids: list[int] = Query(default=[]),
+    db: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    if not review_ids:
+        return []
+    reviews = list(
+        db.scalars(
+            select(ReviewTask)
+            .where(ReviewTask.id.in_(set(review_ids)))
+            .order_by(ReviewTask.id)
+        )
+    )
+    return [
+        {
+            "dataset_version": "admin-export-v1",
+            "case_id": f"review-{review.id}",
+            "task": review.stage,
+            "input": {
+                "raw_item_id": review.processing_run.raw_item_id,
+                "title": review.processing_run.raw_item.display_title,
+                "content_blocks": review.processing_run.raw_item.content_blocks,
+            },
+            "model_output": review.proposal,
+            "correction": review.feedback,
+            "source_review_id": review.id,
+            "label_status": "needs_admin_label",
+        }
+        for review in reviews
+    ]
 
 
 @router.get("/rules", response_model=list[KnowledgeRuleRead])
@@ -41,7 +85,14 @@ def create_knowledge_rule(
     payload: KnowledgeRuleCreate,
     db: Session = Depends(get_db),
 ) -> KnowledgeRule:
-    rule = KnowledgeRule(**payload.model_dump())
+    values = payload.model_dump()
+    if values["lifecycle_status"] != "draft" or values["is_active"]:
+        raise HTTPException(
+            status_code=409,
+            detail="new knowledge rules must start as draft",
+        )
+    values["is_active"] = False
+    rule = KnowledgeRule(**values)
     db.add(rule)
     db.commit()
     db.refresh(rule)
@@ -80,8 +131,38 @@ def update_knowledge_rule(
     if not rule:
         raise HTTPException(status_code=404, detail="knowledge rule not found")
     updates = payload.model_dump(exclude_unset=True)
+    target_lifecycle = updates.get("lifecycle_status")
+    evaluation_summary = updates.get(
+        "evaluation_summary", rule.evaluation_summary
+    )
+    if target_lifecycle == "evaluated" and not evaluation_summary:
+        raise HTTPException(
+            status_code=409,
+            detail="evaluated rules require evaluation_summary",
+        )
+    if target_lifecycle == "active" and rule.lifecycle_status != "evaluated":
+        raise HTTPException(
+            status_code=409,
+            detail="only evaluated rules can be promoted to active",
+        )
+    if updates.get("is_active") is True and rule.lifecycle_status != "evaluated":
+        raise HTTPException(
+            status_code=409,
+            detail="only evaluated rules can be activated",
+        )
     for field, value in updates.items():
         setattr(rule, field, value)
+    if "lifecycle_status" in updates:
+        rule.is_active = rule.lifecycle_status == "active"
+        now = datetime.now(UTC)
+        if rule.lifecycle_status == "evaluated":
+            rule.evaluated_at = now
+        elif rule.lifecycle_status == "active":
+            rule.promoted_at = now
+        elif rule.lifecycle_status == "retired":
+            rule.retired_at = now
+    elif "is_active" in updates:
+        rule.lifecycle_status = "active" if rule.is_active else "retired"
     rule.version += 1
     db.commit()
     db.refresh(rule)

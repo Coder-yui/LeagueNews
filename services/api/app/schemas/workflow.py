@@ -127,7 +127,8 @@ class KnowledgeRuleCreate(BaseModel):
     scope: str = "global"
     rule_text: str = Field(min_length=1)
     correction_data: dict[str, Any] = Field(default_factory=dict)
-    is_active: bool = True
+    lifecycle_status: Literal["draft", "evaluated", "active", "retired"] = "draft"
+    is_active: bool = False
 
 
 class KnowledgeRuleUpdate(BaseModel):
@@ -138,6 +139,8 @@ class KnowledgeRuleUpdate(BaseModel):
     rule_text: str | None = Field(default=None, min_length=1)
     correction_data: dict[str, Any] | None = None
     is_active: bool | None = None
+    lifecycle_status: Literal["draft", "evaluated", "active", "retired"] | None = None
+    evaluation_summary: dict[str, Any] | None = None
 
 
 class KnowledgeRuleRead(BaseModel):
@@ -152,6 +155,11 @@ class KnowledgeRuleRead(BaseModel):
     source_event_review_id: int | None
     version: int
     is_active: bool
+    lifecycle_status: str
+    evaluation_summary: dict[str, Any]
+    evaluated_at: datetime | None
+    promoted_at: datetime | None
+    retired_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

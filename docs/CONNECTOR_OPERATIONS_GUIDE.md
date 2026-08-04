@@ -629,8 +629,10 @@ PUT  /api/v1/collection-schedules/sources/{source_id}
 POST /api/v1/collection-schedules/sources/{source_id}/run-now
 ```
 
-`collection-scheduler` 使用数据库租约串行领取到期任务。首次成功前不传 `since`；后续使用
-`last_success_at` 作为采集水位。网络超时会记录失败并按 `retry_delay_minutes` 重试。
+`collection-scheduler` 使用数据库租约串行领取到期任务并在长任务期间续租。内容水位保存在
+持久化 `collection_cursor`，不再使用 `last_success_at` 作为事实水位。正常轮询使用可配置
+重叠窗口；达到平台上限时记录 `truncated` 并通过 pending ID 继续向后扫描，完整追到旧水位
+后才提升 watermark。网络超时保留原 cursor，记录连续失败数并按 `retry_delay_minutes` 重试。
 全新数据库只创建内置信源，不自动启用任何周期，避免部署后立即访问外部平台。
 
 ## 11. 新增账号 Source

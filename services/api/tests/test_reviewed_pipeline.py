@@ -15,7 +15,11 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
-from app.services.llm import AnalysisResult, LLMClient
+from app.services.llm import (
+    FactExtractionResult,
+    ImportanceResult,
+    LLMClient,
+)
 from app.services.media_ocr import OCRResult
 from app.services.patch_table import PatchTableResult
 from app.workflows.reviewed_pipeline import (
@@ -382,9 +386,9 @@ def test_approving_translation_moves_to_analysis_review(monkeypatch) -> None:
 def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_analyze(_self, **payload):
+    async def fake_extract(_self, **payload):
         captured.update(payload)
-        return AnalysisResult.model_validate(
+        return FactExtractionResult.model_validate(
             {
                 "title": "26.15版本预览",
                 "summary": "厄斐琉斯将在新版本中获得增强。",
@@ -393,15 +397,20 @@ def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
                     {"name": "26.15", "type": "patch"},
                     {"name": "版本预览", "type": "document_type"},
                 ],
-                "importance_score": 0.8,
-                "importance_evidence": ["属于版本预览，处于0.80至0.92区间。"],
-                "credibility": "official",
-                "credibility_score": 1.0,
-                "credibility_evidence": ["设计师官方账号"],
             }
         )
 
-    monkeypatch.setattr(LLMClient, "analyze", fake_analyze)
+    async def fake_importance(_self, **_payload):
+        return ImportanceResult(
+            impact_scope={"score": 4, "evidence": "影响所有玩家。"},
+            magnitude={"score": 3, "evidence": "包含平衡调整。"},
+            duration={"score": 3, "evidence": "持续一个版本周期。"},
+            actionability={"score": 3, "evidence": "玩家需要调整策略。"},
+            novelty={"score": 3, "evidence": "属于新版本预览。"},
+        )
+
+    monkeypatch.setattr(LLMClient, "extract_facts", fake_extract)
+    monkeypatch.setattr(LLMClient, "score_importance", fake_importance)
     with _session() as db:
         raw = _raw_item(db)
         proposal = asyncio.run(
@@ -445,7 +454,7 @@ def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
     assert "glossary" not in captured
     assert proposal["summary"] == "厄斐琉斯将在新版本中获得增强。"
     assert proposal["normalized_text"] == "Aphelios receives buffs."
-    assert proposal["importance_evidence"] == ["属于版本预览，处于0.80至0.92区间。"]
+    assert "属于新版本预览。" in proposal["importance_evidence"]
     assert proposal["credibility"] == "unverified"
     assert proposal["credibility_score"] == 0.6
     assert proposal["credibility_evidence"] == ["信源“测试信源”的配置权威度为 60"]

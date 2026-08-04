@@ -1,5 +1,6 @@
 from math import prod
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.event import Event, EventMessage, EventRevision
 from app.models.normalized_item import NormalizedItem
+from app.services.claims import link_item_claims_to_event
 from app.services.raw_item_versions import superseded_normalized_item_ids
 
 _MATCH_LIFECYCLE_RANK = {
@@ -89,6 +91,12 @@ def _refresh_publish_range(db: Session, event: Event) -> None:
 
 
 def _default_independence_key(item: NormalizedItem) -> str:
+    for block in item.raw_item.content_blocks:
+        if block.get("embed_kind") != "quoted_post" or not block.get("source_url"):
+            continue
+        parsed = urlsplit(str(block["source_url"]))
+        if parsed.hostname:
+            return f"upstream:{parsed.hostname.casefold()}{parsed.path.rstrip('/')}"
     return f"source:{item.raw_item.source_id}"
 
 
@@ -265,6 +273,12 @@ def create_event(
             )
         )
         db.flush()
+        link_item_claims_to_event(
+            db,
+            normalized_item_id=item.id,
+            event_id=event.id,
+            relation=evidence_stance,
+        )
         _refresh_publish_range(db, event)
         _refresh_editorial_metrics(db, event)
         db.add(
@@ -344,6 +358,17 @@ def add_message_to_event(
     )
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found")
+    # The optimistic lookup above may race. Recheck after serializing updates
+    # on the event row so a waiter observes the membership committed by the
+    # lock holder and returns an idempotent result without another revision.
+    locked_membership = _existing_membership(db, normalized_item_id)
+    if locked_membership is not None:
+        if locked_membership.event_id != event_id:
+            raise EventMembershipConflictError(
+                f"normalized item {normalized_item_id} already belongs to event "
+                f"{locked_membership.event_id}"
+            )
+        return event, False
     lifecycle_regression = (
         event.event_type == "match"
         and event.lifecycle_status in _MATCH_LIFECYCLE_RANK
@@ -413,6 +438,12 @@ def add_message_to_event(
         if importance_evidence:
             event.importance_evidence = importance_evidence
         db.flush()
+        link_item_claims_to_event(
+            db,
+            normalized_item_id=item.id,
+            event_id=event.id,
+            relation=evidence_stance,
+        )
         _refresh_publish_range(db, event)
         _refresh_editorial_metrics(db, event)
         if is_significant_update:

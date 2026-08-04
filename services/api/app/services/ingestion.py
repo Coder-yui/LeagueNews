@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -104,6 +105,7 @@ async def ingest_connector_items(
                         block_index=block_index,
                         source_url=block.get("source_url"),
                         storage_path=block.get("storage_path"),
+                        sha256=_storage_digest(block.get("storage_path")),
                         mime_type=block.get("mime_type"),
                         alt_text=block.get("alt_text"),
                         caption=block.get("caption"),
@@ -157,3 +159,15 @@ def _find_existing(
         if hash_content_blocks(existing.content_blocks) == content_hash:
             return existing, existing
     return None, None
+
+
+def _storage_digest(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stem = Path(urlparse(value).path).stem
+    return (
+        stem
+        if len(stem) == 64
+        and all(character in "0123456789abcdef" for character in stem)
+        else None
+    )

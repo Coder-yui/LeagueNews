@@ -14,10 +14,19 @@ class NormalizedItemRead(BaseModel):
     summary: str
     category: str
     entities: list[dict[str, Any]]
+    primary_topic: str
+    secondary_topics: list[str]
+    facets: dict[str, Any]
+    ontology_version: str
     importance_score: float
+    importance_dimensions: dict[str, Any]
+    importance_policy_version: str
+    importance_calculation: dict[str, Any]
     credibility: str
     credibility_score: float
     credibility_evidence: list[str]
+    credibility_components: dict[str, Any]
+    credibility_policy_version: str
     language: str | None
     source_language: str | None
     target_language: str
@@ -57,10 +66,18 @@ class PublishedItemRead(BaseModel):
     summary: str
     category: str
     entities: list[dict[str, Any]]
+    primary_topic: str
+    secondary_topics: list[str]
+    facets: dict[str, Any]
+    ontology_version: str
     importance_score: float
+    importance_dimensions: dict[str, Any]
+    importance_policy_version: str
     credibility: str
     credibility_score: float
     credibility_evidence: list[str]
+    credibility_components: dict[str, Any]
+    credibility_policy_version: str
     source_id: int
     source_name: str
     source_base_url: str | None

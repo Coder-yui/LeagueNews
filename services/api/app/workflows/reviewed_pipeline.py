@@ -3,10 +3,17 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.content_blocks import has_quoted_post, text_from_content_blocks
 from app.core.config import settings
+from app.domain.importance import (
+    DIMENSIONS,
+    IMPORTANCE_POLICY_VERSION,
+    calculate_importance,
+)
+from app.domain.ontology import ONTOLOGY_VERSION, normalize_entities, topic_from_category
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import (
     NormalizedItem,
@@ -17,7 +24,9 @@ from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
-from app.services.llm import LLMClient
+from app.services.llm import LLMClient, execution_metadata
+from app.services.claims import extract_traceable_claim
+from app.services.media_publication import publish_raw_item_media
 from app.workflows.translate_item import build_translation
 from app.workflows.understand_media import (
     extraction_context,
@@ -95,7 +104,20 @@ async def start_item_processing(
         context=context or {},
     )
     db.add(run)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        concurrent = db.scalar(
+            select(ProcessingRun).where(
+                ProcessingRun.raw_item_id == raw_item.id,
+                ProcessingRun.workflow_type == "item",
+                ProcessingRun.status.in_(["running", "awaiting_review"]),
+            )
+        )
+        if concurrent is None:
+            raise
+        return concurrent
     db.refresh(run)
     if restart_from_stage == RELEVANCE_STAGE:
         await _generate_relevance_review(db, run)
@@ -148,6 +170,48 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
     else:
         raise ValueError(f"unsupported restart stage: {restarted.current_stage}")
     return restarted
+
+
+async def resume_item_processing(
+    db: Session, run: ProcessingRun
+) -> ProcessingRun:
+    if run.status != "running":
+        return run
+    pending = db.scalar(
+        select(ReviewTask).where(
+            ReviewTask.processing_run_id == run.id,
+            ReviewTask.status == "pending",
+        )
+    )
+    if pending is not None:
+        run.status = "awaiting_review"
+        db.commit()
+        return run
+    try:
+        if run.current_stage == RELEVANCE_STAGE:
+            await _generate_relevance_review(db, run)
+        elif run.current_stage == OCR_STAGE:
+            await _generate_ocr_review(db, run)
+        elif run.current_stage == TRANSLATION_STAGE:
+            await _generate_translation_review(db, run)
+        elif run.current_stage == ITEM_STAGE:
+            await _generate_item_review(db, run)
+        else:
+            raise ValueError(f"unsupported resume stage: {run.current_stage}")
+    except IntegrityError:
+        db.rollback()
+        pending = db.scalar(
+            select(ReviewTask).where(
+                ReviewTask.processing_run_id == run.id,
+                ReviewTask.status == "pending",
+            )
+        )
+        if pending is None:
+            raise
+        run = db.get(ProcessingRun, run.id)
+        run.status = "awaiting_review"
+        db.commit()
+    return run
 
 
 async def approve_review(
@@ -278,7 +342,8 @@ def reject_review(
                 rule_text=payload.knowledge_rule or payload.reason or "",
                 correction_data=payload.corrected_values,
                 source_review_id=review.id,
-                is_active=True,
+                lifecycle_status="draft",
+                is_active=False,
             )
         )
     elif payload.feedback_type in {"translation_term", "translation_correction"}:
@@ -290,7 +355,8 @@ def reject_review(
                     rule_text=payload.reason,
                     correction_data=payload.corrected_values,
                     source_review_id=review.id,
-                    is_active=True,
+                    lifecycle_status="draft",
+                    is_active=False,
                 )
             )
         for correction in payload.glossary_updates:
@@ -387,17 +453,24 @@ async def correct_ocr_review(
 async def _generate_relevance_review(db: Session, run: ProcessingRun) -> None:
     raw_item = run.raw_item
     try:
+        selected_rules = _knowledge_rule_snapshot(
+            db, "relevance", raw_item
+        )
         result = await LLMClient().judge_relevance(
             title=raw_item.display_title,
             content=text_from_content_blocks(raw_item.content_blocks),
             source_context=_source_context(raw_item),
-            knowledge_rules=_knowledge_texts(db, "relevance", raw_item),
+            knowledge_rules=_knowledge_texts_from_snapshot(selected_rules),
         )
         _replace_pending_review(
             db,
             run=run,
             stage=RELEVANCE_STAGE,
-            proposal=result.model_dump(mode="json"),
+            proposal={
+                **result.model_dump(mode="json"),
+                "_execution_metadata": execution_metadata(result),
+                "knowledge_rules": selected_rules,
+            },
         )
         db.commit()
     except Exception as exc:
@@ -453,6 +526,9 @@ async def _generate_item_review(db: Session, run: ProcessingRun) -> None:
             raw_item=run.raw_item,
             translation_proposal=translation_proposal,
             rules=_knowledge_texts(db, "analysis", run.raw_item),
+            knowledge_snapshot=_knowledge_rule_snapshot(
+                db, "analysis", run.raw_item
+            ),
         )
         _replace_pending_review(db, run=run, stage=ITEM_STAGE, proposal=proposal)
         db.commit()
@@ -466,6 +542,7 @@ async def _build_item_proposal(
     raw_item: RawItem,
     translation_proposal: dict[str, Any],
     rules: list[str],
+    knowledge_snapshot: list[dict[str, object]] | None = None,
     ocr_corrections: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
     translated_blocks = list(translation_proposal.get("translated_content_blocks") or [])
@@ -481,25 +558,51 @@ async def _build_item_proposal(
             translated_structures,
             ensure_ascii=False,
         )
-    analysis = await LLMClient().analyze(
+    client = LLMClient()
+    facts = await client.extract_facts(
         title=str(translation_proposal.get("translated_title") or ""),
         content=analysis_content,
         source_context=_source_context(raw_item),
         knowledge_rules=rules,
     )
+    importance = await client.score_importance(
+        content=analysis_content,
+        extracted_facts=facts.model_dump(mode="json"),
+    )
     authority = _source_authority(raw_item)
+    primary_topic = topic_from_category(facts.category)
+    importance_dimensions = {
+        name: getattr(importance, name).model_dump(mode="json") for name in DIMENSIONS
+    }
+    importance_score, importance_calculation = calculate_importance(
+        importance_dimensions,
+        primary_topic=primary_topic,
+    )
     credibility_score = max(0.0, min(authority, 100) / 100)
     is_official = authority >= 100
     return {
         **translation_proposal,
-        "normalized_title": analysis.title,
-        "summary": analysis.summary,
-        "category": analysis.category,
-        "entities": _normalize_entities(
-            [entity.model_dump(mode="json") for entity in analysis.entities]
+        "normalized_title": facts.title,
+        "summary": facts.summary,
+        "category": facts.category,
+        "entities": normalize_entities(
+            [entity.model_dump(mode="json") for entity in facts.entities]
         ),
-        "importance_score": analysis.importance_score,
-        "importance_evidence": analysis.importance_evidence,
+        "primary_topic": primary_topic,
+        "secondary_topics": [],
+        "facets": {
+            "product_scope": "lol_pc",
+            "region": "unknown",
+            "information_stage": "announcement",
+        },
+        "ontology_version": ONTOLOGY_VERSION,
+        "importance_score": importance_score,
+        "importance_evidence": [
+            str(importance_dimensions[name]["evidence"]) for name in DIMENSIONS
+        ],
+        "importance_dimensions": importance_dimensions,
+        "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+        "importance_calculation": importance_calculation,
         "credibility": "official" if is_official else "unverified",
         "credibility_score": credibility_score,
         "credibility_evidence": [
@@ -509,9 +612,23 @@ async def _build_item_proposal(
                 else f"信源“{raw_item.source.name}”的配置权威度为 {authority}"
             )
         ],
+        "credibility_components": {
+            "source_prior": credibility_score,
+            "source_role": "first_party" if is_official else "third_party",
+            "is_repost": has_quoted_post(raw_item.content_blocks),
+            "evidence_quality": "direct_text",
+            "ocr_confidence": None,
+            "translation_confidence": None,
+        },
+        "credibility_policy_version": "credibility-v1-components",
         "language": raw_item.language,
         "analysis_model": settings.model_name,
         "analysis_version": "v5-importance-rubric",
+        "_execution_metadata": {
+            "fact_extraction": execution_metadata(facts),
+            "importance_scoring": execution_metadata(importance),
+        },
+        "knowledge_rules": knowledge_snapshot or [],
         "ocr_corrections": ocr_corrections or [],
     }
 
@@ -526,12 +643,17 @@ async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
                 .order_by(MediaExtraction.id)
             )
         )
-        glossary = _glossary_payload(db)
+        glossary = _glossary_payload(
+            db, text_from_content_blocks(run.raw_item.content_blocks)
+        )
+        selected_rules = _knowledge_rule_snapshot(
+            db, "translation", run.raw_item
+        )
         translation = await build_translation(
             run.raw_item,
             media_extractions=media_extractions,
             glossary=glossary,
-            rules=_knowledge_texts(db, "translation", run.raw_item),
+            rules=_knowledge_texts_from_snapshot(selected_rules),
         )
         proposal = {
             "normalized_text": text_from_content_blocks(run.raw_item.content_blocks),
@@ -551,6 +673,7 @@ async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
                 for term in glossary
                 if isinstance(term.get("id"), int)
             ],
+            "knowledge_rules": selected_rules,
         }
         if translation.translation_status == "not_required":
             run.context = {
@@ -586,10 +709,19 @@ def _apply_normalized_item(
         "summary",
         "category",
         "entities",
+        "primary_topic",
+        "secondary_topics",
+        "facets",
+        "ontology_version",
         "importance_score",
+        "importance_dimensions",
+        "importance_policy_version",
+        "importance_calculation",
         "credibility",
         "credibility_score",
         "credibility_evidence",
+        "credibility_components",
+        "credibility_policy_version",
         "language",
         "source_language",
         "target_language",
@@ -626,6 +758,7 @@ def _apply_normalized_item(
         for link in list(item.media_links):
             db.delete(link)
     db.flush()
+    publish_raw_item_media(raw_item)
 
     translated_by_id = {
         int(value["extraction_id"]): value
@@ -663,6 +796,7 @@ def _apply_normalized_item(
         )
     )
     db.flush()
+    extract_traceable_claim(db, item)
     return item
 
 
@@ -681,8 +815,18 @@ def _record_checkpoint(
         correction_id=run.correction_id,
         stage=review.stage,
         output_snapshot=dict(review.proposal),
-        artifact_references=artifact_references or {},
-        knowledge_snapshot={},
+        artifact_references={
+            **(artifact_references or {}),
+            "workflow_version": "reviewed-pipeline-v2",
+            "policy_version": review.policy_version,
+            "execution_metadata": review.proposal.get(
+                "_execution_metadata", {}
+            ),
+        },
+        knowledge_snapshot={
+            "knowledge_rules": review.proposal.get("knowledge_rules", []),
+            "glossary_term_ids": review.proposal.get("glossary_term_ids", []),
+        },
         model_name=(
             review.proposal.get("analysis_model")
             or review.proposal.get("translation_model")
@@ -787,6 +931,14 @@ def _normalize_entities(values: list[object]) -> list[dict[str, str]]:
 
 
 def _knowledge_texts(db: Session, knowledge_type: str, raw_item: RawItem) -> list[str]:
+    return _knowledge_texts_from_snapshot(
+        _knowledge_rule_snapshot(db, knowledge_type, raw_item)
+    )
+
+
+def _knowledge_rule_snapshot(
+    db: Session, knowledge_type: str, raw_item: RawItem
+) -> list[dict[str, object]]:
     scopes = {
         "global",
         f"connector:{raw_item.source.connector_type}",
@@ -802,10 +954,28 @@ def _knowledge_texts(db: Session, knowledge_type: str, raw_item: RawItem) -> lis
         .order_by(KnowledgeRule.updated_at.desc())
         .limit(100)
     )
-    return [f"[{rule.scope} v{rule.version}] {rule.rule_text}" for rule in rules]
+    return [
+        {
+            "id": rule.id,
+            "version": rule.version,
+            "scope": rule.scope,
+            "rule_text": rule.rule_text,
+        }
+        for rule in rules
+    ]
 
 
-def _glossary_payload(db: Session) -> list[dict[str, object]]:
+def _knowledge_texts_from_snapshot(
+    rules: list[dict[str, object]],
+) -> list[str]:
+    return [
+        f"[{rule['scope']} v{rule['version']}] {rule['rule_text']}"
+        for rule in rules
+    ]
+
+
+def _glossary_payload(db: Session, source_text: str = "") -> list[dict[str, object]]:
+    normalized_text = source_text.casefold()
     terms = db.scalars(
         select(GlossaryTerm)
         .where(GlossaryTerm.is_active.is_(True))
@@ -823,6 +993,7 @@ def _glossary_payload(db: Session) -> list[dict[str, object]]:
             "version": term.version,
         }
         for term in terms
+        if not normalized_text or term.source_term.casefold() in normalized_text
     ]
 
 

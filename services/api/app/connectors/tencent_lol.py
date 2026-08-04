@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from app.connectors.base import (
     BaseConnector,
     ConnectorRequest,
+    FetchBatch,
     RawItemCandidate,
 )
 from app.connectors.web_content import clean_text, html_to_blocks
@@ -39,30 +40,60 @@ class TencentLolConnector(BaseConnector[TencentArticleRecord]):
     ) -> None:
         self.http_client_factory = http_client_factory
 
-    async def fetch(self, request: ConnectorRequest) -> list[TencentArticleRecord]:
+    async def fetch(
+        self, request: ConnectorRequest
+    ) -> FetchBatch[TencentArticleRecord]:
         limit = min(max(request.limit, 1), 50)
         since = request.since
         configured_target = request.source.connector_config.get("target")
         target = clean_text(request.options.get("target") or configured_target) or "24"
-        list_url = (
-            f"{self.list_endpoint}?r0=json&page=1&num={limit}&target={target}&source=web_pc"
-        )
+        pending_ids = {
+            str(value)
+            for value in (request.cursor or {}).get("pending_ids", [])
+        }
         async with self.http_client_factory() as client:
-            response = await client.get(list_url)
-            discoveries = self.parse_list(response.json())
-            if not discoveries:
-                raise TencentConnectorError("Tencent news list returned no article records")
             records: list[TencentArticleRecord] = []
-            for discovery in discoveries:
-                published_at = _parse_tencent_datetime(discovery.get("sCreated"))
-                if isinstance(since, datetime) and published_at and published_at < since:
-                    continue
-                docid = clean_text(discovery.get("iDocID"))
-                response = await client.get(
-                    f"{self.article_endpoint}?type=0&docid={docid}&source=web_pc"
+            found_page = False
+            for page in range(1, 51):
+                list_url = (
+                    f"{self.list_endpoint}?r0=json&page={page}&num=50"
+                    f"&target={target}&source=web_pc"
                 )
-                records.append(TencentArticleRecord(response.json(), discovery))
-            return records[:limit]
+                response = await client.get(list_url)
+                discoveries = self.parse_list(response.json())
+                if not discoveries:
+                    if not found_page:
+                        raise TencentConnectorError(
+                            "Tencent news list returned no article records"
+                        )
+                    break
+                found_page = True
+                reached_boundary = False
+                for discovery in discoveries:
+                    published_at = _parse_tencent_datetime(
+                        discovery.get("sCreated")
+                    )
+                    if (
+                        isinstance(since, datetime)
+                        and published_at
+                        and published_at < since
+                    ):
+                        reached_boundary = True
+                        break
+                    docid = clean_text(discovery.get("iDocID"))
+                    if docid in pending_ids:
+                        continue
+                    if len(records) >= limit:
+                        return FetchBatch(records=records, truncated=True)
+                    response = await client.get(
+                        f"{self.article_endpoint}?type=0&docid={docid}&source=web_pc"
+                    )
+                    records.append(
+                        TencentArticleRecord(response.json(), discovery)
+                    )
+                if reached_boundary or len(discoveries) < 50:
+                    return FetchBatch(records=records, truncated=False)
+            return FetchBatch(records=records, truncated=True)
 
     def map_record(self, record: TencentArticleRecord) -> RawItemCandidate:
         return self.parse_article(record.payload, record.discovery)

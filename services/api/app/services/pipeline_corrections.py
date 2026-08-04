@@ -12,6 +12,7 @@ from app.models.workflow import ProcessingRun
 from app.schemas.pipeline import PipelineCorrectionCreate
 from app.services.event_aggregation import refresh_event_projection
 from app.services.automatic_pipeline import enqueue_pipeline_job
+from app.services.media_publication import withdraw_raw_item_media
 from app.workflows.event_aggregation import start_event_aggregation
 from app.workflows.reviewed_pipeline import (
     ITEM_STAGE,
@@ -229,6 +230,7 @@ async def create_and_start_correction(
         item.publication_status = "withdrawn"
         item.withdrawn_at = datetime.now(UTC)
         item.withdrawal_reason = payload.reason
+        withdraw_raw_item_media(item.raw_item)
     correction.status = "running"
     correction.started_at = datetime.now(UTC)
     db.commit()

@@ -49,14 +49,15 @@ async def organize_active_knowledge_rules(db: Session) -> list[KnowledgeRule]:
                 "organized_from_rule_ids": source_ids,
                 "source_review_ids": sorted(source_reviews),
             },
-            is_active=True,
+            lifecycle_status="draft",
+            evaluation_summary={
+                "organization_only": True,
+                "requires_regression_evaluation": True,
+            },
+            is_active=False,
         )
         db.add(rule)
         organized_rules.append(rule)
-
-    for source in source_rules:
-        source.is_active = False
-        source.version += 1
 
     db.commit()
     for rule in organized_rules:

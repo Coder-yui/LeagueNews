@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -131,3 +132,57 @@ def test_riot_prefers_embedded_smart_list_and_skips_external_links() -> None:
     assert len(discoveries) == 1
     assert discoveries[0]["title"] == "Internal article"
     assert discoveries[0]["category"] == "community"
+
+
+def test_riot_web_batch_records_boundary_cursor_for_overlap() -> None:
+    list_html = (FIXTURES / "riot_news_list.html").read_text(encoding="utf-8")
+    article_html = (FIXTURES / "riot_article.html").read_text(encoding="utf-8")
+    article_url = "https://www.leagueoflegends.com/en-us/news/game-updates/patch-example/"
+    connector = RiotOfficialConnector(
+        http_client_factory=lambda: FakeHTTPClient(
+            {
+                RiotOfficialConnector.list_url: list_html,
+                article_url: article_html,
+            }
+        )
+    )
+    batch = asyncio.run(
+        connector.collect(
+            ConnectorRequest(
+                source=request().source,
+                limit=1,
+                since=datetime.fromisoformat("2026-07-14T17:59:59+00:00"),
+                options={},
+                cursor={
+                    "version": 1,
+                    "watermark": "2026-07-14T17:59:59+00:00",
+                    "pending_ids": [],
+                },
+            )
+        )
+    )
+    assert batch.truncated is True
+    assert batch.cursor_used["watermark"] == "2026-07-14T17:59:59+00:00"
+    assert batch.next_cursor["watermark"] == "2026-07-14T17:59:59+00:00"
+    assert len(batch.next_cursor["pending_ids"]) == 1
+
+    connector = RiotOfficialConnector(
+        http_client_factory=lambda: FakeHTTPClient(
+            {
+                RiotOfficialConnector.list_url: list_html,
+                "https://www.leagueoflegends.com/en-us/news/dev/dev-example/": article_html,
+            }
+        )
+    )
+    resumed = asyncio.run(
+        connector.collect(
+            ConnectorRequest(
+                source=request().source,
+                limit=1,
+                since=datetime.fromisoformat("2026-07-14T17:59:59+00:00"),
+                options={},
+                cursor=batch.next_cursor,
+            )
+        )
+    )
+    assert resumed[0].external_id not in batch.next_cursor["pending_ids"]

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -14,7 +14,11 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import ProcessingRun, ReviewTask
 from app.schemas.pipeline import PipelineCorrectionCreate
-from app.services.automatic_pipeline import enqueue_pipeline_job, execute_pipeline_job
+from app.services.automatic_pipeline import (
+    _claim_next_job,
+    enqueue_pipeline_job,
+    execute_pipeline_job,
+)
 from app.services.event_aggregation import create_event
 
 
@@ -162,6 +166,32 @@ def test_pipeline_job_enqueue_is_idempotent_per_active_raw_item(db: Session) -> 
     assert second is first
     assert len(list(db.scalars(select(PipelineJob)))) == 1
     assert db.scalar(select(PipelineCorrection)) is None
+
+
+def test_pipeline_job_stale_lease_is_reclaimed_with_provenance(
+    db: Session,
+) -> None:
+    item = _published_item(db)
+    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued")
+    db.add(job)
+    db.commit()
+
+    first = _claim_next_job(db, worker_id="worker-a")
+    assert first is not None
+    first_token = first.lease_token
+    assert _claim_next_job(db, worker_id="worker-b") is None
+
+    first.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+    recovered = _claim_next_job(db, worker_id="worker-b")
+
+    assert recovered is not None
+    assert recovered.id == first.id
+    assert recovered.lease_token != first_token
+    assert recovered.worker_id == "worker-b"
+    assert recovered.attempts == 2
+    assert recovered.recovery_count == 1
+    assert recovered.recovery_provenance[-1]["previous_worker_id"] == "worker-a"
 
 
 @pytest.mark.anyio

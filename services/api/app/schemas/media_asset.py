@@ -12,6 +12,9 @@ class MediaAssetRead(BaseModel):
     block_index: int
     source_url: str | None
     storage_path: str | None
+    public_path: str | None
+    visibility: str
+    published_at: datetime | None
     mime_type: str | None
     sha256: str | None
     width: int | None

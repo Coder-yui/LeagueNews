@@ -8,6 +8,7 @@ from app.models.event import (
     EventRevision,
 )
 from app.models.media_asset import MediaAsset
+from app.models.intelligence import Claim, Digest, DigestRevision, EventClaim
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import (
     NormalizedItem,
@@ -30,6 +31,10 @@ __all__ = [
     "EventReviewTask",
     "EventRevision",
     "GlossaryTerm",
+    "Claim",
+    "EventClaim",
+    "Digest",
+    "DigestRevision",
     "KnowledgeRule",
     "MediaAsset",
     "MediaExtraction",

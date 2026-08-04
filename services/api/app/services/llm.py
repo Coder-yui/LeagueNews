@@ -1,11 +1,17 @@
 import json
+import hashlib
+import os
+import time
 from collections.abc import Callable
 from typing import Literal, TypeVar
+from urllib.parse import urlsplit
 
+import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.config import settings
+from app.prompts import prompt_registry
 from app.schemas.event_workflow import EventDecisionDraft
 
 
@@ -30,6 +36,26 @@ class AnalysisResult(BaseModel):
     entities: list[ExtractedEntity] = Field(max_length=5)
     importance_score: float = Field(ge=0, le=1)
     importance_evidence: list[str] = Field(min_length=1, max_length=4)
+
+
+class FactExtractionResult(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    summary: str = Field(min_length=1)
+    category: str = Field(min_length=1, max_length=60)
+    entities: list[ExtractedEntity] = Field(max_length=5)
+
+
+class ImportanceDimension(BaseModel):
+    score: int = Field(ge=0, le=4)
+    evidence: str = Field(min_length=1)
+
+
+class ImportanceResult(BaseModel):
+    impact_scope: ImportanceDimension
+    magnitude: ImportanceDimension
+    duration: ImportanceDimension
+    actionability: ImportanceDimension
+    novelty: ImportanceDimension
 
 
 class RelevanceResult(BaseModel):
@@ -82,6 +108,11 @@ class KnowledgeOrganizationResult(BaseModel):
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+
+def execution_metadata(result: BaseModel) -> dict[str, object]:
+    value = getattr(result, "_llm_execution_metadata", {})
+    return dict(value) if isinstance(value, dict) else {}
 
 
 class TranslatedTextBlock(BaseModel):
@@ -142,9 +173,67 @@ class LLMClient:
     def __init__(self) -> None:
         self.enabled = bool(settings.openai_api_key)
         self.client = (
-            AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+            AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                http_client=httpx.AsyncClient(trust_env=False),
+            )
             if self.enabled
             else None
+        )
+
+    async def extract_facts(
+        self,
+        *,
+        title: str | None,
+        content: str,
+        source_context: dict[str, object] | None = None,
+        knowledge_rules: list[str] | None = None,
+    ) -> FactExtractionResult:
+        prompt = (
+            "你是英雄联盟中文事实编辑。只根据当前输入提取事实，不判断重要性或可信度。"
+            "输出严格 JSON：title、summary、category、entities。展示文本使用简体中文，"
+            "不得遗漏明确的专有名词、数值、时间和事实状态，不得用规则中的旧案例补全事实。"
+            "entities 每项只含 name、type、canonical_name，保留最关键 2-4 个，最多 5 个；"
+            "附属皮肤、礼包、截图或奖励必须同时保留文本明确指向的英雄、模式、赛事、版本或"
+            "活动父实体。批量版本图中的英雄和装备不能全部作为新闻核心实体。"
+            "category 只描述内容类别。approved_rules 仅约束抽取方式，不是事实来源。"
+        )
+        return await self._validated_json_completion(
+            prompt=prompt,
+            payload={
+                "title": title or "",
+                "content": content,
+                "source_context": source_context or {},
+                "approved_rules": knowledge_rules or [],
+            },
+            max_tokens=900,
+            schema=FactExtractionResult,
+            operation="事实抽取",
+        )
+
+    async def score_importance(
+        self,
+        *,
+        content: str,
+        extracted_facts: dict[str, object],
+    ) -> ImportanceResult:
+        prompt = (
+            "你只评估英雄联盟资讯的重要性，不修改事实、分类、实体或可信度。"
+            "分别输出 impact_scope、magnitude、duration、actionability、novelty 五个对象；"
+            "每个对象只含 0 至 4 的离散 score 和仅基于当前消息的 evidence。"
+            "不要输出最终分数；最终分数、topic floor/cap 和权重由程序确定性计算。"
+            "官方身份不得加分，重复提醒或重复证据不得加分。"
+        )
+        return await self._validated_json_completion(
+            prompt=prompt,
+            payload={
+                "content": content,
+                "extracted_facts": extracted_facts,
+            },
+            max_tokens=400,
+            schema=ImportanceResult,
+            operation="重要性评分",
         )
 
     async def analyze(
@@ -647,20 +736,30 @@ class LLMClient:
         if "api.deepseek.com" in settings.openai_base_url:
             provider_options["extra_body"] = {"thinking": {"type": "disabled"}}
         output_schema = schema.model_json_schema()
+        prompt_spec = prompt_registry.resolve(
+            operation=operation,
+            content=prompt,
+            schema_version=f"{schema.__name__}:v1",
+        )
         schema_instruction = (
             "\n\n输出必须严格符合下面的 JSON Schema。所有 required 字段都必须出现，"
             "常量和枚举值必须原样使用，不要增加替代字段：\n"
             f"{json.dumps(output_schema, ensure_ascii=False, separators=(',', ':'))}"
         )
         messages = [
-            {"role": "system", "content": prompt + schema_instruction},
+            {"role": "system", "content": prompt_spec.content + schema_instruction},
             {
                 "role": "user",
                 "content": json.dumps(payload, ensure_ascii=False),
             },
         ]
         last_error = "模型返回空内容"
-        for _ in range(2):
+        started = time.perf_counter()
+        input_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+        for attempt in range(1, 3):
             try:
                 response = await self.client.chat.completions.create(
                     model=settings.model_name,
@@ -685,6 +784,39 @@ class LLMClient:
                 business_error = business_validator(result) if business_validator else None
                 if business_error:
                     raise ValueError(business_error)
+                usage = getattr(response, "usage", None)
+                usage_payload = (
+                    usage.model_dump(mode="json")
+                    if usage is not None and hasattr(usage, "model_dump")
+                    else {}
+                )
+                object.__setattr__(
+                    result,
+                    "_llm_execution_metadata",
+                    {
+                        "workflow_version": "reviewed-pipeline-v1",
+                        "prompt_name": prompt_spec.name,
+                        "prompt_version": prompt_spec.version,
+                        "prompt_hash": f"sha256:{prompt_hash}",
+                        "model": settings.model_name,
+                        "provider": urlsplit(settings.openai_base_url).hostname,
+                        "temperature": 0.1,
+                        "max_tokens": max_tokens,
+                        "input_hash": input_hash,
+                        "json_schema_version": prompt_spec.schema_version,
+                        "raw_response": raw_content[:16000],
+                        "usage": usage_payload,
+                        "latency_ms": round((time.perf_counter() - started) * 1000),
+                        "retry_count": attempt - 1,
+                        "finish_reason": finish_reason,
+                        "error_type": None,
+                        "commit_sha": (
+                            os.getenv("GITHUB_SHA")
+                            or os.getenv("CODE_COMMIT_SHA")
+                            or None
+                        ),
+                    },
+                )
                 return result
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:
                 validation_error = _compact_validation_error(exc)

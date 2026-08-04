@@ -52,11 +52,25 @@ export type PublishedItem = {
   title: string;
   summary: string;
   category: string;
-  entities: Array<{ name?: string; type?: string; canonical_name?: string | null }>;
+  entities: Array<{
+    name?: string;
+    display_name?: string;
+    type?: string;
+    canonical_name?: string | null;
+    canonical_id?: string | null;
+  }>;
+  primary_topic: string;
+  secondary_topics: string[];
+  facets: Record<string, unknown>;
+  ontology_version: string;
   importance_score: number;
+  importance_dimensions: Record<string, { score?: number; evidence?: string }>;
+  importance_policy_version: string;
   credibility: "official" | "corroborated" | "unverified" | "rumor" | string;
   credibility_score: number;
   credibility_evidence: string[];
+  credibility_components: Record<string, unknown>;
+  credibility_policy_version: string;
   source_id: number;
   source_name: string;
   source_base_url: string | null;
@@ -124,4 +138,26 @@ export type EventRevision = {
 export type EventDetail = EventSummary & {
   messages: EventMessage[];
   revisions: EventRevision[];
+};
+
+export type Digest = {
+  id: number;
+  digest_type: "daily" | "weekly";
+  timezone: string;
+  window_start: string;
+  cutoff_at: string;
+  language: string;
+  title: string;
+  body: string;
+  current_revision: number;
+  input_snapshot: Array<{
+    event_id: number;
+    event_revision: number;
+    title: string;
+    summary: string;
+    importance_score: number;
+  }>;
+  generation_metadata: Record<string, unknown>;
+  published_at: string;
+  updated_at: string;
 };

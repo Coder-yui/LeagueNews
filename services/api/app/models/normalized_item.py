@@ -19,10 +19,23 @@ class NormalizedItem(Base):
     summary: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(60), index=True)
     entities: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    primary_topic: Mapped[str] = mapped_column(String(40), default="other", index=True)
+    secondary_topics: Mapped[list[str]] = mapped_column(JSON, default=list)
+    facets: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    ontology_version: Mapped[str] = mapped_column(String(40), default="lol-news-v1")
     importance_score: Mapped[float] = mapped_column(Float, index=True)
+    importance_dimensions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    importance_policy_version: Mapped[str] = mapped_column(
+        String(80), default="importance-v1-five-dimensions"
+    )
+    importance_calculation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     credibility: Mapped[str] = mapped_column(String(30), index=True)
     credibility_score: Mapped[float] = mapped_column(Float, index=True)
     credibility_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+    credibility_components: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    credibility_policy_version: Mapped[str] = mapped_column(
+        String(80), default="credibility-v1-components"
+    )
     language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     source_language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     target_language: Mapped[str] = mapped_column(String(30), default="zh-CN")
@@ -57,6 +70,9 @@ class NormalizedItem(Base):
         back_populates="normalized_item",
         cascade="all, delete-orphan",
         order_by="NormalizedItemRevision.revision",
+    )
+    claims: Mapped[list["Claim"]] = relationship(  # noqa: F821
+        back_populates="normalized_item", cascade="all, delete-orphan"
     )
 
     __table_args__ = (

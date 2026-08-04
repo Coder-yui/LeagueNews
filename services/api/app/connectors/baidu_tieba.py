@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from app.connectors.base import (
     BaseConnector,
     ConnectorRequest,
+    FetchBatch,
     RawItemCandidate,
 )
 from app.connectors.web_content import clean_text
@@ -34,7 +35,9 @@ class BaiduTiebaConnector(BaseConnector[TiebaThreadRecord]):
     def __init__(self, *, client_factory: Callable[[], object] | None = None) -> None:
         self.client_factory = client_factory
 
-    async def fetch(self, request: ConnectorRequest) -> list[TiebaThreadRecord]:
+    async def fetch(
+        self, request: ConnectorRequest
+    ) -> FetchBatch[TiebaThreadRecord]:
         source = request.source
         if source.connector_type != self.connector_type:
             raise BaiduTiebaConnectorConfigurationError(
@@ -52,6 +55,10 @@ class BaiduTiebaConnector(BaseConnector[TiebaThreadRecord]):
                 f"Tieba source {source.id} connector_config requires forum_name"
             )
         limit = min(max(request.limit, 1), 10)
+        pending_ids = {
+            str(value)
+            for value in (request.cursor or {}).get("pending_ids", [])
+        }
         since = request.since
         max_thread_pages = min(
             max(int(source.connector_config.get("max_thread_pages", 5)), 1), 20
@@ -62,19 +69,25 @@ class BaiduTiebaConnector(BaseConnector[TiebaThreadRecord]):
 
         try:
             async with self._make_client() as client:
+                scan_limit = limit + len(pending_ids) + 1
                 threads = await self._discover_threads(
                     client,
                     user_id=user_id,
                     forum_name=forum_name,
-                    limit=limit,
+                    limit=scan_limit,
                     max_pages=max_thread_pages,
                 )
                 records: list[TiebaThreadRecord] = []
                 for thread in threads:
+                    thread_id = str(int(_attr(thread, "tid") or 0))
+                    if thread_id in pending_ids:
+                        continue
                     published_at = _timestamp(_attr(thread, "create_time"))
                     if isinstance(since, datetime) and published_at:
                         if published_at < since:
                             continue
+                    if len(records) >= limit:
+                        return FetchBatch(records=records, truncated=True)
                     posts = await self._fetch_author_posts(
                         client,
                         tid=int(_attr(thread, "tid") or 0),
@@ -89,7 +102,10 @@ class BaiduTiebaConnector(BaseConnector[TiebaThreadRecord]):
                             expected_forum=forum_name,
                         )
                     )
-                return records
+                return FetchBatch(
+                    records=records,
+                    truncated=len(threads) >= scan_limit,
+                )
         except (
             BaiduTiebaConnectorConfigurationError,
             BaiduTiebaConnectorCollectionError,

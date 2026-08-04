@@ -1,4 +1,4 @@
-import type { EventDetail, EventSummary, PublishedItem } from "./types";
+import type { Digest, EventDetail, EventSummary, PublishedItem } from "./types";
 
 const apiUrl =
   process.env.INTERNAL_API_URL ??
@@ -50,6 +50,31 @@ export async function getEvent(id: number): Promise<EventDetail | null> {
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`API returned ${response.status}`);
     return (await response.json()) as EventDetail;
+  } catch {
+    return null;
+  }
+}
+
+export async function getDigests(): Promise<Digest[]> {
+  try {
+    const response = await fetch(`${apiUrl}/digests`, {
+      next: { revalidate: 60 },
+    });
+    if (!response.ok) throw new Error(`API returned ${response.status}`);
+    return (await response.json()) as Digest[];
+  } catch {
+    return [];
+  }
+}
+
+export async function getDigest(id: number): Promise<Digest | null> {
+  try {
+    const response = await fetch(`${apiUrl}/digests/${id}`, {
+      next: { revalidate: 60 },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`API returned ${response.status}`);
+    return (await response.json()) as Digest;
   } catch {
     return null;
   }

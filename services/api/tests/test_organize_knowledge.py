@@ -49,18 +49,24 @@ def test_ai_organization_replaces_active_rules_with_traceable_compact_rules(
             [
                 KnowledgeRule(
                     knowledge_type="analysis",
-                    scope="global",
-                    rule_text="这条推文有很多英雄，但我觉得应该提取版本号。",
+                        scope="global",
+                        rule_text="这条推文有很多英雄，但我觉得应该提取版本号。",
+                        lifecycle_status="active",
+                        is_active=True,
                 ),
                 KnowledgeRule(
                     knowledge_type="analysis",
-                    scope="global",
-                    rule_text="完整预览也应该作为实体，不要提取一堆英雄。",
+                        scope="global",
+                        rule_text="完整预览也应该作为实体，不要提取一堆英雄。",
+                        lifecycle_status="active",
+                        is_active=True,
                 ),
                 KnowledgeRule(
                     knowledge_type="relevance",
-                    scope="global",
-                    rule_text="不要看到设计师账号就直接判断相关，要看内容。",
+                        scope="global",
+                        rule_text="不要看到设计师账号就直接判断相关，要看内容。",
+                        lifecycle_status="active",
+                        is_active=True,
                 ),
             ]
         )
@@ -75,9 +81,12 @@ def test_ai_organization_replaces_active_rules_with_traceable_compact_rules(
         ]
         assert organized[0].correction_data["organized_from_rule_ids"] == [1, 2]
         all_rules = list(db.scalars(select(KnowledgeRule).order_by(KnowledgeRule.id)))
-        assert all(not rule.is_active for rule in all_rules[:3])
-        assert all(rule.version == 2 for rule in all_rules[:3])
-        assert all(rule.is_active for rule in all_rules[3:])
+        assert all(rule.is_active for rule in all_rules[:3])
+        assert all(rule.version == 1 for rule in all_rules[:3])
+        assert all(not rule.is_active for rule in all_rules[3:])
+        assert all(
+            rule.lifecycle_status == "draft" for rule in all_rules[3:]
+        )
 
 
 def test_knowledge_organization_requires_active_rules() -> None:

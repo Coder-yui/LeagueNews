@@ -1,6 +1,6 @@
 # LoL Daily Intel 开发 Handoff
 
-更新时间：2026-07-28
+更新时间：2026-08-03
 
 本地工作区：`E:\leagueNews`
 
@@ -10,7 +10,7 @@ GitHub：`https://github.com/Coder-yui/LeagueNews`
 
 ## 1. 项目当前状态
 
-项目已经从本地原型进入 Google Cloud 无域名预发布阶段，主链路可用：
+项目已经运行在 `https://leaguenews.me`，主链路可用：
 
 ```text
 Source 周期调度或手工触发
@@ -208,28 +208,11 @@ API 分组：
 - 用空库覆盖生产库；
 - 删除知识、术语、审核、revision 或媒体来“解决”状态问题。
 
-## 9. 当前 Google Cloud 预发布
+## 9. 当前生产
 
-资源：
-
-```text
-GCP project: project-5f162905-6b28-4d14-8bf
-instance:    instance-20260727-160248
-zone:        asia-east1-a
-OS:          Ubuntu 24.04
-规格:        2 vCPU / 4 GB RAM / 40 GB disk
-部署目录:    /home/czh69423821/LeagueNews
-```
-
-当前无域名，通过本机 SSH 隧道访问：
-
-```powershell
-gcloud config set project project-5f162905-6b28-4d14-8bf
-gcloud compute ssh instance-20260727-160248 --zone=asia-east1-a -- -N -L 8080:127.0.0.1:8080
-```
-
-浏览器打开 `http://localhost:8080`。服务器 Caddy 只绑定
-`127.0.0.1:8080`，不要在无 HTTPS 时开放到公网。
+公开地址为 `https://leaguenews.me`，由 Caddy 提供 HTTPS、公开读取边界和单管理员
+Basic Auth。仓库文档不记录真实主机 IP、项目标识、账号、Cookie 或私密配置。历史无域名
+预发布步骤仅保留在 `GOOGLE_CLOUD_FIRST_DEPLOY.md` 作为环境重建参考，不代表当前访问方式。
 
 生产服务：
 
@@ -276,15 +259,14 @@ failed pipeline jobs     2
 
 它们没有造成当前队列积压，但应在管理台确认是否取消旧任务或按当前规则恢复，不要直接删行。
 
-## 11. 当前风险与上线前缺口
+## 11. 当前生产风险与后续事项
 
-1. 仍无域名和 HTTPS 公网入口，只适合作为 SSH 隧道预发布。
-2. Basic Auth 只适合单管理员；没有应用内用户权限和操作审计。
-3. 数据库、媒体和平台 Cookie 尚需自动异地备份及定期恢复演练。
-4. 缺少外部可用性、磁盘、容器、采集连续失败、管线积压和 LLM 费用告警。
-5. 微博/X 登录态会过期；贴吧和平台私有接口可能偶发失败。
-6. 当前 Worker/调度器按单实例部署；扩大并发前要先做资源和锁验证。
-7. `latest` 镜像便于预发布，但正式上线应使用不可变 `sha-<commit>` 标签。
+1. Basic Auth 只适合单管理员；升级条件见生产部署手册。
+2. 数据库、媒体和平台 Cookie 需要自动异地备份及定期恢复演练。
+3. 外部监控仍需覆盖公网可用性、磁盘、容器、备份年龄和 LLM 费用。
+4. 微博/X 登录态会过期；贴吧和平台接口可能偶发失败。
+5. 扩大 Worker/调度器并发前仍需观察租约回收、数据库锁和资源指标。
+6. 生产部署应使用不可变 `sha-<commit>` 镜像标签。
 
 ## 12. 开发与验证
 

@@ -3,7 +3,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.connectors.registry import connector_registry
@@ -65,6 +65,7 @@ def upsert_collection_schedule(
     schedule.retry_delay_minutes = payload.retry_delay_minutes
     schedule.fetch_limit = payload.fetch_limit
     schedule.options = payload.options
+    schedule.overlap_minutes = payload.overlap_minutes
     if payload.enabled and (not was_enabled or schedule.next_run_at is None):
         schedule.next_run_at = datetime.now(UTC)
     elif not payload.enabled:
@@ -121,8 +122,10 @@ def claim_due_schedule(db: Session) -> tuple[int, str] | None:
                 ),
                 and_(
                     SourceCollectionSchedule.last_status == "running",
-                    SourceCollectionSchedule.lease_expires_at.is_not(None),
-                    SourceCollectionSchedule.lease_expires_at <= now,
+                    or_(
+                        SourceCollectionSchedule.lease_expires_at.is_(None),
+                        SourceCollectionSchedule.lease_expires_at <= now,
+                    ),
                 ),
             ),
             or_(
@@ -184,8 +187,27 @@ async def execute_claimed_schedule(
     connector_type = schedule.source.connector_type
     fetch_limit = schedule.fetch_limit
     options = dict(schedule.options)
-    since = schedule.last_success_at
+    cursor = dict(schedule.collection_cursor or {})
+    watermark_value = cursor.get("watermark")
+    try:
+        watermark = (
+            datetime.fromisoformat(watermark_value)
+            if isinstance(watermark_value, str)
+            else None
+        )
+    except ValueError:
+        watermark = None
+    if watermark is None:
+        watermark = schedule.last_success_at
+    since = (
+        watermark - timedelta(minutes=schedule.overlap_minutes)
+        if watermark is not None
+        else None
+    )
 
+    heartbeat = asyncio.create_task(
+        _heartbeat_schedule(schedule_id, lease_token)
+    )
     succeeded = False
     error_message = None
     try:
@@ -196,11 +218,15 @@ async def execute_claimed_schedule(
             limit=fetch_limit,
             since=since,
             options=options,
+            cursor=cursor,
         )
         succeeded = True
     except Exception as exc:
         error_message = str(exc)[:4000]
         run = _latest_connector_run(db, source_id)
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
     now = datetime.now(UTC)
     schedule = db.get(SourceCollectionSchedule, schedule_id)
@@ -212,8 +238,12 @@ async def execute_claimed_schedule(
     schedule.last_error = error_message
     if succeeded:
         schedule.last_success_at = run.finished_at or now
+        schedule.collection_cursor = dict(run.next_cursor or cursor)
+        schedule.consecutive_failures = 0
+    else:
+        schedule.consecutive_failures += 1
     delay = (
-        schedule.interval_minutes
+        (1 if succeeded and run is not None and run.truncated else schedule.interval_minutes)
         if succeeded
         else schedule.retry_delay_minutes
     )
@@ -225,6 +255,32 @@ async def execute_claimed_schedule(
     schedule.lease_token = None
     schedule.lease_expires_at = None
     db.commit()
+
+
+def _renew_schedule_lease(schedule_id: int, lease_token: str) -> bool:
+    now = datetime.now(UTC)
+    with SessionLocal() as db:
+        result = db.execute(
+            update(SourceCollectionSchedule)
+            .where(
+                SourceCollectionSchedule.id == schedule_id,
+                SourceCollectionSchedule.last_status == "running",
+                SourceCollectionSchedule.lease_token == lease_token,
+            )
+            .values(
+                lease_expires_at=now
+                + timedelta(minutes=settings.collection_scheduler_lease_minutes)
+            )
+        )
+        db.commit()
+        return bool(result.rowcount)
+
+
+async def _heartbeat_schedule(schedule_id: int, lease_token: str) -> None:
+    while True:
+        await asyncio.sleep(settings.collection_scheduler_heartbeat_seconds)
+        if not _renew_schedule_lease(schedule_id, lease_token):
+            return
 
 
 async def process_next_schedule() -> bool:

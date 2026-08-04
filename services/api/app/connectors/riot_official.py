@@ -8,7 +8,12 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from selectolax.parser import HTMLParser
 from trafilatura import bare_extraction, extract
 
-from app.connectors.base import BaseConnector, ConnectorRequest, RawItemCandidate
+from app.connectors.base import (
+    BaseConnector,
+    ConnectorRequest,
+    FetchBatch,
+    RawItemCandidate,
+)
 from app.connectors.web_content import clean_text, html_to_blocks
 from app.services.connector_http import ConnectorHTTPClient
 
@@ -34,9 +39,13 @@ class RiotOfficialConnector(BaseConnector[RiotArticleRecord]):
     ) -> None:
         self.http_client_factory = http_client_factory
 
-    async def fetch(self, request: ConnectorRequest) -> list[RiotArticleRecord]:
+    async def fetch(self, request: ConnectorRequest) -> FetchBatch[RiotArticleRecord]:
         limit = min(max(request.limit, 1), 50)
         since = request.since
+        pending_ids = {
+            str(value)
+            for value in (request.cursor or {}).get("pending_ids", [])
+        }
         async with self.http_client_factory() as client:
             list_response = await client.get(self.list_url)
             articles = self.parse_list(list_response.text)
@@ -51,11 +60,16 @@ class RiotOfficialConnector(BaseConnector[RiotArticleRecord]):
                 if isinstance(since, datetime) and isinstance(published_at, datetime):
                     if published_at < since:
                         continue
+                article_id = hashlib.sha256(
+                    str(article["url"]).encode()
+                ).hexdigest()
+                if article_id in pending_ids:
+                    continue
+                if len(records) >= limit:
+                    return FetchBatch(records=records, truncated=True)
                 response = await client.get(str(article["url"]))
                 records.append(RiotArticleRecord(response.text, article))
-                if len(records) >= limit:
-                    return records
-            return records
+            return FetchBatch(records=records, truncated=False)
 
     def map_record(self, record: RiotArticleRecord) -> RawItemCandidate:
         return self.parse_article(record.html, record.discovery)

@@ -66,6 +66,19 @@ ConnectorRequest
 其余表不属于采集基座，但并非可随意清理。当前知识、术语、OCR 修订、审核记录和已批准
 `NormalizedItem` 都是后续开发的现有数据；除非用户另行明确要求，不得删除或重建。
 
+## 增量 cursor 与批次完整性
+
+调度水位保存在 `source_collection_schedules.collection_cursor`，而不是从
+`last_success_at` 推导。cursor 包含已完成 watermark、正在追赶 capped timeline 时的
+`pending_ids` 和 pending high watermark。Connector batch 同时报告 `cursor_used`、
+`next_cursor`、`truncated` 和候选数，ConnectorRun 持久化这些诊断字段。
+
+- ingestion 成功提交后才允许调度器保存 `next_cursor`；
+- 完整批次才提升 watermark，truncated 批次保留旧 watermark；
+- capped timeline 用 `pending_ids` 跳过已经成功入库的顶部内容，继续向旧水位扫描；
+- 正常轮询从 watermark 向前重叠 `overlap_minutes`，边界消息和延迟返回依赖 RawItem 幂等；
+- truncated 批次使用短间隔继续，不等待完整正常周期。
+
 ## 增加新平台
 
 新 Connector 必须：

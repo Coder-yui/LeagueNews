@@ -1,0 +1,3 @@
+{"dataset_version":"regression-v1","candidate":{"prompt":"current","model":"fixture","policy":"v1"},"case_id":"relevance-wild-rift-001","task":"relevance","expected":{},"actual":{"is_lol_relevant":false,"product_scope":"wild_rift"}}
+{"dataset_version":"regression-v1","candidate":{"prompt":"current","model":"fixture","policy":"importance-v1-five-dimensions"},"case_id":"importance-lpl-regular-001","task":"importance","expected":{},"actual":{"dimensions":{"impact_scope":2,"magnitude":1,"duration":1,"actionability":1,"novelty":1},"policy":"importance-v1-five-dimensions"}}
+{"dataset_version":"regression-v1","candidate":{"prompt":"current","model":"fixture","policy":"v1"},"case_id":"event-patch-key-001","task":"event_decision","expected":{},"actual":{"decision":"update"}}

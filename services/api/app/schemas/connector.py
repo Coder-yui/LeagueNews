@@ -37,6 +37,10 @@ class ConnectorRunRead(BaseModel):
     created_count: int
     revised_count: int
     skipped_count: int
+    candidate_count: int
+    truncated: bool
+    cursor_used: dict[str, Any]
+    next_cursor: dict[str, Any]
     error_message: str | None
     started_at: datetime
     finished_at: datetime | None

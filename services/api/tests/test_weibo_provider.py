@@ -145,3 +145,47 @@ def test_weibo_requires_numeric_uid() -> None:
 
     with pytest.raises(WeiboConnectorConfigurationError, match="numeric UID"):
         asyncio.run(WeiboConnector().collect(request(invalid)))
+
+
+def test_weibo_cursor_resumes_capped_timeline_without_duplicates() -> None:
+    template = load_json("weibo_timeline.json")["data"]["list"][0]
+    statuses = []
+    for offset in range(3):
+        status = dict(template)
+        status["mid"] = str(5190000000000001 - offset)
+        status["id"] = status["mid"]
+        status["mblogid"] = f"Cursor{offset}"
+        status["text_raw"] = f"cursor status {offset}"
+        status["isLongText"] = False
+        status["pic_ids"] = []
+        status["retweeted_status"] = None
+        statuses.append(status)
+    timeline = {"ok": 1, "data": {"list": statuses}}
+    connector = WeiboConnector(
+        browser_session_factory=lambda: FakeBrowserSession([timeline])
+    )
+    first = asyncio.run(
+        connector.collect(
+            ConnectorRequest(
+                source=weibo_source(), limit=2, since=None, options={}, cursor={}
+            )
+        )
+    )
+    assert first.truncated is True
+
+    connector = WeiboConnector(
+        browser_session_factory=lambda: FakeBrowserSession([timeline])
+    )
+    second = asyncio.run(
+        connector.collect(
+            ConnectorRequest(
+                source=weibo_source(),
+                limit=2,
+                since=None,
+                options={},
+                cursor=first.next_cursor,
+            )
+        )
+    )
+    assert second.truncated is False
+    assert [item.external_id for item in second] == ["5189999999999999"]

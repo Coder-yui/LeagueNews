@@ -76,3 +76,8 @@ class PipelineJobRead(BaseModel):
     started_at: datetime | None
     updated_at: datetime
     completed_at: datetime | None
+    worker_id: str | None
+    lease_expires_at: datetime | None
+    heartbeat_at: datetime | None
+    recovery_count: int
+    recovery_provenance: list[dict]

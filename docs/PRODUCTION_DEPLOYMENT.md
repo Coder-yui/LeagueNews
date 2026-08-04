@@ -1,5 +1,8 @@
 # 生产部署手册
 
+当前生产站点为 `https://leaguenews.me`。本文中的主机、账号和配置示例均不是生产秘密；
+真实密码、Cookie、Token、IP 和私有配置不得写入仓库或运行日志。
+
 本项目的第一版生产架构面向一台 Linux 主机：
 
 - Caddy 负责公网 80/443、HTTPS、压缩、安全响应头和管理端 Basic Auth。
@@ -130,6 +133,16 @@ Cookie，避免 API 与调度器容器各自的 Profile 加密状态不一致。
 Cookie 文件属于账号凭据。不要打印内容、提交 Git 或长期放在 `/tmp`；迁移完成后删除中间
 副本。上线前至少对一个微博 Source 执行低 `limit` 实际采集验证。
 
+## 4.1 容器权限边界
+
+- `pipeline-worker` 只接收数据库、媒体、LLM 和自身租约配置，不挂载 X/微博 Cookie 或
+  浏览器 Profile。
+- `collection-scheduler` 接收数据库、媒体和平台采集凭据，不接收 LLM API Key。
+- `migrate` 只接收数据库、媒体路径和迁移目录。
+- `api` 暂时同时保留 LLM 与 Connector 凭据，因为当前管理 API 仍同步支持人工 AI 流程和
+  手工 Connector 运行。以后把手工采集改为持久化 collection request、由 Scheduler 执行后，
+  应从 API 移除平台凭据。
+
 ## 5. 第一次启动
 
 ```bash
@@ -192,6 +205,36 @@ Worker，除非已经针对相应任务做过并发和锁验证。
 - 管线失败任务或积压持续增长；
 - LLM 限流、余额和调用费用异常；
 - PostgreSQL、Docker Volume 和系统磁盘空间不足。
+
+应用的受保护 `/api/v1/metrics` 提供 Source 最近成功时间、连续失败数、truncated 采集次数、
+Pipeline 状态计数、最老 queued 时间和 stale lease 回收数。外部监控还必须覆盖宿主机磁盘、
+备份年龄、异地副本、容器重启、证书、公网可用性和定期恢复演练；这些不能由应用内指标
+替代。
+
+## 7.1 媒体公开边界与 SSRF
+
+新采集媒体写入 `/data/media/private`，RawItem/管理台通过受 Basic Auth 保护的
+`/api/v1/media-assets/files/...` 读取。只有 NormalizedItem 正式发布时才复制到
+`/data/media/published` 并获得 `/media/published/...` URL；该 URL 由 API 根据
+`MediaAsset.visibility` 校验后返回文件。消息撤回时事务内撤销公开状态，磁盘副本留待安全的
+异步垃圾回收，因此即使文件仍存在也不能继续公开读取；private 原始证据始终用于审核和重放。
+
+历史 `/media/...` URL 标记为 `legacy_public` 并继续可用，避免破坏已发布页面。它们是上线前
+遗留兼容边界；后续只有在完成数据库到文件逐项核对和 URL 重写迁移后，才能收紧历史目录，
+不得直接移动或删除。
+
+远程媒体下载会拒绝 loopback、private、link-local、multicast、reserved 和云元数据地址，
+请求前解析并检查域名返回的全部 IPv4/IPv6，关闭自动 redirect，并在每一跳重新解析验证。
+HTTP 客户端仍可能在“应用解析检查”和“建立连接时内部再次解析”之间遇到 DNS rebinding
+窗口。若运行环境面对不可信用户可控 URL，应进一步为每个 Connector 配置明确媒体域名
+allowlist，或使用能把已验证 IP 固定到连接的 transport；不能把当前检查描述为完全消除
+DNS rebinding。
+
+## 7.2 管理认证升级条件
+
+Basic Auth 只适合单管理员。出现第二位管理员、开放第三方写入、需要按 Source/审核类型分权、
+或需要追责敏感操作时，必须升级为应用内认证、CSRF/Origin 校验、RBAC、会话撤销和不可变
+操作审计；在此之前不要把管理 API 暴露给跨站脚本或公共客户端。
 
 ## 8. 回滚
 

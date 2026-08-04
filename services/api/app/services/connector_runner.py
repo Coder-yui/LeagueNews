@@ -54,6 +54,7 @@ async def run_connector(
     limit: int,
     since: datetime | None,
     options: dict[str, object],
+    cursor: dict[str, object] | None = None,
 ) -> ConnectorRun:
     if connector_type == "manual":
         raise ValueError("use POST /api/v1/imports/manual for manual imports")
@@ -87,10 +88,11 @@ async def run_connector(
             limit=limit,
             since=since,
             options=options,
+            cursor=cursor,
         )
-        items = await connector.collect(request)
-        discovered_count = len(items)
-        result = await ingest_connector_items(db, source=source, items=items)
+        batch = await connector.collect(request)
+        discovered_count = len(batch)
+        result = await ingest_connector_items(db, source=source, items=list(batch))
         run = db.get(ConnectorRun, run.id)
         if not run:
             raise RuntimeError("connector run record disappeared")
@@ -99,6 +101,10 @@ async def run_connector(
         run.created_count = len(result.created)
         run.revised_count = len(result.revised)
         run.skipped_count = len(result.skipped)
+        run.candidate_count = discovered_count
+        run.truncated = batch.truncated
+        run.cursor_used = batch.cursor_used
+        run.next_cursor = batch.next_cursor
         run.finished_at = datetime.now(UTC)
         db.commit()
         db.refresh(run)

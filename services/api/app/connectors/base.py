@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+from collections.abc import Iterator, Sequence
 from typing import Any, Generic, Literal, TypeVar
 from urllib.parse import urlsplit
 
@@ -83,16 +84,49 @@ class ConnectorRequest:
     limit: int
     since: datetime | None
     options: dict[str, object]
+    cursor: dict[str, Any] | None = None
 
 
 PlatformRecordT = TypeVar("PlatformRecordT")
+
+
+@dataclass(frozen=True, slots=True)
+class FetchBatch(Generic[PlatformRecordT], Sequence[PlatformRecordT]):
+    records: list[PlatformRecordT]
+    truncated: bool = False
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, index: int) -> PlatformRecordT:
+        return self.records[index]
+
+    def __iter__(self) -> Iterator[PlatformRecordT]:
+        return iter(self.records)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBatch(Sequence[RawItemCandidate]):
+    items: list[RawItemCandidate]
+    truncated: bool
+    cursor_used: dict[str, Any]
+    next_cursor: dict[str, Any]
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int) -> RawItemCandidate:
+        return self.items[index]
+
+    def __iter__(self) -> Iterator[RawItemCandidate]:
+        return iter(self.items)
 
 
 class BaseConnector(ABC, Generic[PlatformRecordT]):
     connector_type: str
     allowed_run_options: frozenset[str] = frozenset()
 
-    async def collect(self, request: ConnectorRequest) -> list[RawItemCandidate]:
+    async def collect(self, request: ConnectorRequest) -> CandidateBatch:
         """Run the explicit platform-fetch -> canonical-map boundary."""
         if request.source.connector_type != self.connector_type:
             raise ValueError(
@@ -104,13 +138,84 @@ class BaseConnector(ABC, Generic[PlatformRecordT]):
             raise ValueError(
                 f"unsupported {self.connector_type} run options: {sorted(unsupported)}"
             )
-        records = await self.fetch(request)
-        return [self.map_record(record) for record in records]
+        fetched = await self.fetch(request)
+        if isinstance(fetched, FetchBatch):
+            records = fetched.records
+            truncated = fetched.truncated
+        else:
+            records = fetched
+            # Legacy connectors cannot prove truncation from list length alone.
+            # Reliability-sensitive connectors return FetchBatch explicitly.
+            truncated = False
+        items = [self.map_record(record) for record in records]
+        cursor_used = dict(request.cursor or {})
+        return CandidateBatch(
+            items=items,
+            truncated=truncated,
+            cursor_used=cursor_used,
+            next_cursor=_advance_cursor(cursor_used, items, truncated=truncated),
+        )
 
     @abstractmethod
-    async def fetch(self, request: ConnectorRequest) -> list[PlatformRecordT]:
+    async def fetch(
+        self, request: ConnectorRequest
+    ) -> list[PlatformRecordT] | FetchBatch[PlatformRecordT]:
         """Fetch platform-shaped records without producing RawItems."""
 
     @abstractmethod
     def map_record(self, record: PlatformRecordT) -> RawItemCandidate:
         """Map one platform-shaped record into the canonical contract."""
+
+
+def _advance_cursor(
+    current: dict[str, Any],
+    items: list[RawItemCandidate],
+    *,
+    truncated: bool,
+) -> dict[str, Any]:
+    identifiers = [item.external_id for item in items if item.external_id]
+    timestamps = [
+        item.published_at.astimezone(UTC)
+        for item in items
+        if item.published_at is not None
+    ]
+    pending_ids = {
+        str(value)
+        for value in current.get("pending_ids", [])
+        if isinstance(value, (str, int))
+    }
+    pending_ids.update(identifiers)
+    pending_high = _parse_cursor_time(current.get("pending_high_watermark"))
+    if timestamps:
+        newest = max(timestamps)
+        pending_high = max(pending_high, newest) if pending_high else newest
+    watermark = _parse_cursor_time(current.get("watermark"))
+    if truncated:
+        return {
+            "version": 1,
+            "watermark": watermark.isoformat() if watermark else None,
+            "pending_high_watermark": (
+                pending_high.isoformat() if pending_high else None
+            ),
+            "pending_ids": sorted(pending_ids),
+        }
+    promoted = max(
+        [value for value in (watermark, pending_high, *timestamps) if value is not None],
+        default=None,
+    )
+    return {
+        "version": 1,
+        "watermark": promoted.isoformat() if promoted else None,
+        "pending_high_watermark": None,
+        "pending_ids": [],
+    }
+
+
+def _parse_cursor_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.utcoffset() is not None else None

@@ -154,6 +154,15 @@ def migration_files() -> list[Path]:
     files = sorted(directory.glob("[0-9][0-9][0-9]_*.sql"))
     if not files:
         raise RuntimeError(f"No SQL migrations were found in {directory}")
+    numbers = [int(file.name.split("_", 1)[0]) for file in files]
+    expected = list(range(numbers[0], numbers[-1] + 1))
+    if numbers != expected or len(numbers) != len(set(numbers)):
+        raise RuntimeError("SQL migration numbers must be unique and contiguous")
+    for file in files:
+        if file.stem not in file.read_text(encoding="utf-8"):
+            raise RuntimeError(
+                f"{file.name} does not record its exact migration version"
+            )
     return files
 
 

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from app.connectors.base import (
     BaseConnector,
     ConnectorRequest,
+    FetchBatch,
     RawItemCandidate,
 )
 from app.connectors.web_content import clean_text
@@ -31,7 +32,7 @@ class XTwitterConnector(BaseConnector[object]):
     def __init__(self, *, api_factory: Callable[..., object] | None = None) -> None:
         self.api_factory = api_factory
 
-    async def fetch(self, request: ConnectorRequest) -> list[object]:
+    async def fetch(self, request: ConnectorRequest) -> FetchBatch[object]:
         limit = min(
             max(request.limit, 1),
             settings.x_fetch_limit,
@@ -65,13 +66,27 @@ class XTwitterConnector(BaseConnector[object]):
             if user is None:
                 raise XConnectorCollectionError(f"X user was not found: @{username}")
             records: list[object] = []
-            async for tweet in api.user_tweets(user.id, limit=limit):
+            pending_ids = {
+                str(value)
+                for value in (request.cursor or {}).get("pending_ids", [])
+            }
+            scan_limit = max(limit + len(pending_ids) + 1, limit + 1)
+            scanned = 0
+            reached_boundary = False
+            async for tweet in api.user_tweets(user.id, limit=scan_limit):
+                scanned += 1
+                tweet_id = clean_text(_attr(tweet, "id_str", "id"))
                 published_at = _attr(tweet, "date")
                 if isinstance(since, datetime) and isinstance(published_at, datetime):
                     if published_at < since:
-                        continue
+                        reached_boundary = True
+                        break
+                if tweet_id in pending_ids:
+                    continue
                 records.append(tweet)
-            return sorted(
+                if len(records) > limit:
+                    break
+            ordered = sorted(
                 records,
                 key=lambda record: (
                     _attr(record, "date")
@@ -79,7 +94,14 @@ class XTwitterConnector(BaseConnector[object]):
                     else datetime.min.replace(tzinfo=UTC)
                 ),
                 reverse=True,
-            )[:limit]
+            )
+            return FetchBatch(
+                records=ordered[:limit],
+                truncated=(
+                    len(ordered) > limit
+                    or (scanned >= scan_limit and not reached_boundary)
+                ),
+            )
         except XConnectorConfigurationError:
             raise
         except Exception as exc:

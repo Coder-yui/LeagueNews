@@ -47,7 +47,7 @@ Source 周期调度或手工触发
 
 ## 本地启动
 
-首次准备：
+首次准备（Windows PowerShell）：
 
 ```powershell
 Copy-Item .env.example .env
@@ -59,23 +59,33 @@ Set-Location ..\..
 pnpm install
 ```
 
-在 `.env` 配置数据库和 OpenAI-compatible LLM，然后：
+首次准备（macOS/Linux，需 uv、pnpm，以及 OrbStack 或 Docker Desktop 提供 Docker）：
+
+```bash
+cp .env.example .env
+
+cd services/api
+uv sync --dev
+
+cd ../..
+pnpm install
+```
+
+在 `.env` 配置数据库和 OpenAI-compatible LLM，然后启动：
 
 ```powershell
+# Windows
 .\scripts\start.ps1
 ```
 
-不打开浏览器：
-
-```powershell
-.\scripts\start.ps1 -SkipBrowser
+```bash
+# macOS/Linux
+./scripts/start.sh
 ```
 
-关闭：
+不打开浏览器：Windows 加 `-SkipBrowser`，macOS/Linux 加 `--skip-browser`。
 
-```powershell
-.\scripts\stop.ps1
-```
+关闭：Windows 运行 `.\scripts\stop.ps1`，macOS/Linux 运行 `./scripts/stop.sh`。
 
 本地地址：
 
@@ -89,8 +99,17 @@ pnpm install
 ## 验证
 
 ```powershell
+# Windows
 services\api\.venv\Scripts\python.exe -m ruff check services/api/app services/api/scripts services/api/tests
 services\api\.venv\Scripts\python.exe -m pytest services/api/tests -q
+pnpm lint:web
+pnpm build:web
+```
+
+```bash
+# macOS/Linux
+services/api/.venv/bin/python -m ruff check services/api/app services/api/scripts services/api/tests
+services/api/.venv/bin/python -m pytest services/api/tests -q
 pnpm lint:web
 pnpm build:web
 ```

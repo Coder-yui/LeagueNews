@@ -40,6 +40,11 @@ def _published_statement():
 def _published_payload(item: NormalizedItem) -> dict[str, Any]:
     raw_item = item.raw_item
     source = raw_item.source
+    public_media_by_index = {
+        asset.block_index: asset.public_path
+        for asset in raw_item.media_assets
+        if asset.public_path
+    }
     media_extractions = []
     for link in sorted(
         item.media_links,
@@ -70,10 +75,18 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         "summary": item.summary,
         "category": item.category,
         "entities": item.entities,
+        "primary_topic": item.primary_topic,
+        "secondary_topics": item.secondary_topics,
+        "facets": item.facets,
+        "ontology_version": item.ontology_version,
         "importance_score": item.importance_score,
+        "importance_dimensions": item.importance_dimensions,
+        "importance_policy_version": item.importance_policy_version,
         "credibility": item.credibility,
         "credibility_score": item.credibility_score,
         "credibility_evidence": item.credibility_evidence,
+        "credibility_components": item.credibility_components,
+        "credibility_policy_version": item.credibility_policy_version,
         "source_id": source.id,
         "source_name": source.name,
         "source_base_url": source.base_url,
@@ -81,14 +94,35 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         "author": raw_item.author_name,
         "published_at": raw_item.published_at,
         "original_title": raw_item.display_title,
-        "original_content_blocks": raw_item.content_blocks,
+        "original_content_blocks": _public_blocks(
+            raw_item.content_blocks, public_media_by_index
+        ),
         "source_language": item.source_language,
         "translated_title": item.translated_title,
-        "translated_content_blocks": item.translated_content_blocks,
+        "translated_content_blocks": _public_blocks(
+            item.translated_content_blocks, public_media_by_index
+        ),
         "translation_status": item.translation_status,
         "media_extractions": media_extractions,
         "created_at": item.created_at,
     }
+
+
+def _public_blocks(
+    blocks: list[dict[str, Any]],
+    public_media_by_index: dict[int, str],
+) -> list[dict[str, Any]]:
+    result = []
+    for index, block in enumerate(blocks):
+        copied = dict(block)
+        if copied.get("type") == "image":
+            public_path = public_media_by_index.get(index)
+            if public_path:
+                copied["storage_path"] = public_path
+            else:
+                copied.pop("storage_path", None)
+        result.append(copied)
+    return result
 
 
 @router.get("/published", response_model=list[PublishedItemRead])

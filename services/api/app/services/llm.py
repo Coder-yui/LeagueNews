@@ -12,6 +12,15 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.config import settings
 from app.prompts import prompt_registry
+from app.prompts.registry import (
+    EVENT_AGGREGATION_OPERATION,
+    FACT_EXTRACTION_OPERATION,
+    IMPORTANCE_SCORING_OPERATION,
+    ITEM_ANALYSIS_OPERATION,
+    KNOWLEDGE_ORGANIZATION_OPERATION,
+    RELEVANCE_OPERATION,
+    TRANSLATION_OPERATION,
+)
 from app.schemas.event_workflow import EventDecisionDraft
 
 
@@ -209,7 +218,7 @@ class LLMClient:
             },
             max_tokens=900,
             schema=FactExtractionResult,
-            operation="事实抽取",
+            operation=FACT_EXTRACTION_OPERATION,
         )
 
     async def score_importance(
@@ -233,7 +242,7 @@ class LLMClient:
             },
             max_tokens=400,
             schema=ImportanceResult,
-            operation="重要性评分",
+            operation=IMPORTANCE_SCORING_OPERATION,
         )
 
     async def analyze(
@@ -299,7 +308,7 @@ class LLMClient:
             },
             max_tokens=1200,
             schema=AnalysisResult,
-            operation="单条分析",
+            operation=ITEM_ANALYSIS_OPERATION,
         )
 
     async def propose_event(
@@ -464,7 +473,7 @@ class LLMClient:
             },
             max_tokens=1800,
             schema=EventDecisionDraft,
-            operation="事件聚合决策",
+            operation=EVENT_AGGREGATION_OPERATION,
             business_validator=validate_candidate,
         )
     async def translate(
@@ -635,7 +644,7 @@ class LLMClient:
             },
             max_tokens=8000,
             schema=TranslationResult,
-            operation="翻译",
+            operation=TRANSLATION_OPERATION,
             business_validator=validate_indexes,
         )
 
@@ -666,7 +675,7 @@ class LLMClient:
             payload=payload,
             max_tokens=800,
             schema=RelevanceResult,
-            operation="相关性判断",
+            operation=RELEVANCE_OPERATION,
         )
 
     async def organize_knowledge(
@@ -714,7 +723,7 @@ class LLMClient:
             payload={"rules": rules},
             max_tokens=4000,
             schema=KnowledgeOrganizationResult,
-            operation="知识整理",
+            operation=KNOWLEDGE_ORGANIZATION_OPERATION,
             business_validator=validate_coverage,
         )
 

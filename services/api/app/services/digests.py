@@ -1,6 +1,7 @@
 import hashlib
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,14 +19,29 @@ def generate_digest(
 ) -> Digest:
     if digest_type not in {"daily", "weekly"}:
         raise ValueError("digest_type must be daily or weekly")
-    window_start = cutoff_at - timedelta(days=1 if digest_type == "daily" else 7)
+    try:
+        local_timezone = ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"invalid IANA timezone: {timezone}") from exc
+    if not isinstance(cutoff_at, datetime):
+        raise ValueError("cutoff_at must be a datetime")
+    local_cutoff = (
+        cutoff_at.replace(tzinfo=local_timezone)
+        if cutoff_at.tzinfo is None
+        else cutoff_at.astimezone(local_timezone)
+    )
+    local_window_start = local_cutoff - timedelta(
+        days=1 if digest_type == "daily" else 7
+    )
+    normalized_cutoff = local_cutoff.astimezone(UTC)
+    window_start = local_window_start.astimezone(UTC)
     rows = db.execute(
         select(Event, EventRevision)
         .join(EventRevision, EventRevision.event_id == Event.id)
         .where(
             Event.status == "active",
             EventRevision.created_at > window_start,
-            EventRevision.created_at <= cutoff_at,
+            EventRevision.created_at <= normalized_cutoff,
         )
         .order_by(Event.importance_score.desc(), EventRevision.created_at.desc())
         .limit(100)
@@ -47,7 +63,7 @@ def generate_digest(
         json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode()
     ).hexdigest()
     label = "日报" if digest_type == "daily" else "周报"
-    title = f"英雄联盟资讯{label} · {cutoff_at.date().isoformat()}"
+    title = f"英雄联盟资讯{label} · {local_cutoff.date().isoformat()}"
     body = "\n\n".join(
         f"## {row['title']}\n\n{row['summary']}" for row in snapshot
     ) or "本期暂无已发布事件更新。"
@@ -55,7 +71,7 @@ def generate_digest(
         select(Digest).where(
             Digest.digest_type == digest_type,
             Digest.timezone == timezone,
-            Digest.cutoff_at == cutoff_at,
+            Digest.cutoff_at == normalized_cutoff,
         )
     )
     if digest is None:
@@ -63,7 +79,7 @@ def generate_digest(
             digest_type=digest_type,
             timezone=timezone,
             window_start=window_start,
-            cutoff_at=cutoff_at,
+            cutoff_at=normalized_cutoff,
             title=title,
             body=body,
             input_hash=input_hash,

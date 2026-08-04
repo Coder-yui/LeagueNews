@@ -1,14 +1,10 @@
 import argparse
 
-from sqlalchemy import exists, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 from app.core.database import engine
-from app.models.intelligence import Claim
-from app.models.normalized_item import NormalizedItem
-from app.models.raw_item import RawItem
-from app.services.claims import extract_traceable_claim
+from app.services.claims import backfill_published_claims
 
 
 def main() -> None:
@@ -23,33 +19,20 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=500)
     args = parser.parse_args()
     with Session(engine) as db:
-        items = list(
-            db.scalars(
-                select(NormalizedItem)
-                .where(
-                    NormalizedItem.publication_status == "published",
-                    ~exists().where(
-                        Claim.normalized_item_id == NormalizedItem.id
-                    ),
-                )
-                .options(
-                    selectinload(NormalizedItem.raw_item).selectinload(
-                        RawItem.source
-                    ),
-                    selectinload(NormalizedItem.claims),
-                )
-                .order_by(NormalizedItem.id)
-                .limit(max(1, min(args.limit, 10_000)))
-            )
+        report = backfill_published_claims(
+            db,
+            limit=args.limit,
+            apply=args.apply,
         )
-        print(f"{len(items)} published normalized items need Claim backfill.")
+        print(f"Claims to create: {report.claims_created}")
+        print(f"EventClaim links to create: {report.event_claims_created}")
         if not args.apply:
+            db.rollback()
             print("Dry run only. Re-run with --apply after backup and review.")
             return
-        for item in items:
-            extract_traceable_claim(db, item)
         db.commit()
-        print(f"Created Claims for {len(items)} items.")
+        print(f"Created Claims: {report.claims_created}")
+        print(f"Created EventClaim links: {report.event_claims_created}")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import app.models  # noqa: F401
 from app.core.database import Base, get_db
 from app.main import app
 from app.models.event import EventMessage, EventRevision
+from app.models.intelligence import EventClaim
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
@@ -19,6 +20,7 @@ from app.services.event_aggregation import (
     add_message_to_event,
     create_event,
 )
+from app.services.claims import extract_traceable_claim
 
 
 def _engine():
@@ -184,6 +186,66 @@ def test_repeating_same_message_is_idempotent() -> None:
                 EventRevision.event_id == event.id
             )
         ) == 1
+
+
+def test_new_raw_revision_replaces_membership_and_event_claim_atomically() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Versioned source", connector_type="manual")
+        db.add(source)
+        db.commit()
+        previous = _add_normalized_item(
+            db,
+            source=source,
+            external_id="version-1",
+            title="Version one",
+            published_at=datetime(2026, 6, 16, tzinfo=UTC),
+        )
+        previous_claim = extract_traceable_claim(db, previous)
+        db.commit()
+        event = create_event(
+            db,
+            normalized_item_id=previous.id,
+            title="Versioned event",
+            summary="Initial",
+            category="测试",
+        )
+        replacement = _add_normalized_item(
+            db,
+            source=source,
+            external_id="version-2",
+            title="Version two",
+            published_at=datetime(2026, 6, 17, tzinfo=UTC),
+            revision=2,
+            supersedes_raw_item_id=previous.raw_item_id,
+        )
+        replacement_claim = extract_traceable_claim(db, replacement)
+        db.commit()
+
+        _, added = add_message_to_event(
+            db,
+            event_id=event.id,
+            normalized_item_id=replacement.id,
+            summary="Replacement",
+        )
+
+        assert added is True
+        assert db.get(EventClaim, (event.id, previous_claim.id)) is None
+        assert db.get(EventClaim, (event.id, replacement_claim.id)) is not None
+        assert db.scalar(
+            select(EventMessage).where(
+                EventMessage.normalized_item_id == previous.id
+            )
+        ) is None
+        assert db.scalar(
+            select(EventMessage).where(
+                EventMessage.normalized_item_id == replacement.id,
+                EventMessage.membership_status == "active",
+            )
+        ) is not None
+
+
 def test_message_cannot_belong_to_two_events() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)

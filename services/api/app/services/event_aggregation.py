@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.models.event import Event, EventMessage, EventRevision
 from app.models.normalized_item import NormalizedItem
-from app.services.claims import link_item_claims_to_event
+from app.services.claims import (
+    link_item_claims_to_event,
+    unlink_item_claims_from_event,
+)
 from app.services.raw_item_versions import superseded_normalized_item_ids
 
 _MATCH_LIFECYCLE_RANK = {
@@ -388,6 +391,11 @@ def add_message_to_event(
             for predecessor in replaced_memberships
         ]
         for predecessor in replaced_memberships:
+            unlink_item_claims_from_event(
+                db,
+                normalized_item_id=predecessor.normalized_item_id,
+                event_id=predecessor.event_id,
+            )
             db.delete(predecessor)
         if replaced_memberships:
             db.flush()

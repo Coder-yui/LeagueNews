@@ -22,6 +22,10 @@ from app.services.event_candidates import (
     stable_event_key,
 )
 from app.services.llm import LLMClient, execution_metadata
+from app.services.pipeline_execution import (
+    PipelineExecutionGuard,
+    assert_execution_owned,
+)
 from app.services.raw_item_versions import (
     is_latest_normalized_item,
     superseded_normalized_item_ids,
@@ -37,6 +41,7 @@ async def start_event_aggregation(
     supersedes_run_id: int | None = None,
     execution_mode: str = "manual",
     correction_id: int | None = None,
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> EventAggregationRun:
     if not is_latest_normalized_item(db, item):
         raise ValueError("normalized item has been superseded by a newer raw revision")
@@ -68,6 +73,7 @@ async def start_event_aggregation(
     )
     db.add(run)
     try:
+        assert_execution_owned(db, execution_guard)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -82,7 +88,7 @@ async def start_event_aggregation(
         return concurrent
     db.refresh(run)
     try:
-        await _generate_review(db, run)
+        await _generate_review(db, run, execution_guard=execution_guard)
     except Exception as exc:
         db.rollback()
         run = db.get(EventAggregationRun, run.id)
@@ -90,6 +96,7 @@ async def start_event_aggregation(
         run.outcome = "system_error"
         run.error_message = str(exc)
         run.completed_at = datetime.now(UTC)
+        assert_execution_owned(db, execution_guard)
         db.commit()
         raise
     return run
@@ -108,7 +115,10 @@ async def retry_event_aggregation(
 
 
 async def resume_event_aggregation(
-    db: Session, run: EventAggregationRun
+    db: Session,
+    run: EventAggregationRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> EventAggregationRun:
     if run.status != "running":
         return run
@@ -120,10 +130,11 @@ async def resume_event_aggregation(
     )
     if pending is not None:
         run.status = "awaiting_review"
+        assert_execution_owned(db, execution_guard)
         db.commit()
         return run
     try:
-        await _generate_review(db, run)
+        await _generate_review(db, run, execution_guard=execution_guard)
     except IntegrityError:
         db.rollback()
         pending = db.scalar(
@@ -136,11 +147,17 @@ async def resume_event_aggregation(
             raise
         run = db.get(EventAggregationRun, run.id)
         run.status = "awaiting_review"
+        assert_execution_owned(db, execution_guard)
         db.commit()
     return run
 
 
-async def _generate_review(db: Session, run: EventAggregationRun) -> None:
+async def _generate_review(
+    db: Session,
+    run: EventAggregationRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
     item = run.normalized_item
     correction = (
         db.get(PipelineCorrection, run.correction_id)
@@ -167,38 +184,41 @@ async def _generate_review(db: Session, run: EventAggregationRun) -> None:
         )
     )
     rules = [rule.rule_text for rule in selected_rules]
-    decision = await LLMClient().propose_event(
-        item={
-            "normalized_item_id": item.id,
-            "title": item.translated_title or item.normalized_title,
-            "summary": item.summary,
-            "category": item.category,
-            "entities": item.entities,
-            "importance_score": item.importance_score,
-            "credibility": item.credibility,
-            "credibility_score": item.credibility_score,
-            "credibility_evidence": item.credibility_evidence,
-            "raw_revision": item.raw_item.revision,
-            "supersedes_raw_item_id": item.raw_item.supersedes_raw_item_id,
-            "superseded_normalized_item_ids": superseded_normalized_item_ids(
-                db, item
+    item_payload = {
+        "normalized_item_id": item.id,
+        "title": item.translated_title or item.normalized_title,
+        "summary": item.summary,
+        "category": item.category,
+        "entities": item.entities,
+        "importance_score": item.importance_score,
+        "credibility": item.credibility,
+        "credibility_score": item.credibility_score,
+        "credibility_evidence": item.credibility_evidence,
+        "raw_revision": item.raw_item.revision,
+        "supersedes_raw_item_id": item.raw_item.supersedes_raw_item_id,
+        "superseded_normalized_item_ids": superseded_normalized_item_ids(
+            db, item
+        ),
+        "event_policy": event_aggregation_policy(item),
+        "source": {
+            "source_id": item.raw_item.source_id,
+            "source_name": item.raw_item.source.name,
+            "connector_type": item.raw_item.source.connector_type,
+            "authority": item.raw_item.source.connector_config.get(
+                "authority_level"
             ),
-            "event_policy": event_aggregation_policy(item),
-            "source": {
-                "source_id": item.raw_item.source_id,
-                "source_name": item.raw_item.source.name,
-                "connector_type": item.raw_item.source.connector_type,
-                "authority": item.raw_item.source.connector_config.get(
-                    "authority_level"
-                ),
-                "is_repost": has_quoted_post(item.raw_item.content_blocks),
-            },
-            "published_at": (
-                item.raw_item.published_at.isoformat()
-                if item.raw_item.published_at
-                else None
-            ),
+            "is_repost": has_quoted_post(item.raw_item.content_blocks),
         },
+        "published_at": (
+            item.raw_item.published_at.isoformat()
+            if item.raw_item.published_at
+            else None
+        ),
+    }
+    assert_execution_owned(db, execution_guard)
+    db.commit()
+    decision = await LLMClient().propose_event(
+        item=item_payload,
         candidates=candidate_payloads,
         stable_event_key=stable_event_key(item),
         knowledge_rules=rules,
@@ -228,6 +248,7 @@ async def _generate_review(db: Session, run: EventAggregationRun) -> None:
             },
         )
     )
+    assert_execution_owned(db, execution_guard)
     db.commit()
     db.refresh(run)
 
@@ -237,6 +258,7 @@ def approve_event_review(
     review: EventReviewTask,
     *,
     note: str | None,
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> EventAggregationRun:
     _require_pending(review)
     run = review.run
@@ -350,6 +372,7 @@ def approve_event_review(
         if correction is not None:
             correction.status = "completed"
             correction.completed_at = now
+    assert_execution_owned(db, execution_guard)
     db.commit()
     db.refresh(run)
     return run

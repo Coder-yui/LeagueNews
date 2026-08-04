@@ -17,19 +17,24 @@ RawItem immutable blocks
 `ontology_version=lol-news-v1` controls primary topic, secondary topics, facets, and entity types. Existing
 rows are mapped conservatively by migration 037; unknown identities remain unknown. No LLM runs in a
 migration. `python -m scripts.backfill_claims` is dry-run by default; after a database/media backup and
-review, `--apply` creates one evidence-linked Claim for each published item that has none.
+review, `--apply` creates one evidence-linked Claim for each published item that has no active Claim and
+also restores missing EventClaim links for active EventMessage memberships. The command reports Claim and
+EventClaim counts separately and is idempotent. Withdrawn items and memberships are never re-linked.
 
 Importance model output contains five discrete dimensions: impact scope, magnitude, duration,
 actionability, and novelty. `importance-v1-five-dimensions` computes the final compatible score with
 versioned weights and topic floor/cap. Source authority is only a credibility prior and never increases
 importance. Event corroboration deduplicates reposts by upstream URL when present.
 
-Daily and weekly digests use EventRevision rows inside an explicit timezone/cutoff window. Re-running the
-same unchanged window is idempotent; late evidence creates a DigestRevision. Feeds expose published events
-and digests only. MCP is a read-only Streamable HTTP JSON-RPC endpoint at `/api/v1/mcp`, implementing the
+Daily and weekly digests validate an IANA timezone, interpret naive cutoffs as local wall time, calculate
+one or seven local days (including DST transitions), and then persist/query the UTC window. Titles use the
+local cutoff date. Re-running the same normalized window is idempotent; late evidence creates a
+DigestRevision. Feeds expose published events and digests only. MCP is a read-only Streamable HTTP
+JSON-RPC endpoint at `/api/v1/mcp`, implementing the
 current stable protocol revision `2025-11-25`; Caddy keeps this POST endpoint behind administrator
 authentication. It exposes `list_events`, `get_event`, `get_event_timeline`, `search_events`,
-`list_digests`, and `get_digest`.
+`list_digests`, and `get_digest`. Event timelines include the EventClaim relation and only expose active
+Claims whose NormalizedItem is still published and whose EventClaim still exists.
 
 Remaining operational validation: schedule digest generation at the desired local cutoffs, run the Claim
 backfill only after backup, validate feed discovery in production, and test the MCP client through the

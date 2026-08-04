@@ -12,6 +12,7 @@ from app.services.llm import (
     LLMConfigurationError,
     PatchPreviewExtraction,
     TranslationResult,
+    execution_metadata,
 )
 from app.workflows.translate_item import build_translation, detect_language
 
@@ -323,6 +324,11 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
     assert result.decision == "update"
     assert result.update_kind == "context"
     assert result.evidence_stance == "context"
+    metadata = execution_metadata(result)
+    assert metadata["prompt_name"] == "event-decision"
+    assert metadata["prompt_version"] == "v3-editorial-policy"
+    assert metadata["json_schema_version"] == "EventDecisionDraft:v1"
+    assert str(metadata["prompt_hash"]).startswith("sha256:")
     assert len(completions.calls) == 2
     retry_messages = completions.calls[1]["messages"]
     assert isinstance(retry_messages, list)

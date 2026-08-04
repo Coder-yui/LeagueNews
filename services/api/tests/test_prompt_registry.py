@@ -1,4 +1,10 @@
+import pytest
+
 from app.prompts import prompt_registry
+from app.prompts.registry import (
+    EVENT_AGGREGATION_OPERATION,
+    PRODUCTION_LLM_OPERATIONS,
+)
 
 
 def test_prompt_registry_versions_known_tasks() -> None:
@@ -10,3 +16,30 @@ def test_prompt_registry_versions_known_tasks() -> None:
     assert prompt.name == "item-analysis"
     assert prompt.version == "v5-importance-rubric"
     assert prompt.content == "contract"
+
+
+def test_all_production_llm_operations_are_registered() -> None:
+    assert PRODUCTION_LLM_OPERATIONS <= prompt_registry.registered_operations
+    prompt = prompt_registry.resolve(
+        operation=EVENT_AGGREGATION_OPERATION,
+        content="unchanged event prompt",
+        schema_version="EventDecisionDraft:v1",
+    )
+    assert prompt.name == "event-decision"
+    assert prompt.version == "v3-editorial-policy"
+
+
+def test_unregistered_operations_require_explicit_experimental_opt_in() -> None:
+    with pytest.raises(ValueError, match="unregistered LLM operation"):
+        prompt_registry.resolve(
+            operation="实验操作",
+            content="experiment",
+            schema_version="Experiment:v1",
+        )
+    prompt = prompt_registry.resolve(
+        operation="实验操作",
+        content="experiment",
+        schema_version="Experiment:v1",
+        allow_unregistered=True,
+    )
+    assert prompt.version == "unregistered-v1"

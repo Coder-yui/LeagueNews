@@ -16,6 +16,11 @@ from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun, ReviewTask
+from app.services.pipeline_execution import (
+    PipelineExecutionGuard,
+    PipelineLeaseLost,
+    assert_execution_owned,
+)
 from app.workflows.event_aggregation import (
     approve_event_review,
     start_event_aggregation,
@@ -142,7 +147,12 @@ def _active_event_run(db: Session, item_id: int) -> EventAggregationRun | None:
     )
 
 
-async def execute_pipeline_job(db: Session, job: PipelineJob) -> None:
+async def execute_pipeline_job(
+    db: Session,
+    job: PipelineJob,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
     raw_item = db.get(RawItem, job.raw_item_id)
     if raw_item is None:
         raise ValueError(f"raw item {job.raw_item_id} no longer exists")
@@ -157,11 +167,16 @@ async def execute_pipeline_job(db: Session, job: PipelineJob) -> None:
             raw_item,
             execution_mode="automatic",
             correction_id=job.correction_id,
+            execution_guard=execution_guard,
         )
     if item_run is not None:
         job.processing_run_id = item_run.id
         if item_run.status == "running":
-            item_run = await resume_item_processing(db, item_run)
+            item_run = await resume_item_processing(
+                db,
+                item_run,
+                execution_guard=execution_guard,
+            )
         while item_run.status == "awaiting_review":
             review = _pending_item_review(db, item_run.id)
             if review is None:
@@ -169,11 +184,13 @@ async def execute_pipeline_job(db: Session, job: PipelineJob) -> None:
             job.current_stage = review.stage
             review.decision_source = "automatic"
             review.policy_version = "auto-approve-v1"
+            assert_execution_owned(db, execution_guard)
             db.commit()
             item_run = await approve_review(
                 db,
                 review,
                 note="automatic pipeline approval",
+                execution_guard=execution_guard,
             )
         if item_run.status != "completed":
             raise RuntimeError(
@@ -190,16 +207,22 @@ async def execute_pipeline_job(db: Session, job: PipelineJob) -> None:
     event_run = _active_event_run(db, item.id)
     if event_run is None:
         job.current_stage = "event_decision"
+        assert_execution_owned(db, execution_guard)
         db.commit()
         event_run = await start_event_aggregation(
             db,
             item,
             execution_mode="automatic",
             correction_id=job.correction_id,
+            execution_guard=execution_guard,
         )
     job.event_aggregation_run_id = event_run.id
     if event_run.status == "running":
-        event_run = await resume_event_aggregation(db, event_run)
+        event_run = await resume_event_aggregation(
+            db,
+            event_run,
+            execution_guard=execution_guard,
+        )
     if event_run.status == "awaiting_review":
         review = _pending_event_review(db, event_run.id)
         if review is None:
@@ -207,11 +230,13 @@ async def execute_pipeline_job(db: Session, job: PipelineJob) -> None:
         job.current_stage = "event_decision"
         review.decision_source = "automatic"
         review.policy_version = "auto-approve-v1"
+        assert_execution_owned(db, execution_guard)
         db.commit()
         event_run = approve_event_review(
             db,
             review,
             note="automatic pipeline approval",
+            execution_guard=execution_guard,
         )
     if event_run.status != "completed":
         raise RuntimeError(
@@ -292,10 +317,15 @@ def _renew_job_lease(job_id: int, lease_token: str) -> bool:
         return bool(result.rowcount)
 
 
-async def _heartbeat_job(job_id: int, lease_token: str) -> None:
+async def _heartbeat_job(
+    job_id: int,
+    lease_token: str,
+    lease_lost: asyncio.Event,
+) -> None:
     while True:
         await asyncio.sleep(settings.pipeline_worker_heartbeat_seconds)
         if not _renew_job_lease(job_id, lease_token):
+            lease_lost.set()
             return
 
 
@@ -317,12 +347,23 @@ async def process_next_job() -> bool:
         if job is None:
             return False
         lease_token = job.lease_token
-        heartbeat = asyncio.create_task(_heartbeat_job(job.id, lease_token))
+        lease_lost = asyncio.Event()
+        execution_guard = PipelineExecutionGuard(
+            job_id=job.id,
+            lease_token=lease_token,
+            lease_lost=lease_lost,
+        )
+        heartbeat = asyncio.create_task(
+            _heartbeat_job(job.id, lease_token, lease_lost)
+        )
         try:
-            await execute_pipeline_job(db, job)
+            await execute_pipeline_job(
+                db,
+                job,
+                execution_guard=execution_guard,
+            )
+            assert_execution_owned(db, execution_guard)
             job = db.get(PipelineJob, job.id)
-            if job.lease_token != lease_token:
-                return True
             job.status = "completed"
             job.completed_at = datetime.now(UTC)
             checkpoint = _latest_checkpoint(db, job.raw_item_id)
@@ -337,11 +378,17 @@ async def process_next_job() -> bool:
                     correction.completed_at = job.completed_at
                     correction.error_message = None
             db.commit()
+        except PipelineLeaseLost:
+            db.rollback()
+            return True
         except Exception as exc:
             db.rollback()
-            job = db.get(PipelineJob, job.id)
-            if job.lease_token != lease_token:
+            try:
+                assert_execution_owned(db, execution_guard)
+            except PipelineLeaseLost:
+                db.rollback()
                 return True
+            job = db.get(PipelineJob, job.id)
             job.status = "failed"
             job.error_message = str(exc)[:4000]
             job.completed_at = datetime.now(UTC)

@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from app.core.config import Settings, _find_project_root
 
 
@@ -33,3 +36,18 @@ def test_empty_weibo_cookie_file_disables_cookie_injection() -> None:
     configured = Settings(weibo_cookie_file="")
 
     assert configured.resolved_weibo_cookie_file is None
+
+
+@pytest.mark.parametrize(
+    ("lease_seconds", "heartbeat_seconds"),
+    [(0, 1), (10, 0), (10, 10), (10, 11)],
+)
+def test_invalid_pipeline_lease_configuration_fails_at_startup(
+    lease_seconds: int,
+    heartbeat_seconds: int,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            pipeline_worker_lease_seconds=lease_seconds,
+            pipeline_worker_heartbeat_seconds=heartbeat_seconds,
+        )

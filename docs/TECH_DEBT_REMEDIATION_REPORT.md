@@ -13,7 +13,9 @@ PostgreSQL 持久化队列等原架构边界。
   成功后推进，并记录 used/next cursor、truncated 和 candidate count。
 - Pipeline Job 增加 worker、token、lease、heartbeat、recovery provenance；数据库 partial
   unique index 约束 active ProcessingRun 和 pending ReviewTask，并发冲突转为幂等结果或明确
-  冲突。Event 更新在行锁后重新检查成员关系。
+  冲突。自动工作流在每次副作用提交前使用同一事务锁定 PipelineJob 并验证 lease token、
+  running 状态和未过期时间；heartbeat 丢失 token 会通知主任务停止。LLM 网络调用期间不
+  持有数据库事务或该锁。Event 更新在行锁后重新检查成员关系。
 - API/Worker/Scheduler/Migrator 的环境变量和卷按职责拆分；Worker 无平台 Cookie/Profile，
   Scheduler 无 LLM key。媒体下载验证所有 DNS IPv4/IPv6 和每次 redirect；新 raw media 为
   private，发布时才获得 public projection。
@@ -28,9 +30,12 @@ PostgreSQL 持久化队列等原架构边界。
   来源角色、转载、证据、OCR/翻译组成；转载优先按 upstream URL 去重。
 - Claim 保存 subject/predicate/object、before/after、time、stance/type、raw block evidence、
   model/schema/confidence/revision/provenance；EventClaim 支持一个 Claim 关联多个 Event，
-  EventMessage 继续作为兼容投影。事件候选先用 key/category/time 索引收窄再混合评分。
+  EventMessage 继续作为兼容投影。成员撤回或 RawItem 修订替换会在同一事务清理对应
+  EventClaim；历史回填同时补 Claim 和 active membership 的 EventClaim。事件候选先用
+  key/category/time 索引收窄再混合评分。
 - Digest 只读取时间窗内的 EventRevision，保存 cutoff/timezone/input revision/policy，
-  重跑幂等，晚到或更正创建 DigestRevision。公开 API、页面与 RSS 只读取 published 数据。
+  按 IANA timezone 的本地日计算窗口后转 UTC，重跑幂等，晚到或更正创建 DigestRevision。
+  公开 API、页面与 RSS 只读取 published 数据。
   MCP 使用当前稳定 `2025-11-25` 协议，只有六个只读工具并返回结构化 provenance/source URL。
 
 数据流：
@@ -64,13 +69,13 @@ Connector -> RawItemCandidate -> ingestion -> immutable RawItem
 ```bash
 services/api/.venv/bin/python -m ruff check services/api/app services/api/scripts services/api/tests
 services/api/.venv/bin/python -m pytest services/api/tests -q
-# 148 passed, 2 skipped；skip 是需要显式 PostgreSQL URL 的并发测试
+# 167 passed（包含使用临时 PostgreSQL 17 的并发测试）
 
 EVENT_TEST_DATABASE_URL=<临时 PostgreSQL 17> \
   services/api/.venv/bin/python -m pytest \
   services/api/tests/test_event_aggregation_postgres.py \
   services/api/tests/test_pipeline_postgres.py -q
-# 2 passed
+# 3 passed
 
 pnpm lint:web
 pnpm build:web
@@ -84,8 +89,9 @@ git diff --check
 ```
 
 另用全新临时 PostgreSQL 17 验证 fresh initialization，共记录 002–037 的 36 个版本；再对
-031 fixture 顺序执行 032–037，全部通过。离线 evaluation fixture 为 3/3 exact match；
-框架另有 Recall@5、false merge rate、false split rate 测试。X、微博、Riot 网页采集覆盖
+031 fixture 顺序执行 032–037，全部通过。三条合成 regression fixture 的 exact match 只
+验证 evaluation runner 的工程行为，不构成真实 Prompt 质量结论；真实模型质量仍需人工
+标注的离线评估集。框架另有 Recall@5、false merge rate、false split rate 测试。X、微博、Riot 网页采集覆盖
 cap continuation/边界/重试；SSRF 覆盖 loopback、metadata、IPv6、DNS 私网解析和 redirect；
 Pipeline 覆盖 stale reclaim、双 worker、人工/自动竞态和暂时失败；分发测试覆盖 Claim
 evidence、多事件关联、Digest 幂等/修订、RSS XML/稳定 GUID 和 MCP initialize/list/call。
@@ -135,5 +141,6 @@ API/Chromium/OCR 实际分层；同一 API image 的多容器会共享只读层�
    stale reclaim、LLM/OCR/media 指标告警。
 9. 从真实审核历史安全导出并人工标注 evaluation set，在 Prompt/规则晋升前跑回归。
 
-本次没有连接或修改生产服务器、生产数据库、DNS 或 GitHub Secrets；没有部署、提交、推送
-或创建 PR，也没有读取或输出生产 Cookie、Token、密码。
+本次没有连接或修改生产服务器、生产数据库、DNS 或 GitHub Secrets；没有部署、推送或
+创建 PR，也没有读取或输出生产 Cookie、Token、密码。工程正确性修复只在当前分支形成
+本地提交。

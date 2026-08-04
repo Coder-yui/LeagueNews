@@ -1,10 +1,11 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from xml.etree import ElementTree
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
 from app.api.routes.feeds import digest_feed, event_feed
@@ -17,7 +18,10 @@ from app.models.event import Event, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
-from app.services.claims import extract_traceable_claim
+from app.services.claims import (
+    backfill_published_claims,
+    extract_traceable_claim,
+)
 from app.services.digests import generate_digest
 from app.services.event_aggregation import create_event
 from app.main import app
@@ -28,6 +32,7 @@ def db() -> Session:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as session:
@@ -111,6 +116,46 @@ def test_claim_traces_to_raw_block_and_can_feed_multiple_events(db: Session) -> 
     db.add(EventClaim(event_id=second.id, claim_id=claim.id, relation="context"))
     db.commit()
     assert {link.event_id for link in claim.event_links} == {first.id, second.id}
+    assert next(
+        link for link in claim.event_links if link.event_id == first.id
+    ).relation == "supports"
+
+
+def test_claim_backfill_creates_event_links_and_is_idempotent(
+    db: Session,
+) -> None:
+    item = _item(db)
+    event = create_event(
+        db,
+        normalized_item_id=item.id,
+        title="历史事件",
+        summary="历史消息已经属于事件。",
+        category="版本更新",
+    )
+
+    dry_run = backfill_published_claims(db, apply=False)
+    assert dry_run.claims_created == 1
+    assert dry_run.event_claims_created == 1
+    assert item.claims == []
+
+    applied = backfill_published_claims(db, apply=True)
+    db.commit()
+    assert applied.claims_created == 1
+    assert applied.event_claims_created == 1
+    db.expire_all()
+    refreshed_item = db.get(NormalizedItem, item.id)
+    assert refreshed_item is not None
+    assert refreshed_item.claims[0].event_links[0].event_id == event.id
+
+    repeated = backfill_published_claims(db, apply=True)
+    db.commit()
+    assert repeated.claims_created == 0
+    assert repeated.event_claims_created == 0
+    db.expire_all()
+    refreshed_item = db.get(NormalizedItem, item.id)
+    assert refreshed_item is not None
+    assert len(refreshed_item.claims) == 1
+    assert len(refreshed_item.claims[0].event_links) == 1
 
 
 def test_digest_is_idempotent_revisable_and_feeds_are_valid_xml(db: Session) -> None:
@@ -136,7 +181,7 @@ def test_digest_is_idempotent_revisable_and_feeds_are_valid_xml(db: Session) -> 
             summary="新增一项修正。",
             change_note="late correction",
             evidence_snapshot={},
-            created_at=datetime(2026, 8, 3, 10),
+            created_at=datetime(2026, 8, 3, 3, tzinfo=UTC),
         )
     )
     db.commit()
@@ -177,7 +222,16 @@ def test_mcp_surface_is_read_only_and_returns_structured_provenance(db: Session)
         db, "get_event_timeline", {"event_id": event.id}
     )
     assert timeline["claims"][0]["id"] == claim.id
+    assert timeline["claims"][0]["event_relation"] == "supports"
     assert timeline["messages"][0]["source_url"] is None
+
+    item.publication_status = "withdrawn"
+    db.commit()
+    assert _call_tool(
+        db, "get_event_timeline", {"event_id": event.id}
+    )["claims"] == []
+    item.publication_status = "published"
+    db.commit()
 
     def override_db():
         yield db

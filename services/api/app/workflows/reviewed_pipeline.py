@@ -27,6 +27,10 @@ from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
 from app.services.llm import LLMClient, execution_metadata
 from app.services.claims import extract_traceable_claim
 from app.services.media_publication import publish_raw_item_media
+from app.services.pipeline_execution import (
+    PipelineExecutionGuard,
+    assert_execution_owned,
+)
 from app.workflows.translate_item import build_translation
 from app.workflows.understand_media import (
     extraction_context,
@@ -50,6 +54,16 @@ OFFICIAL_ACCOUNTS = {
 }
 
 
+def _guard_kwargs(
+    execution_guard: PipelineExecutionGuard | None,
+) -> dict[str, PipelineExecutionGuard]:
+    return (
+        {"execution_guard": execution_guard}
+        if execution_guard is not None
+        else {}
+    )
+
+
 async def start_item_processing(
     db: Session,
     raw_item: RawItem,
@@ -59,6 +73,7 @@ async def start_item_processing(
     correction_id: int | None = None,
     restart_from_stage: str = RELEVANCE_STAGE,
     context: dict[str, Any] | None = None,
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> ProcessingRun:
     if raw_item.normalized_item and not (
         correction_id is not None
@@ -105,6 +120,7 @@ async def start_item_processing(
     )
     db.add(run)
     try:
+        assert_execution_owned(db, execution_guard)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -120,13 +136,17 @@ async def start_item_processing(
         return concurrent
     db.refresh(run)
     if restart_from_stage == RELEVANCE_STAGE:
-        await _generate_relevance_review(db, run)
+        await _generate_relevance_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     elif restart_from_stage == OCR_STAGE:
-        await _generate_ocr_review(db, run)
+        await _generate_ocr_review(db, run, **_guard_kwargs(execution_guard))
     elif restart_from_stage == TRANSLATION_STAGE:
-        await _generate_translation_review(db, run)
+        await _generate_translation_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     else:
-        await _generate_item_review(db, run)
+        await _generate_item_review(db, run, **_guard_kwargs(execution_guard))
     return run
 
 
@@ -173,7 +193,10 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
 
 
 async def resume_item_processing(
-    db: Session, run: ProcessingRun
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> ProcessingRun:
     if run.status != "running":
         return run
@@ -185,17 +208,26 @@ async def resume_item_processing(
     )
     if pending is not None:
         run.status = "awaiting_review"
+        assert_execution_owned(db, execution_guard)
         db.commit()
         return run
     try:
         if run.current_stage == RELEVANCE_STAGE:
-            await _generate_relevance_review(db, run)
+            await _generate_relevance_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
         elif run.current_stage == OCR_STAGE:
-            await _generate_ocr_review(db, run)
+            await _generate_ocr_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
         elif run.current_stage == TRANSLATION_STAGE:
-            await _generate_translation_review(db, run)
+            await _generate_translation_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
         elif run.current_stage == ITEM_STAGE:
-            await _generate_item_review(db, run)
+            await _generate_item_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
         else:
             raise ValueError(f"unsupported resume stage: {run.current_stage}")
     except IntegrityError:
@@ -210,6 +242,7 @@ async def resume_item_processing(
             raise
         run = db.get(ProcessingRun, run.id)
         run.status = "awaiting_review"
+        assert_execution_owned(db, execution_guard)
         db.commit()
     return run
 
@@ -219,6 +252,7 @@ async def approve_review(
     review: ReviewTask,
     *,
     note: str | None,
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> ProcessingRun:
     _require_pending_review(review)
     now = datetime.now(UTC)
@@ -233,12 +267,18 @@ async def approve_review(
             run.status = "running"
             if is_patch_preview(run.raw_item):
                 run.current_stage = OCR_STAGE
+                assert_execution_owned(db, execution_guard)
                 db.commit()
-                await _generate_ocr_review(db, run)
+                await _generate_ocr_review(
+                    db, run, **_guard_kwargs(execution_guard)
+                )
             else:
                 run.current_stage = TRANSLATION_STAGE
+                assert_execution_owned(db, execution_guard)
                 db.commit()
-                await _generate_translation_review(db, run)
+                await _generate_translation_review(
+                    db, run, **_guard_kwargs(execution_guard)
+                )
         else:
             run.status = "completed"
             run.outcome = "irrelevant"
@@ -248,6 +288,7 @@ async def approve_review(
                 if correction is not None:
                     correction.status = "completed"
                     correction.completed_at = now
+            assert_execution_owned(db, execution_guard)
             db.commit()
     elif review.stage == OCR_STAGE:
         extraction_ids = _extraction_ids(review.proposal)
@@ -273,8 +314,11 @@ async def approve_review(
         )
         run.status = "running"
         run.current_stage = TRANSLATION_STAGE
+        assert_execution_owned(db, execution_guard)
         db.commit()
-        await _generate_translation_review(db, run)
+        await _generate_translation_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     elif review.stage == ITEM_STAGE:
         item = _apply_normalized_item(
             db,
@@ -286,6 +330,7 @@ async def approve_review(
         run.status = "completed"
         run.outcome = "approved"
         run.completed_at = now
+        assert_execution_owned(db, execution_guard)
         db.commit()
         if run.correction_id:
             from app.workflows.event_aggregation import start_event_aggregation
@@ -295,6 +340,7 @@ async def approve_review(
                 item,
                 execution_mode=run.execution_mode,
                 correction_id=run.correction_id,
+                **_guard_kwargs(execution_guard),
             )
     elif review.stage == TRANSLATION_STAGE:
         run.context = {
@@ -304,8 +350,11 @@ async def approve_review(
         _record_checkpoint(db, review)
         run.status = "running"
         run.current_stage = ITEM_STAGE
+        assert_execution_owned(db, execution_guard)
         db.commit()
-        await _generate_item_review(db, run)
+        await _generate_item_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     else:
         raise ValueError(f"unsupported review stage: {review.stage}")
     db.refresh(run)
@@ -450,17 +499,28 @@ async def correct_ocr_review(
     return run
 
 
-async def _generate_relevance_review(db: Session, run: ProcessingRun) -> None:
+async def _generate_relevance_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
     raw_item = run.raw_item
     try:
         selected_rules = _knowledge_rule_snapshot(
             db, "relevance", raw_item
         )
+        title = raw_item.display_title
+        content = text_from_content_blocks(raw_item.content_blocks)
+        source_context = _source_context(raw_item)
+        knowledge_rules = _knowledge_texts_from_snapshot(selected_rules)
+        assert_execution_owned(db, execution_guard)
+        db.commit()
         result = await LLMClient().judge_relevance(
-            title=raw_item.display_title,
-            content=text_from_content_blocks(raw_item.content_blocks),
-            source_context=_source_context(raw_item),
-            knowledge_rules=_knowledge_texts_from_snapshot(selected_rules),
+            title=title,
+            content=content,
+            source_context=source_context,
+            knowledge_rules=knowledge_rules,
         )
         _replace_pending_review(
             db,
@@ -472,13 +532,19 @@ async def _generate_relevance_review(db: Session, run: ProcessingRun) -> None:
                 "knowledge_rules": selected_rules,
             },
         )
+        assert_execution_owned(db, execution_guard)
         db.commit()
     except Exception as exc:
-        _mark_failed(db, run, exc)
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
         raise
 
 
-async def _generate_ocr_review(db: Session, run: ProcessingRun) -> None:
+async def _generate_ocr_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
     try:
         media_extractions = await understand_patch_media(
             db,
@@ -497,8 +563,11 @@ async def _generate_ocr_review(db: Session, run: ProcessingRun) -> None:
         if not media_extractions:
             run.status = "running"
             run.current_stage = TRANSLATION_STAGE
+            assert_execution_owned(db, execution_guard)
             db.commit()
-            await _generate_translation_review(db, run)
+            await _generate_translation_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
             return
         _replace_pending_review(
             db,
@@ -511,29 +580,40 @@ async def _generate_ocr_review(db: Session, run: ProcessingRun) -> None:
                 "ocr_corrections": [],
             },
         )
+        assert_execution_owned(db, execution_guard)
         db.commit()
     except Exception as exc:
-        _mark_failed(db, run, exc)
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
         raise
 
 
-async def _generate_item_review(db: Session, run: ProcessingRun) -> None:
+async def _generate_item_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
     try:
         translation_proposal = run.context.get("approved_translation_proposal")
         if not isinstance(translation_proposal, dict):
             raise ValueError("analysis stage requires an approved translation proposal")
+        rules = _knowledge_texts(db, "analysis", run.raw_item)
+        knowledge_snapshot = _knowledge_rule_snapshot(
+            db, "analysis", run.raw_item
+        )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
         proposal = await _build_item_proposal(
             raw_item=run.raw_item,
             translation_proposal=translation_proposal,
-            rules=_knowledge_texts(db, "analysis", run.raw_item),
-            knowledge_snapshot=_knowledge_rule_snapshot(
-                db, "analysis", run.raw_item
-            ),
+            rules=rules,
+            knowledge_snapshot=knowledge_snapshot,
         )
         _replace_pending_review(db, run=run, stage=ITEM_STAGE, proposal=proposal)
+        assert_execution_owned(db, execution_guard)
         db.commit()
     except Exception as exc:
-        _mark_failed(db, run, exc)
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
         raise
 
 
@@ -633,7 +713,12 @@ async def _build_item_proposal(
     }
 
 
-async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
+async def _generate_translation_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
     try:
         extraction_ids = _extraction_ids(run.context)
         media_extractions = list(
@@ -649,6 +734,8 @@ async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
         selected_rules = _knowledge_rule_snapshot(
             db, "translation", run.raw_item
         )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
         translation = await build_translation(
             run.raw_item,
             media_extractions=media_extractions,
@@ -682,8 +769,11 @@ async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
             }
             run.status = "running"
             run.current_stage = ITEM_STAGE
+            assert_execution_owned(db, execution_guard)
             db.commit()
-            await _generate_item_review(db, run)
+            await _generate_item_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
             return
         _replace_pending_review(
             db,
@@ -691,9 +781,10 @@ async def _generate_translation_review(db: Session, run: ProcessingRun) -> None:
             stage=TRANSLATION_STAGE,
             proposal=proposal,
         )
+        assert_execution_owned(db, execution_guard)
         db.commit()
     except Exception as exc:
-        _mark_failed(db, run, exc)
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
         raise
 
 
@@ -1028,7 +1119,13 @@ def _require_pending_review(review: ReviewTask) -> None:
         raise ValueError(f"review task cannot be resolved from status={review.status}")
 
 
-def _mark_failed(db: Session, run: ProcessingRun, exc: Exception) -> None:
+def _mark_failed(
+    db: Session,
+    run: ProcessingRun,
+    exc: Exception,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
     db.rollback()
     failed = db.get(ProcessingRun, run.id)
     if failed:
@@ -1036,4 +1133,5 @@ def _mark_failed(db: Session, run: ProcessingRun, exc: Exception) -> None:
         failed.outcome = "system_error"
         failed.error_message = str(exc)[:4000]
         failed.completed_at = datetime.now(UTC)
+        assert_execution_owned(db, execution_guard)
         db.commit()

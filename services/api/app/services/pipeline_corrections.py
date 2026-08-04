@@ -10,6 +10,10 @@ from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun
 from app.schemas.pipeline import PipelineCorrectionCreate
+from app.services.claims import (
+    unlink_item_claims_from_event,
+    withdraw_active_claims,
+)
 from app.services.event_aggregation import refresh_event_projection
 from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_publication import withdraw_raw_item_media
@@ -153,6 +157,11 @@ def _withdraw_event_membership(
         return None
     now = datetime.now(UTC)
     event = membership.event
+    unlink_item_claims_from_event(
+        db,
+        normalized_item_id=item.id,
+        event_id=event.id,
+    )
     membership.membership_status = "withdrawn"
     membership.withdrawn_at = now
     membership.withdrawal_reason = correction.reason
@@ -230,6 +239,7 @@ async def create_and_start_correction(
         item.publication_status = "withdrawn"
         item.withdrawn_at = datetime.now(UTC)
         item.withdrawal_reason = payload.reason
+        withdraw_active_claims(db, normalized_item_id=item.id)
         withdraw_raw_item_media(item.raw_item)
     correction.status = "running"
     correction.started_at = datetime.now(UTC)

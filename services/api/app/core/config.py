@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,6 +43,24 @@ class Settings(BaseSettings):
     collection_scheduler_heartbeat_seconds: int = 60
 
     model_config = SettingsConfigDict(env_file=("../../.env", ".env"), extra="ignore")
+
+    @model_validator(mode="after")
+    def validate_pipeline_lease_settings(self) -> "Settings":
+        if self.pipeline_worker_lease_seconds <= 0:
+            raise ValueError("pipeline_worker_lease_seconds must be greater than 0")
+        if self.pipeline_worker_heartbeat_seconds <= 0:
+            raise ValueError(
+                "pipeline_worker_heartbeat_seconds must be greater than 0"
+            )
+        if (
+            self.pipeline_worker_heartbeat_seconds
+            >= self.pipeline_worker_lease_seconds
+        ):
+            raise ValueError(
+                "pipeline_worker_heartbeat_seconds must be less than "
+                "pipeline_worker_lease_seconds"
+            )
+        return self
 
     @property
     def cors_origins(self) -> list[str]:

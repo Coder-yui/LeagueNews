@@ -1,9 +1,19 @@
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from dataclasses import dataclass
+
+from sqlalchemy import delete, exists, func, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.content_blocks import text_from_content_blocks
+from app.models.event import EventMessage
 from app.models.intelligence import Claim, EventClaim
 from app.models.normalized_item import NormalizedItem
+from app.models.raw_item import RawItem
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimBackfillReport:
+    claims_created: int
+    event_claims_created: int
 
 
 def extract_traceable_claim(db: Session, item: NormalizedItem) -> Claim:
@@ -77,3 +87,122 @@ def link_item_claims_to_event(
             db.add(
                 EventClaim(event_id=event_id, claim_id=claim_id, relation=relation)
             )
+
+
+def unlink_item_claims_from_event(
+    db: Session,
+    *,
+    normalized_item_id: int,
+    event_id: int,
+) -> None:
+    claim_ids = select(Claim.id).where(
+        Claim.normalized_item_id == normalized_item_id
+    )
+    db.execute(
+        delete(EventClaim).where(
+            EventClaim.event_id == event_id,
+            EventClaim.claim_id.in_(claim_ids),
+        )
+    )
+
+
+def withdraw_active_claims(
+    db: Session,
+    *,
+    normalized_item_id: int,
+) -> None:
+    for claim in db.scalars(
+        select(Claim).where(
+            Claim.normalized_item_id == normalized_item_id,
+            Claim.status == "active",
+        )
+    ):
+        claim.status = "withdrawn"
+
+
+def backfill_published_claims(
+    db: Session,
+    *,
+    limit: int = 500,
+    apply: bool = False,
+) -> ClaimBackfillReport:
+    """Create missing active Claims and membership links for published items."""
+    active_claim_exists = exists(
+        select(Claim.id).where(
+            Claim.normalized_item_id == NormalizedItem.id,
+            Claim.status == "active",
+        )
+    )
+    active_membership_has_unlinked_claim = exists(
+        select(EventMessage.event_id).where(
+            EventMessage.normalized_item_id == NormalizedItem.id,
+            EventMessage.membership_status == "active",
+            exists(
+                select(Claim.id).where(
+                    Claim.normalized_item_id == NormalizedItem.id,
+                    Claim.status == "active",
+                    ~exists(
+                        select(EventClaim.event_id).where(
+                            EventClaim.event_id == EventMessage.event_id,
+                            EventClaim.claim_id == Claim.id,
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+    items = list(
+        db.scalars(
+            select(NormalizedItem)
+            .where(
+                NormalizedItem.publication_status == "published",
+                (
+                    ~active_claim_exists
+                    | active_membership_has_unlinked_claim
+                ),
+            )
+            .options(
+                selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
+                selectinload(NormalizedItem.claims),
+            )
+            .order_by(NormalizedItem.id)
+            .limit(max(1, min(limit, 10_000)))
+        )
+    )
+    claims_created = 0
+    event_claims_created = 0
+    for item in items:
+        active_claims = [claim for claim in item.claims if claim.status == "active"]
+        active_memberships = list(
+            db.scalars(
+                select(EventMessage).where(
+                    EventMessage.normalized_item_id == item.id,
+                    EventMessage.membership_status == "active",
+                )
+            )
+        )
+        if not active_claims:
+            claims_created += 1
+            if apply:
+                active_claims = [extract_traceable_claim(db, item)]
+        for membership in active_memberships:
+            for claim in active_claims or [None]:
+                if claim is None:
+                    event_claims_created += 1
+                    continue
+                if db.get(EventClaim, (membership.event_id, claim.id)) is None:
+                    event_claims_created += 1
+                    if apply:
+                        db.add(
+                            EventClaim(
+                                event_id=membership.event_id,
+                                claim_id=claim.id,
+                                relation=membership.evidence_stance,
+                            )
+                        )
+        if apply:
+            db.flush()
+    return ClaimBackfillReport(
+        claims_created=claims_created,
+        event_claims_created=event_claims_created,
+    )

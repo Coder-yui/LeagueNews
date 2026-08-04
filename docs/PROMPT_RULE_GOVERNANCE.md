@@ -10,6 +10,8 @@ LLM Prompt 的名称、版本和 Schema 标识由 `app/prompts/registry.py` 登�
 max tokens、输入 hash、响应、usage、延迟、重试、finish reason 和可用的 commit SHA
 写入阶段 proposal，批准时进入不可变 checkpoint。Checkpoint 同时记录本次实际选择的
 KnowledgeRule 与 GlossaryTerm ID/version，不记录 API Key、Header 或 Cookie。
+所有生产 LLM operation 必须在 Registry 中显式注册；未注册名称会立即失败。实验性 operation
+仍可通过显式 opt-in 使用 `unregistered-v1`，生产调用不得静默降级。
 
 ## KnowledgeRule 生命周期
 
@@ -43,7 +45,9 @@ cd services/api
   --markdown-output /tmp/evaluation.md
 ```
 
-机器输出包含总体/分任务 exact match 和错误案例；Markdown 供人工审阅。管理员可以对明确
+机器输出包含总体/分任务 exact match 和错误案例；Markdown 供人工审阅。这里的少量 fixture
+只验证 evaluation runner、Schema 和已知工程回归，不代表真实 Prompt 质量，也不能替代带
+真实标注集的离线模型质量评估。管理员可以对明确
 选择的 Review ID 调用受保护的 `/api/v1/knowledge/evaluation-export`，得到原输入、原模型
 输出、纠正值和 Review provenance，并在离线完成真实标签。导出不会包含 Source payload、
 Cookie、Token 或请求 Header。规则或 Prompt 晋升前应保存 candidate 标识并运行回归比较。

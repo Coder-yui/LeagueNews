@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.core.config import settings
 from app.models.event import Event
 from app.models.intelligence import Claim, Digest, EventClaim
+from app.models.normalized_item import NormalizedItem
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-11-25"
@@ -70,12 +71,20 @@ def _call_tool(db: Session, name: str, arguments: dict[str, Any]) -> object:
             raise ValueError("event not found")
         payload = _detail_payload(event)
         if name == "get_event_timeline":
-            claims = db.scalars(
-                select(Claim)
+            claims = db.execute(
+                select(Claim, EventClaim.relation)
                 .join(EventClaim, EventClaim.claim_id == Claim.id)
-                .where(EventClaim.event_id == event_id, Claim.status == "active")
+                .join(
+                    NormalizedItem,
+                    NormalizedItem.id == Claim.normalized_item_id,
+                )
+                .where(
+                    EventClaim.event_id == event_id,
+                    Claim.status == "active",
+                    NormalizedItem.publication_status == "published",
+                )
                 .order_by(Claim.effective_at, Claim.id)
-            )
+            ).all()
             payload["claims"] = [
                 {
                     "id": claim.id,
@@ -86,8 +95,9 @@ def _call_tool(db: Session, name: str, arguments: dict[str, Any]) -> object:
                     "evidence": claim.evidence,
                     "normalized_item_id": claim.normalized_item_id,
                     "provenance": claim.provenance,
+                    "event_relation": relation,
                 }
-                for claim in claims
+                for claim, relation in claims
             ]
         return payload
     if name == "search_events":

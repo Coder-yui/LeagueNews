@@ -132,10 +132,12 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u http
 ## Final verification record
 
 - Ruff: passed.
-- Backend SQLite/fixture suite: 148 passed; 2 PostgreSQL-only tests skipped in that invocation.
-- PostgreSQL concurrency suite: 2 passed (event revision/membership and worker/manual-auto coordination).
+- Backend suite: 167 passed with a disposable PostgreSQL URL configured.
+- PostgreSQL concurrency suite: 3 passed (event revision/membership, worker/manual-auto coordination, and
+  stale-worker fencing after lease reclaim).
 - Fresh PostgreSQL initialization: passed with all 36 migration versions (002–037) recorded.
 - PostgreSQL 031 fixture upgrade: migrations 032–037 applied successfully in order.
 - Frontend ESLint and Next.js production build: passed.
 - Production Compose render and Caddy config validation: passed.
-- Offline evaluation runner: 3/3 explicit regression fixtures matched.
+- Offline evaluation runner regression: 3/3 synthetic fixtures matched; this validates the runner only and
+  is not a real Prompt quality evaluation.

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -6,8 +7,10 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 import app.services.pipeline_corrections as correction_service
+from app.api.routes.mcp import _call_tool
 from app.core.database import Base
-from app.models.event import EventAggregationRun, EventMessage, EventReviewTask
+from app.models.event import Event, EventAggregationRun, EventMessage, EventReviewTask
+from app.models.intelligence import EventClaim
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
@@ -16,10 +19,17 @@ from app.models.workflow import ProcessingRun, ReviewTask
 from app.schemas.pipeline import PipelineCorrectionCreate
 from app.services.automatic_pipeline import (
     _claim_next_job,
+    _heartbeat_job,
     enqueue_pipeline_job,
     execute_pipeline_job,
 )
 from app.services.event_aggregation import create_event
+from app.services.event_aggregation import add_message_to_event
+from app.services.claims import extract_traceable_claim
+from app.services.pipeline_execution import (
+    PipelineExecutionGuard,
+    PipelineLeaseLost,
+)
 
 
 @pytest.fixture
@@ -30,8 +40,12 @@ def db() -> Session:
         yield session
 
 
-def _published_item(db: Session) -> NormalizedItem:
-    source = Source(name="Correction Source", connector_type="manual")
+def _published_item(
+    db: Session,
+    *,
+    suffix: str = "",
+) -> NormalizedItem:
+    source = Source(name=f"Correction Source{suffix}", connector_type="manual")
     db.add(source)
     db.flush()
     raw = RawItem(
@@ -69,6 +83,8 @@ async def test_event_only_correction_withdraws_membership_but_keeps_message_publ
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = _published_item(db)
+    claim = extract_traceable_claim(db, item)
+    db.commit()
     event = create_event(
         db,
         normalized_item_id=item.id,
@@ -76,6 +92,21 @@ async def test_event_only_correction_withdraws_membership_but_keeps_message_publ
         summary="Existing event summary",
         category="news",
     )
+    other_event = Event(
+        title="Other event",
+        summary="The claim is independently relevant here.",
+        category="news",
+    )
+    db.add(other_event)
+    db.flush()
+    db.add(
+        EventClaim(
+            event_id=other_event.id,
+            claim_id=claim.id,
+            relation="context",
+        )
+    )
+    db.commit()
     started: dict[str, object] = {}
 
     async def fake_start_event(_db: Session, started_item: NormalizedItem, **kwargs: object):
@@ -103,6 +134,9 @@ async def test_event_only_correction_withdraws_membership_but_keeps_message_publ
     assert membership.membership_status == "withdrawn"
     assert membership.source_correction_id == correction.id
     assert event.status == "withdrawn"
+    assert claim.status == "active"
+    assert db.get(EventClaim, (event.id, claim.id)) is None
+    assert db.get(EventClaim, (other_event.id, claim.id)) is not None
     assert started == {
         "item_id": item.id,
         "supersedes_run_id": None,
@@ -156,6 +190,58 @@ async def test_translation_correction_hides_message_and_restores_context(
     assert started["correction_id"] == correction.id
 
 
+@pytest.mark.anyio
+async def test_failed_non_event_correction_keeps_membership_and_claim_projection_consistent(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _published_item(db)
+    target_claim = extract_traceable_claim(db, target)
+    survivor = _published_item(db, suffix=" survivor")
+    survivor_claim = extract_traceable_claim(db, survivor)
+    db.commit()
+    event = create_event(
+        db,
+        normalized_item_id=target.id,
+        title="Correction event",
+        summary="Two members keep the event visible.",
+        category="news",
+    )
+    add_message_to_event(
+        db,
+        event_id=event.id,
+        normalized_item_id=survivor.id,
+    )
+
+    async def fail_start(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("controlled restart failure")
+
+    monkeypatch.setattr(correction_service, "start_item_processing", fail_start)
+
+    with pytest.raises(RuntimeError, match="controlled restart failure"):
+        await correction_service.create_and_start_correction(
+            db,
+            item=target,
+            payload=PipelineCorrectionCreate(
+                restart_from_stage="relevance",
+                resume_mode="manual",
+                reason="事实需要重跑",
+            ),
+        )
+
+    db.refresh(target)
+    db.refresh(target_claim)
+    assert target.publication_status == "withdrawn"
+    assert target_claim.status == "withdrawn"
+    assert db.get(EventClaim, (event.id, target_claim.id)) is None
+    assert db.get(EventClaim, (event.id, survivor_claim.id)) is not None
+    timeline = _call_tool(db, "get_event_timeline", {"event_id": event.id})
+    assert {
+        claim_payload["normalized_item_id"]
+        for claim_payload in timeline["claims"]
+    } == {survivor.id}
+
+
 def test_pipeline_job_enqueue_is_idempotent_per_active_raw_item(db: Session) -> None:
     item = _published_item(db)
     first = enqueue_pipeline_job(db, raw_item_id=item.raw_item_id)
@@ -192,6 +278,39 @@ def test_pipeline_job_stale_lease_is_reclaimed_with_provenance(
     assert recovered.attempts == 2
     assert recovered.recovery_count == 1
     assert recovered.recovery_provenance[-1]["previous_worker_id"] == "worker-a"
+
+    stale_guard = PipelineExecutionGuard(
+        job_id=recovered.id,
+        lease_token=first_token,
+        lease_lost=asyncio.Event(),
+    )
+    with pytest.raises(PipelineLeaseLost):
+        stale_guard.assert_owned(db)
+    db.rollback()
+    db.refresh(recovered)
+    assert recovered.worker_id == "worker-b"
+    assert recovered.status == "running"
+
+
+@pytest.mark.anyio
+async def test_heartbeat_notifies_execution_when_lease_token_is_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_lost = asyncio.Event()
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.services.automatic_pipeline.asyncio.sleep",
+        no_wait,
+    )
+    monkeypatch.setattr(
+        "app.services.automatic_pipeline._renew_job_lease",
+        lambda _job_id, _lease_token: False,
+    )
+    await _heartbeat_job(1, "stale-token", lease_lost)
+    assert lease_lost.is_set()
 
 
 @pytest.mark.anyio

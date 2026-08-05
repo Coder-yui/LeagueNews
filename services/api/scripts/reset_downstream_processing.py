@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 from app.core.database import engine
+from app.models.credibility import SourceReliabilityHistory
 from app.models.event import Event, EventAggregationRun
 from app.models.intelligence import Claim, Digest
 from app.models.media_extraction import MediaExtraction
@@ -29,11 +30,31 @@ def _counts(db: Session) -> dict[str, int]:
         Claim,
         Digest,
         KnowledgeRule,
+        SourceReliabilityHistory,
     )
     return {
         model.__tablename__: int(db.scalar(select(func.count()).select_from(model)) or 0)
         for model in models
     }
+
+
+def _validate_target(
+    *,
+    database_name: str | None,
+    raw_item_count: int,
+    expected_database: str,
+    expected_raw_items: int,
+) -> None:
+    if database_name != expected_database:
+        raise RuntimeError(
+            f"refusing reset: database is {database_name!r}, "
+            f"expected {expected_database!r}"
+        )
+    if raw_item_count != expected_raw_items:
+        raise RuntimeError(
+            f"refusing reset: raw_items={raw_item_count}, "
+            f"expected {expected_raw_items}"
+        )
 
 
 def main() -> None:
@@ -49,9 +70,26 @@ def main() -> None:
         choices=["delete-derived-data"],
         help="required together with --apply",
     )
+    parser.add_argument(
+        "--expected-database",
+        default="lol_daily_intel",
+        help="hard safety check before destructive execution",
+    )
+    parser.add_argument(
+        "--expected-raw-items",
+        type=int,
+        default=609,
+        help="hard safety check before destructive execution",
+    )
     args = parser.parse_args()
     with Session(engine) as db:
-        print({"before": _counts(db)})
+        before = _counts(db)
+        print(
+            {
+                "database": engine.url.database,
+                "before": before,
+            }
+        )
         if not args.apply:
             print(
                 "Dry run only. Use --apply --confirm delete-derived-data "
@@ -60,6 +98,12 @@ def main() -> None:
             return
         if args.confirm != "delete-derived-data":
             raise RuntimeError("--apply requires --confirm delete-derived-data")
+        _validate_target(
+            database_name=engine.url.database,
+            raw_item_count=before["raw_items"],
+            expected_database=args.expected_database,
+            expected_raw_items=args.expected_raw_items,
+        )
         # OCR profiles are reusable configuration and are intentionally kept.
         # A profile may reference the test run it was promoted from, so use
         # DELETE and let ON DELETE SET NULL clear that provenance pointer.
@@ -79,6 +123,7 @@ def main() -> None:
                     events,
                     normalized_item_media_extractions,
                     normalized_item_revisions,
+                    source_reliability_history,
                     pipeline_jobs,
                     processing_checkpoints,
                     pipeline_corrections,

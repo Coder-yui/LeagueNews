@@ -1,4 +1,6 @@
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
@@ -112,6 +114,41 @@ def test_roster_cap_and_redemption_code_actionability_are_deterministic() -> Non
         content="输入兑换码 CC-CLASS-ANNIE-T0123 可免费领取图标。",
     )
     assert redemption_calculation["scores"]["actionability"] == 4
+
+
+def test_real_data_importance_anchor_set_stays_calibrated() -> None:
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "importance_anchors.json"
+    )
+    anchors = json.loads(fixture.read_text(encoding="utf-8"))
+    assert len(anchors) == 20
+
+    # P3 baseline: labels are the reasonable event importance values currently
+    # stored for these rows in the 609-item local corpus. They are placeholders
+    # for a later editorial relabeling pass, but still catch scoring drift now.
+    errors = []
+    for anchor in anchors:
+        dimensions = {
+            name: {
+                "score": score,
+                "evidence": f"golden anchor raw_item={anchor['raw_item_id']}",
+            }
+            for name, score in zip(
+                DIMENSIONS,
+                anchor["dimension_scores"],
+                strict=True,
+            )
+        }
+        score, _ = calculate_importance(
+            dimensions,
+            primary_topic=anchor["topic"],
+        )
+        errors.append(abs(score - anchor["labeled_importance"]))
+
+    assert max(errors) <= 0.06
+    assert sum(errors) / len(errors) <= 0.025
 
 
 def test_claim_traces_to_raw_block_and_can_feed_multiple_events(db: Session) -> None:

@@ -19,7 +19,11 @@ from app.schemas.event_workflow import (
     EventMembershipDraft,
     EventReviewRejection,
 )
-from app.services.event_aggregation import add_message_to_event, create_event
+from app.services.event_aggregation import (
+    add_message_to_event,
+    create_event,
+    expire_stale_unconfirmed_events,
+)
 from app.services.event_candidates import (
     aggregation_routes,
     event_aggregation_policy,
@@ -164,6 +168,7 @@ async def _generate_review(
     execution_guard: PipelineExecutionGuard | None = None,
 ) -> None:
     item = run.normalized_item
+    expire_stale_unconfirmed_events(db, commit=False)
     correction = (
         db.get(PipelineCorrection, run.correction_id)
         if run.correction_id

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from math import prod
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,6 +23,8 @@ _MATCH_LIFECYCLE_RANK = {
     "live": 1,
     "completed": 2,
 }
+RUMOR_EXPIRY_DAYS = 14
+RUMOR_DECAY_HALF_LIFE_DAYS = 14
 
 
 class EventAggregationError(RuntimeError):
@@ -309,6 +312,91 @@ def _refresh_event_importance(db: Session, event: Event) -> None:
         f"corroboration_boost={corroboration_boost:.2f}",
         f"topic_cap={topic_cap:.2f}",
     ]
+
+
+def expire_stale_unconfirmed_events(
+    db: Session,
+    *,
+    as_of: datetime | None = None,
+    expiry_days: int = RUMOR_EXPIRY_DAYS,
+    half_life_days: int = RUMOR_DECAY_HALF_LIFE_DAYS,
+    commit: bool = True,
+) -> list[int]:
+    """Expire unconfirmed timelines and deterministically decay credibility."""
+    if expiry_days < 1:
+        raise ValueError("expiry_days must be positive")
+    if half_life_days < 1:
+        raise ValueError("half_life_days must be positive")
+    reference = as_of or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    else:
+        reference = reference.astimezone(UTC)
+
+    affected_ids: list[int] = []
+    events = list(
+        db.scalars(
+            select(Event).where(
+                Event.status == "active",
+                Event.event_type.in_(TIMELINE_EVENT_TYPES),
+                Event.lifecycle_status.in_(
+                    ["unconfirmed", "expired_unconfirmed"]
+                ),
+                Event.official_source_count == 0,
+            )
+        )
+    )
+    for event in events:
+        latest = event.last_published_at or event.created_at
+        if latest is None:
+            continue
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=UTC)
+        else:
+            latest = latest.astimezone(UTC)
+        age_days = max(0.0, (reference - latest).total_seconds() / 86_400)
+        overdue_days = age_days - expiry_days
+        if overdue_days <= 0:
+            continue
+
+        was_expired = event.lifecycle_status == "expired_unconfirmed"
+        _refresh_editorial_metrics(db, event)
+        if event.official_source_count:
+            continue
+        decay_factor = 0.5 ** (overdue_days / half_life_days)
+        event.credibility_score = round(
+            event.credibility_score * decay_factor,
+            6,
+        )
+        event.credibility_status = "expired_unconfirmed"
+        event.lifecycle_status = "expired_unconfirmed"
+        event.latest_development = (
+            f"超过 {expiry_days} 天无官方确认或新证据，传闻已过期"
+        )
+        if not was_expired:
+            event.current_revision += 1
+            db.add(
+                EventRevision(
+                    event_id=event.id,
+                    revision=event.current_revision,
+                    title=event.title,
+                    summary=event.summary,
+                    change_note="传闻超时：expired_unconfirmed",
+                    evidence_snapshot={
+                        "action": "expire_unconfirmed",
+                        "as_of": reference.isoformat(),
+                        "age_days": round(age_days, 4),
+                        "expiry_days": expiry_days,
+                        "half_life_days": half_life_days,
+                        "decay_factor": round(decay_factor, 6),
+                    },
+                )
+            )
+        affected_ids.append(event.id)
+
+    if commit and affected_ids:
+        db.commit()
+    return affected_ids
 
 
 def refresh_event_projection(db: Session, event: Event) -> None:

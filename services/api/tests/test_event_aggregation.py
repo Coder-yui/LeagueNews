@@ -18,6 +18,7 @@ from app.models.source import Source
 from app.services.event_aggregation import (
     add_message_to_event,
     create_event,
+    expire_stale_unconfirmed_events,
 )
 from app.services.claims import extract_traceable_claim
 
@@ -708,3 +709,55 @@ def test_event_importance_uses_member_base_and_event_type_cap() -> None:
         assert daily.importance_score == 0.9
         assert event.importance_score == 0.75
         assert event.current_revision == 1
+
+
+def test_unconfirmed_timeline_expires_and_decays_idempotently() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Rumor Source", connector_type="weibo")
+        db.add(source)
+        db.commit()
+        rumor = _add_normalized_item(
+            db,
+            source=source,
+            external_id="stale-rumor",
+            title="传闻：WBG 正在考虑新的打野候选",
+            published_at=datetime(2026, 7, 1, tzinfo=UTC),
+            credibility="unverified",
+            credibility_score=0.6,
+        )
+        event = create_event(
+            db,
+            normalized_item_id=rumor.id,
+            aggregation_key="WBG:jungle:2026off",
+            title="WBG 打野转会",
+            summary="WBG 正在考察打野候选。",
+            category="转会",
+            event_type="transfer_saga",
+            lifecycle_status="unconfirmed",
+            is_official_confirmation=False,
+        )
+
+        assert expire_stale_unconfirmed_events(
+            db,
+            as_of=datetime(2026, 7, 10, tzinfo=UTC),
+        ) == []
+        affected = expire_stale_unconfirmed_events(
+            db,
+            as_of=datetime(2026, 7, 29, tzinfo=UTC),
+        )
+        assert affected == [event.id]
+        assert event.lifecycle_status == "expired_unconfirmed"
+        assert event.credibility_status == "expired_unconfirmed"
+        assert event.credibility_score == pytest.approx(0.3)
+        assert event.current_revision == 2
+        assert event.revisions[-1].evidence_snapshot["decay_factor"] == 0.5
+
+        repeated = expire_stale_unconfirmed_events(
+            db,
+            as_of=datetime(2026, 7, 29, tzinfo=UTC),
+        )
+        assert repeated == [event.id]
+        assert event.credibility_score == pytest.approx(0.3)
+        assert event.current_revision == 2

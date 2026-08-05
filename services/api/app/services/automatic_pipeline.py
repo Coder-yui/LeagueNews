@@ -21,6 +21,7 @@ from app.services.pipeline_execution import (
     PipelineLeaseLost,
     assert_execution_owned,
 )
+from app.services.raw_item_versions import is_latest_normalized_item
 from app.workflows.event_aggregation import (
     approve_event_review,
     start_event_aggregation,
@@ -203,6 +204,10 @@ async def execute_pipeline_job(
     item = raw_item.normalized_item
     if item is None or item.publication_status != "published":
         raise RuntimeError("automatic item pipeline did not publish a normalized item")
+    if not is_latest_normalized_item(db, item):
+        # Historical raw revisions remain traceable normalized evidence, but only
+        # the latest revision may enter the current event projection.
+        return
 
     event_run = _active_event_run(db, item.id)
     if event_run is None:

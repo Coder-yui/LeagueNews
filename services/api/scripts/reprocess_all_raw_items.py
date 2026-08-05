@@ -155,6 +155,24 @@ def _enqueue(
     return dict(sorted(counters.items()))
 
 
+def _recover_running_jobs(raw_item_ids: list[int]) -> int:
+    recovered = 0
+    with SessionLocal() as db:
+        for job in _latest_jobs(db, raw_item_ids).values():
+            if job.status != "running":
+                continue
+            job.status = "queued"
+            job.worker_id = None
+            job.lease_token = None
+            job.heartbeat_at = None
+            job.lease_expires_at = None
+            job.error_message = None
+            job.completed_at = None
+            recovered += 1
+        db.commit()
+    return recovered
+
+
 async def _run_worker(
     raw_item_ids: list[int],
     *,
@@ -214,6 +232,14 @@ async def main() -> None:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument(
+        "--recover-running",
+        action="store_true",
+        help=(
+            "requeue running jobs immediately; use only after confirming every "
+            "previous worker has stopped"
+        ),
+    )
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--expected-database", default="lol_daily_intel")
     parser.add_argument("--expected-raw-items", type=int, default=609)
@@ -254,12 +280,18 @@ async def main() -> None:
         expected_raw_items=args.expected_raw_items,
         resume=args.resume,
     )
+    recovered = (
+        _recover_running_jobs(raw_item_ids)
+        if args.recover_running
+        else 0
+    )
     enqueue_result = _enqueue(
         raw_item_ids,
         retry_failed=args.retry_failed,
     )
     print(
         {
+            "recovered_running": recovered,
             "enqueue": enqueue_result,
             "initial_status": _batch_status(raw_item_ids),
         },

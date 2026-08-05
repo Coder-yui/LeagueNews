@@ -360,6 +360,38 @@ async def test_automatic_job_accepts_relevance_and_records_checkpoint(
 
 
 @pytest.mark.anyio
+async def test_automatic_job_skips_event_projection_for_superseded_revision(
+    db: Session,
+) -> None:
+    item = _published_item(db, suffix=" superseded")
+    successor = RawItem(
+        source_id=item.raw_item.source_id,
+        native_title="Successor revision",
+        content_blocks=[
+            {"type": "paragraph", "text": "Successor revision"}
+        ],
+        published_at=datetime(2026, 7, 28, tzinfo=UTC),
+        revision=2,
+        supersedes_raw_item_id=item.raw_item_id,
+    )
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="running",
+        current_stage="event_decision",
+    )
+    db.add_all([successor, job])
+    db.commit()
+
+    await execute_pipeline_job(db, job)
+
+    assert db.scalar(
+        select(EventAggregationRun).where(
+            EventAggregationRun.normalized_item_id == item.id
+        )
+    ) is None
+
+
+@pytest.mark.anyio
 async def test_automatic_job_completes_not_event_decision(db: Session) -> None:
     item = _published_item(db)
     event_run = EventAggregationRun(

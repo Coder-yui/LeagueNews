@@ -635,6 +635,23 @@ def test_analysis_assembles_only_approved_stage_outputs() -> None:
                     ),
                     "importance_calculation": {"final_score": 0.8},
                 },
+                claim_proposal={
+                    "fact_claims": [
+                        {
+                            "subject": "厄斐琉斯",
+                            "predicate": "buffs",
+                            "object": "攻击力",
+                            "qualifiers": {},
+                            "temporal_role": "prediction",
+                            "supersedes_hint": None,
+                        }
+                    ],
+                    "attribution": {
+                        "speaker": "拳头游戏",
+                        "source_type": "official",
+                        "scope": "版本预览",
+                    },
+                },
             )
         )
 
@@ -645,6 +662,7 @@ def test_analysis_assembles_only_approved_stage_outputs() -> None:
     assert proposal["credibility_score"] == 0.52
     assert proposal["content_type"] == "official_notice"
     assert proposal["primary_topic"] == "patch"
+    assert proposal["fact_claims"][0]["predicate"] == "buffs"
 
 
 def test_source_authority_uses_sixty_for_tieba_and_one_hundred_for_official() -> None:

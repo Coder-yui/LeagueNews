@@ -14,9 +14,14 @@ from app.models.event import (
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.workflow import KnowledgeRule
-from app.schemas.event_workflow import EventDecisionDraft, EventReviewRejection
+from app.schemas.event_workflow import (
+    EventDecisionDraft,
+    EventMembershipDraft,
+    EventReviewRejection,
+)
 from app.services.event_aggregation import add_message_to_event, create_event
 from app.services.event_candidates import (
+    aggregation_routes,
     event_aggregation_policy,
     find_event_candidates,
     stable_event_key,
@@ -191,6 +196,20 @@ async def _generate_review(
         "category": item.category,
         "entities": item.entities,
         "content_type": item.content_type,
+        "topic": item.primary_topic,
+        "entity_roles": item.facets.get("entity_roles", []),
+        "fact_claims": [
+            {
+                "claim_id": claim.id,
+                "subject": claim.subject,
+                "predicate": claim.predicate,
+                "object": claim.object_value,
+                "temporal_role": claim.temporal_role,
+                "attribution": claim.attribution,
+            }
+            for claim in item.claims
+            if claim.status == "active"
+        ],
         "importance_score": item.importance_score,
         "credibility": item.credibility,
         "credibility_score": item.credibility_score,
@@ -201,6 +220,9 @@ async def _generate_review(
             db, item
         ),
         "event_policy": event_aggregation_policy(item),
+        "event_routes": [
+            asdict(route) for route in aggregation_routes(item)
+        ],
         "source": {
             "source_id": item.raw_item.source_id,
             "source_name": item.raw_item.source.name,
@@ -223,6 +245,9 @@ async def _generate_review(
         candidates=candidate_payloads,
         stable_event_key=stable_event_key(item),
         knowledge_rules=rules,
+        route_aggregation_keys=[
+            route.aggregation_key for route in aggregation_routes(item)
+        ],
     )
     run.candidate_snapshot = candidate_payloads
     run.decision_draft = {
@@ -273,68 +298,88 @@ def approve_event_review(
     }
     now = datetime.now(UTC)
 
-    if decision.decision == "create":
-        item = run.normalized_item
-        is_official_confirmation = _official_confirmation(item, decision)
-        create_event(
+    item = run.normalized_item
+    created_count = 0
+    updated_count = 0
+    affected_event_ids = []
+    for membership in decision.memberships:
+        existing_event_id = membership.existing_event_id
+        if existing_event_id is None:
+            event = create_event(
+                db,
+                normalized_item_id=run.normalized_item_id,
+                aggregation_key=membership.aggregation_key,
+                title=membership.timeline_note
+                or item.translated_title
+                or item.normalized_title,
+                summary=item.summary,
+                category=item.category,
+                event_type=membership.event_type,
+                lifecycle_status=membership.lifecycle_status or "developing",
+                membership_role=membership.membership_role,
+                evidence_stance=membership.evidence_stance,
+                independence_key=f"source:{item.raw_item.source_id}",
+                is_official_confirmation=_official_confirmation(
+                    item, membership
+                ),
+                importance_score=item.importance_score,
+                importance_evidence=[
+                    f"由成员消息 {item.id} 的五维重要性初始化"
+                ],
+                latest_development=membership.timeline_note,
+                change_note=f"创建时间线节点：{membership.timeline_note}",
+                evidence={
+                    "event_run_id": run.id,
+                    "timeline_note": membership.timeline_note,
+                },
+                commit=False,
+            )
+            affected_event_ids.append(event.id)
+            created_count += 1
+            continue
+        if existing_event_id not in candidate_ids:
+            raise ValueError(
+                "decision references an event outside the candidate snapshot"
+            )
+        event, added = add_message_to_event(
             db,
+            event_id=existing_event_id,
             normalized_item_id=run.normalized_item_id,
-            event_key=decision.event_key,
-            title=decision.title or "",
-            summary=decision.summary or "",
-            category=decision.category or "",
-            event_type=decision.event_type,
-            lifecycle_status=decision.lifecycle_status or "developing",
-            evidence_stance=decision.evidence_stance,
+            lifecycle_status=membership.lifecycle_status,
+            membership_role=membership.membership_role,
+            evidence_stance=membership.evidence_stance,
             independence_key=f"source:{item.raw_item.source_id}",
-            is_official_confirmation=is_official_confirmation,
-            importance_score=(
-                item.importance_score
-                if decision.importance_score is None
-                else decision.importance_score
-            ),
-            importance_evidence=decision.importance_evidence,
-            latest_development=decision.latest_development,
-            change_note=decision.change_note or "人工批准创建事件",
-            evidence={"event_run_id": run.id, "new_facts": decision.new_facts},
-            commit=False,
-        )
-        run.outcome = "created"
-    elif decision.decision == "update":
-        if decision.candidate_event_id not in candidate_ids:
-            raise ValueError("decision references an event outside the candidate snapshot")
-        _, added = add_message_to_event(
-            db,
-            event_id=decision.candidate_event_id,
-            normalized_item_id=run.normalized_item_id,
-            title=decision.title,
-            summary=decision.summary,
-            lifecycle_status=decision.lifecycle_status,
-            evidence_stance=decision.evidence_stance,
-            independence_key=f"source:{run.normalized_item.raw_item.source_id}",
             is_official_confirmation=_official_confirmation(
-                run.normalized_item, decision
+                item, membership
             ),
-            is_significant_update=decision.update_kind not in {
+            is_significant_update=membership.update_kind not in {
                 "context",
                 "duplicate_evidence",
             },
-            importance_score=(
-                run.normalized_item.importance_score
-                if decision.importance_score is None
-                else decision.importance_score
-            ),
-            importance_evidence=decision.importance_evidence,
-            latest_development=decision.latest_development,
-            change_note=decision.change_note or "人工批准更新事件",
-            evidence={"event_run_id": run.id, "new_facts": decision.new_facts},
+            importance_score=item.importance_score,
+            importance_evidence=[
+                f"由成员消息 {item.id} 的五维重要性更新"
+            ],
+            latest_development=membership.timeline_note,
+            change_note=f"时间线节点：{membership.timeline_note}",
+            evidence={
+                "event_run_id": run.id,
+                "timeline_note": membership.timeline_note,
+            },
             commit=False,
         )
         if not added:
             raise ValueError("normalized item was already attached before approval")
-        run.outcome = "updated"
-    else:
+        affected_event_ids.append(event.id)
+        updated_count += 1
+    if not decision.memberships:
         run.outcome = "not_event"
+    elif created_count and updated_count:
+        run.outcome = "multi_membership"
+    elif created_count:
+        run.outcome = "created"
+    else:
+        run.outcome = "updated"
 
     review.status = "approved"
     db.add(
@@ -347,6 +392,7 @@ def approve_event_review(
             output_snapshot=dict(run.decision_draft),
             artifact_references={
                 "candidate_event_ids": sorted(candidate_ids),
+                "affected_event_ids": sorted(affected_event_ids),
                 "outcome": run.outcome,
                 "workflow_version": "event-aggregation-v2",
                 "policy_version": review.policy_version,
@@ -423,10 +469,10 @@ def _require_pending(review: EventReviewTask) -> None:
 
 def _official_confirmation(
     item: NormalizedItem,
-    decision: EventDecisionDraft,
+    membership: EventMembershipDraft,
 ) -> bool:
     return (
-        decision.official_confirmation
+        membership.is_official_confirmation
         and item.credibility == "official"
         and not has_quoted_post(item.raw_item.content_blocks)
     )

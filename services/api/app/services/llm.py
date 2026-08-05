@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from app.core.config import settings
 from app.prompts import prompt_registry
 from app.prompts.registry import (
+    CLAIM_GENERATION_OPERATION,
     CLASSIFICATION_OPERATION,
     EVENT_AGGREGATION_OPERATION,
     FACT_EXTRACTION_OPERATION,
@@ -98,6 +99,47 @@ class ClassificationResult(BaseModel):
     ] = Field(default_factory=list, max_length=2)
     entity_roles: list[ClassifiedEntityRole] = Field(default_factory=list)
     temporal: ClassificationTemporal
+
+
+class FactClaimDraft(BaseModel):
+    subject: dict[str, object]
+    predicate: Literal[
+        "transfers_to",
+        "considered_for",
+        "leaves",
+        "stays",
+        "retires",
+        "releases",
+        "goes_live",
+        "previews",
+        "delays",
+        "patches",
+        "buffs",
+        "nerfs",
+        "reworks",
+        "adds_mode",
+        "wins",
+        "loses",
+        "advances",
+        "eliminated",
+        "rotates",
+        "discounts",
+        "gifts",
+    ]
+    object: dict[str, object]
+    temporal_role: Literal["state", "event", "prediction"]
+    supersedes_hint: str | None = None
+
+
+class ClaimAttributionDraft(BaseModel):
+    claimed_by: str = Field(min_length=1)
+    stance: Literal["asserts", "confirms", "refutes", "contextualizes"]
+    certainty: Literal["confirmed", "likely", "speculative"]
+
+
+class ClaimGenerationResult(BaseModel):
+    fact_claims: list[FactClaimDraft] = Field(default_factory=list, max_length=20)
+    attribution: ClaimAttributionDraft
 
 
 class ImportanceDimension(BaseModel):
@@ -357,6 +399,66 @@ content_type 枚举与判定规则：
             operation=IMPORTANCE_SCORING_OPERATION,
         )
 
+    async def generate_claims(
+        self,
+        *,
+        content: str,
+        extracted_facts: dict[str, object],
+        classification: dict[str, object],
+        source_context: dict[str, object],
+    ) -> ClaimGenerationResult:
+        prompt = """你是英雄联盟事实断言抽取器。把消息拆成"可独立验证的原子事实断言"，
+每条断言是一个可能随时间被确认或推翻的陈述。
+
+输出严格 JSON：
+{
+  "fact_claims": [
+    {
+      "subject": {"name": 事实主体, "type": 实体类型},
+      "predicate": 谓词(见下),
+      "object": {结构化宾语},
+      "temporal_role": "state|event|prediction",  // 现状/已发生/预测
+      "supersedes_hint": 若本条明显更新了某个更早断言,给出关键词
+    }
+  ],
+  "attribution": {
+    "claimed_by": 发布者,
+    "stance": "asserts|confirms|refutes|contextualizes",
+    "certainty": "confirmed|likely|speculative"
+  }
+}
+
+谓词规范（转会类必须能串成时间线）：
+- transfers_to / considered_for / leaves / stays / retires  (转会)
+- releases / goes_live / previews / delays                   (上线/预告)
+- patches / buffs / nerfs / reworks / adds_mode              (版本)
+- wins / loses / advances / eliminated                       (赛事)
+- rotates / discounts / gifts                                (商城/活动)
+
+要点：
+1. subject 是事实主体本身（选手、英雄、战队、商城），不是发布者。
+   发布者只进 attribution。
+2. 一条消息可产生多个 fact_claim（如官方更新公告同时含"修复经典模式皮肤"
+   和"修复客户端崩溃"两个断言）。
+3. considered_for 用于"考虑中"的候选（如 WBG 打野候选 Beichuan/蔻蔻），
+   transfers_to 用于已确定。爆料人说"考虑"就用 considered_for，
+   不要升格成 transfers_to。
+4. temporal_role: prediction 用于未发生的预告/传闻，event 用于已发生，
+   state 用于持续状态。这决定时间线上的节点样式。
+5. supersedes_hint 帮助下游把"传闻 A 候选 → 官宣 B 入队"串成同一时间线。"""
+        return await self._validated_json_completion(
+            prompt=prompt,
+            payload={
+                "content": content,
+                "extracted_facts": extracted_facts,
+                "classification": classification,
+                "source_context": source_context,
+            },
+            max_tokens=1800,
+            schema=ClaimGenerationResult,
+            operation=CLAIM_GENERATION_OPERATION,
+        )
+
     async def propose_event(
         self,
         *,
@@ -364,11 +466,15 @@ content_type 枚举与判定规则：
         candidates: list[dict[str, object]],
         stable_event_key: str | None,
         knowledge_rules: list[str],
+        route_aggregation_keys: list[str] | None = None,
     ) -> EventDecisionDraft:
         candidate_ids = {int(candidate["event_id"]) for candidate in candidates}
         candidates_by_id = {
             int(candidate["event_id"]): candidate for candidate in candidates
         }
+        allowed_new_keys = set(route_aggregation_keys or [])
+        if stable_event_key:
+            allowed_new_keys.add(stable_event_key)
         match_lifecycle_rank = {
             "scheduled": 0,
             "live": 1,
@@ -376,82 +482,71 @@ content_type 枚举与判定规则：
         }
 
         def validate_candidate(result: EventDecisionDraft) -> str | None:
-            if (
-                result.decision == "update"
-                and result.candidate_event_id not in candidate_ids
-            ):
-                return "update 只能引用输入候选中的 event_id"
-            if result.decision == "create" and result.event_key not in {
-                None,
-                stable_event_key,
-            }:
-                return "create 不能编造稳定事件键"
-            if result.decision == "create" and stable_event_key is not None:
+            for membership in result.memberships:
+                existing_event_id = membership.existing_event_id
+                if (
+                    existing_event_id is not None
+                    and existing_event_id not in candidate_ids
+                ):
+                    return "existing target 只能引用输入候选中的 event_id"
+                if (
+                    membership.target == "new"
+                    and allowed_new_keys
+                    and membership.aggregation_key not in allowed_new_keys
+                ):
+                    return "new membership 不能编造程序路由之外的 aggregation_key"
                 exact_candidate = next(
                     (
                         candidate
                         for candidate in candidates
-                        if candidate.get("event_key") == stable_event_key
+                        if candidate.get("aggregation_key")
+                        == membership.aggregation_key
                     ),
                     None,
                 )
-                if exact_candidate is not None:
+                if membership.target == "new" and exact_candidate is not None:
                     return (
-                        f"稳定事件键 {stable_event_key} 已对应候选事件 "
+                        f"聚合键 {membership.aggregation_key} 已对应候选事件 "
                         f"{exact_candidate['event_id']}，不能重复创建"
                     )
-            if result.decision == "update":
-                candidate = candidates_by_id.get(result.candidate_event_id or -1)
+                candidate = candidates_by_id.get(existing_event_id or -1)
                 if (
                     candidate is not None
-                    and result.event_type == "match"
-                    and candidate.get("event_type") == "match"
-                    and result.lifecycle_status in match_lifecycle_rank
+                    and membership.event_type
+                    in {"daily_matches", "major_match"}
+                    and candidate.get("event_type")
+                    in {"daily_matches", "major_match"}
+                    and membership.lifecycle_status in match_lifecycle_rank
                     and candidate.get("lifecycle_status") in match_lifecycle_rank
-                    and match_lifecycle_rank[result.lifecycle_status]
+                    and match_lifecycle_rank[membership.lifecycle_status]
                     < match_lifecycle_rank[
                         str(candidate["lifecycle_status"])
                     ]
                 ):
-                    result.lifecycle_status = str(candidate["lifecycle_status"])
-                    result.update_kind = "context"
-                    result.evidence_stance = "context"
-                    result.title = None
-                    result.summary = None
-                    result.category = None
-                    result.new_facts = []
+                    membership.lifecycle_status = str(
+                        candidate["lifecycle_status"]
+                    )
+                    membership.update_kind = "context"
+                    membership.evidence_stance = "context"
             policy = item.get("event_policy")
             if isinstance(policy, dict) and policy.get("policy_type") == (
                 "mythic_shop_rotation"
             ):
                 eligible = bool(policy.get("event_eligible"))
                 if eligible:
-                    result.event_type = str(
-                        policy.get("required_event_type") or "activity"
-                    )
-                    importance_range = policy.get("importance_range")
-                    if (
-                        isinstance(importance_range, list)
-                        and len(importance_range) == 2
-                    ):
-                        low = float(importance_range[0])
-                        high = float(importance_range[1])
-                        result.importance_score = (
-                            (low + high) / 2
-                            if result.importance_score is None
-                            else min(high, max(low, result.importance_score))
-                        )
-                    if (
-                        policy.get("cadence") == "daily"
-                        and result.decision == "update"
-                    ):
-                        result.update_kind = "context"
-                        result.evidence_stance = "context"
-                if not eligible and result.decision != "not_event":
-                    return "非国服神话商城轮换不进入事件层，decision 必须为 not_event"
-                if eligible and result.decision == "not_event":
-                    return "国服神话商城轮换必须形成或更新周轮换事件，不能是 not_event"
-            if result.decision == "create" and candidate_ids:
+                    if not result.memberships:
+                        return "国服神话商城轮换必须形成或更新 shop_rotation"
+                    for membership in result.memberships:
+                        membership.event_type = "shop_rotation"
+                        if policy.get("cadence") == "daily":
+                            membership.update_kind = "context"
+                            membership.evidence_stance = "context"
+                elif result.memberships:
+                    return "非国服神话商城轮换不进入事件层"
+            if any(
+                membership.target == "new"
+                for membership in result.memberships
+            ) and candidate_ids:
                 rejected_ids = {
                     rejection.event_id
                     for rejection in result.candidate_rejections
@@ -462,59 +557,68 @@ content_type 枚举与判定规则：
                 missing_ids = candidate_ids - rejected_ids
                 if missing_ids:
                     return (
-                        "存在候选时选择 create，必须在 candidate_rejections 中逐一说明"
+                        "存在候选时选择 new，必须在 candidate_rejections 中逐一说明"
                         f"为何不是同一事件；缺少 event_id={sorted(missing_ids)}"
                     )
             return None
 
-        prompt = (
-            "你是英雄联盟资讯事件聚合编辑。只根据当前已批准中文消息、程序给出的"
-            "最多五个候选事件和审核知识，提出结构化草稿。decision 只能是 "
-            "not_event、create、update。update 必须引用候选 event_id；create 只能使用"
-            "程序提供的 stable_event_key 或 null。不得生成 SQL，不得假设候选之外的事件。"
-            "title、summary、category、change_note 和 new_facts 使用简体中文。"
-            "事件是明确的现实状态变化，不是相似消息的文件夹。普通 LPL 常规赛结果也必须"
-            "形成 match 事件，但重要性通常保持 0.50 到 0.58；只有明确影响排名、晋级或淘汰"
-            "才提高。具体到选手、动作和目标战队的单源转会爆料应立即形成 transfer 事件，"
-            "lifecycle_status 使用 unconfirmed，标题必须带“传闻”或同等不确定性措辞。"
-            "LPL 普通常规赛按比赛日聚合：同一天的赛程预告、进行中、赛果和赛后集锦属于"
-            "同一个 match 事件。季后赛后程的半决赛、胜者组决赛、败者组决赛和总决赛才"
-            "按单场系列赛独立建事件。scheduled、live、completed 是同一事件的生命周期，"
-            "不是拆分事件的依据。晚采集到的较早赛程只能作为 context 加入已经 completed "
-            "的事件，不得回退生命周期、标题或摘要。"
-            "同一原始来源的转发不算多源。只有原始官方来源直接确认其权责范围内的核心事实时，"
-            "official_confirmation 才能为 true；官方账号转发他人内容不算官方确认。"
-            "update_kind=duplicate_evidence 或 context 时不得虚构新增事实；只有新增事实、确认、"
-            "否认、修正才是显著更新。官方否认使用 evidence_stance=contradicts、"
-            "update_kind=refutation、lifecycle_status=officially_refuted。"
-            "item.supersedes_raw_item_id 非空表示同一来源文档的新采集版本，不是第二个独立"
-            "消息或第二个来源。它应更新原版本所属事件；如果没有实质新事实，必须使用"
-            "update_kind=duplicate_evidence，不得增加事件 revision。"
-            "版本预览、完整预览、上线和热修复优先进入同一个 patch 主事件；新英雄、英雄重做"
-            "和核心玩法系统属于 major_gameplay_change，但当前每条消息只选择一个最主要事件。"
-            "候选包含 match_level=strong 的强身份候选和 match_level=broad 的宽召回候选。"
-            "对宽召回候选必须结合候选标题、摘要和 core_entities 判断：当前消息中的别名、"
-            "缩写、旧译名，以及礼包、皮肤、图标、封面、奖励、截图、测试服资源等附属对象，"
-            "如果明确依附于候选事件的主体，应 update 该事件而不是 create。仅有同类词、"
-            "相近日期或泛主题相似不能合并。附属素材没有改变事件核心状态时通常使用"
-            "update_kind=context，不增加 revision；只有形成可独立追踪的发布、销售或活动"
-            "事实时才考虑独立事件。只要存在候选却仍选择 create，必须通过"
-            "candidate_rejections 逐一引用每个候选 event_id 并说明不是同一事件的具体原因。"
-            "item.event_policy 是程序确定的领域约束，必须遵守。国服神话商城轮换按中国时区"
-            "ISO 周聚合为一个低重要性 activity 事件，周内每日轮换作为 context 加入同一事件，"
-            "不增加 revision，事件重要性保持 0.30-0.45。即使先处理每日消息，也应使用"
-            "stable_event_key 创建本周聚合事件。X 来源的神话商城轮换按国际服处理，"
-            "不进入本站国服轮换事件层，必须选择 not_event。"
-            "importance_score 评价事件影响，不因消息数量或官方身份加分；可信度与重要性独立。"
-            "latest_development 用一句话概括本次最新进展。"
-            "not_event 只用于没有明确事实变化的互动、二创、泛宣传或纯观点。只输出 JSON。"
-        )
+        prompt = """你是英雄联盟事件编辑。给定一条已分析消息（含 fact_claims、content_type、
+topic、entity_roles）和若干候选事件，决定这条消息如何归属。
+
+输入：
+- 当前消息：{title, summary, fact_claims, content_type, topic, entities, published_at}
+- 候选事件列表：每个含 {event_id, event_type, title, aggregation_key,
+  timeline节点摘要, lifecycle_status, 成员消息数}
+
+输出严格 JSON（一条消息可对多个事件产生 decision）：
+{
+  "memberships": [
+    {
+      "target": "existing:{event_id}" | "new",
+      "event_type": <见事件类型枚举>,
+      "aggregation_key": 该事件的聚合键,
+      "membership_role": "primary|component|cross_ref",
+      "evidence_stance": "supports|contradicts|context",
+      "update_kind": "new_fact|confirmation|refutation|correction|context|duplicate_evidence",
+      "lifecycle_status": <生命周期状态或null>,
+      "timeline_note": 这条消息在时间线上代表的节点（如"WBG考虑Beichuan等候选"),
+      "is_official_confirmation": bool
+    }
+  ],
+  "candidate_rejections": [{event_id, reason}]  // 当选择new但存在候选时必填
+}
+
+归属规则：
+1. 一条消息可同时归属多个事件。典型：官方大版本更新公告 → 以 primary 进入
+   patch_cycle 事件，其"经典模式"子事实以 component 进入 major_gameplay_change 事件。
+   仅当消息确实包含该事件的核心事实时才归属，不要因沾边就挂靠。
+
+2. 时间线型事件（transfer_saga/patch_cycle/release_saga）：
+   - 同一聚合键的新消息用 update，推进 lifecycle
+   - 转会：传闻阶段 lifecycle=unconfirmed 且标题含"传闻"；官方确认→confirmed，
+     update_kind=confirmation；官方否认→officially_refuted，update_kind=refutation
+   - 不要把同一转会的不同传闻拆成多个事件——只要聚合键(选手/位置)相同就是同一时间线
+
+3. 周期窗口型事件（shop_rotation/daily_matches）：
+   - 按 aggregation_key 的时间窗口归属：同一周的商城变动进同一事件，
+     同一天同一赛区的比赛进同一事件
+   - 跨窗口一律新建，不要跨周合并
+
+4. 单点型（major_match）：LPL/LCK总决赛、世界赛关键场单独成事件，
+   即使同一天也不并入 daily_matches
+
+5. is_official_confirmation=true 仅当官方账号在其职权内直接确认；
+   转发/转载不算。
+
+6. certainty=speculative 的爆料只能 supports 一个 unconfirmed 事件，
+   不能直接把事件推进到 confirmed。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
                 "item": item,
                 "candidates": candidates,
                 "stable_event_key": stable_event_key,
+                "route_aggregation_keys": route_aggregation_keys or [],
                 "approved_rules": knowledge_rules,
             },
             max_tokens=1800,

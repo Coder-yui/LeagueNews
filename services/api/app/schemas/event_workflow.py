@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CandidateRejection(BaseModel):
@@ -9,27 +9,35 @@ class CandidateRejection(BaseModel):
     reason: str = Field(min_length=1)
 
 
-class EventDecisionDraft(BaseModel):
-    decision: Literal["not_event", "create", "update"]
-    reason: str = Field(min_length=1)
-    candidate_event_id: int | None = None
-    candidate_rejections: list[CandidateRejection] = Field(
-        default_factory=list,
-        max_length=5,
-    )
-    event_key: str | None = Field(default=None, max_length=160)
+class EventMembershipDraft(BaseModel):
+    target: str = Field(min_length=1, max_length=80)
     event_type: Literal[
-        "patch",
+        "transfer_saga",
+        "patch_cycle",
+        "release_saga",
+        "shop_rotation",
+        "daily_matches",
+        "tft_patch",
+        "sr_patch",
+        "major_match",
         "major_gameplay_change",
-        "match",
-        "transfer",
-        "roster",
-        "release",
-        "activity",
+        "dev_preview",
         "incident",
-        "tournament",
+        "activity",
+        "qualification_saga",
         "other",
     ] = "other"
+    aggregation_key: str = Field(min_length=1, max_length=255)
+    membership_role: Literal["primary", "component", "cross_ref"] = "primary"
+    evidence_stance: Literal["supports", "contradicts", "context"] = "supports"
+    update_kind: Literal[
+        "new_fact",
+        "confirmation",
+        "refutation",
+        "correction",
+        "context",
+        "duplicate_evidence",
+    ] = "new_fact"
     lifecycle_status: Literal[
         "scheduled",
         "live",
@@ -42,37 +50,58 @@ class EventDecisionDraft(BaseModel):
         "expired_unconfirmed",
         "officially_refuted",
     ] | None = None
-    evidence_stance: Literal["supports", "contradicts", "context"] = "supports"
-    update_kind: Literal[
-        "new_fact",
-        "confirmation",
-        "refutation",
-        "correction",
-        "context",
-        "duplicate_evidence",
-    ] = "new_fact"
-    official_confirmation: bool = False
-    title: str | None = Field(default=None, max_length=500)
-    summary: str | None = None
-    category: str | None = Field(default=None, max_length=60)
-    change_note: str | None = None
-    new_facts: list[str] = Field(default_factory=list)
-    latest_development: str | None = None
-    importance_score: float | None = Field(default=None, ge=0, le=1)
-    importance_evidence: list[str] = Field(default_factory=list, max_length=4)
+    timeline_note: str = Field(min_length=1)
+    is_official_confirmation: bool = False
+
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, value: str) -> str:
+        if value == "new":
+            return value
+        if not value.startswith("existing:"):
+            raise ValueError("target must be new or existing:{event_id}")
+        try:
+            event_id = int(value.split(":", 1)[1])
+        except ValueError as exc:
+            raise ValueError("existing target requires an integer event_id") from exc
+        if event_id < 1:
+            raise ValueError("existing target requires a positive event_id")
+        return value
+
+    @property
+    def existing_event_id(self) -> int | None:
+        return (
+            int(self.target.split(":", 1)[1])
+            if self.target.startswith("existing:")
+            else None
+        )
+
+
+class EventDecisionDraft(BaseModel):
+    memberships: list[EventMembershipDraft] = Field(
+        default_factory=list,
+        max_length=4,
+    )
+    candidate_rejections: list[CandidateRejection] = Field(
+        default_factory=list,
+        max_length=8,
+    )
 
     @model_validator(mode="after")
-    def validate_decision_fields(self) -> "EventDecisionDraft":
-        if self.decision == "not_event":
-            if self.candidate_event_id is not None:
-                raise ValueError("not_event cannot reference a candidate event")
-        elif self.decision == "create":
-            if self.candidate_event_id is not None:
-                raise ValueError("create cannot reference a candidate event")
-            if not self.title or not self.summary or not self.category:
-                raise ValueError("create requires title, summary and category")
-        elif self.candidate_event_id is None:
-            raise ValueError("update requires candidate_event_id")
+    def validate_memberships(self) -> "EventDecisionDraft":
+        identities = [
+            (membership.target, membership.aggregation_key)
+            for membership in self.memberships
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("memberships cannot contain duplicate targets and keys")
+        existing_targets = [
+            membership.target
+            for membership in self.memberships
+            if membership.existing_event_id is not None
+        ]
+        if len(existing_targets) != len(set(existing_targets)):
+            raise ValueError("memberships cannot repeat an existing event target")
         return self
 
 

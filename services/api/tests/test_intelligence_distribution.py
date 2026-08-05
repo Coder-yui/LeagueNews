@@ -15,15 +15,17 @@ from app.core.database import get_db
 from app.domain.importance import DIMENSIONS, calculate_importance
 from app.domain.ontology import normalize_entities, topic_from_category
 from app.models.event import Event, EventRevision
+from app.models.intelligence import Claim, EventClaim
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.services.claims import (
     backfill_published_claims,
     extract_traceable_claim,
+    persist_generated_claims,
 )
 from app.services.digests import generate_digest
-from app.services.event_aggregation import create_event
+from app.services.event_aggregation import add_message_to_event, create_event
 from app.main import app
 
 
@@ -124,10 +126,6 @@ def test_claim_traces_to_raw_block_and_can_feed_multiple_events(db: Session) -> 
         summary="版本发生调整。",
         category="版本更新",
     )
-    # EventClaim is many-to-many even while the compatibility EventMessage layer
-    # intentionally keeps one active primary event per message.
-    from app.models.intelligence import EventClaim
-
     second = Event(
         title="26.16 后续影响",
         summary="用于验证 Claim 可关联多个事件。",
@@ -141,6 +139,114 @@ def test_claim_traces_to_raw_block_and_can_feed_multiple_events(db: Session) -> 
     assert next(
         link for link in claim.event_links if link.event_id == first.id
     ).relation == "supports"
+
+
+def test_atomic_transfer_claims_form_a_supersession_timeline(
+    db: Session,
+) -> None:
+    rumor = _item(db)
+    rumor.normalized_title = "传闻：WBG 正在考虑打野 Beichuan"
+    rumor.summary = "WBG 正在考虑 Beichuan 作为打野候选。"
+    rumor.primary_topic = "roster"
+    rumor.content_type = "insider_rumor"
+    rumor_claim = persist_generated_claims(
+        db,
+        rumor,
+        fact_claims=[
+            {
+                "subject": {"name": "Beichuan", "type": "player"},
+                "predicate": "considered_for",
+                "object": {"team": "WBG", "position": "jungle"},
+                "temporal_role": "prediction",
+                "supersedes_hint": None,
+            }
+        ],
+        attribution={
+            "claimed_by": "爆料人",
+            "stance": "asserts",
+            "certainty": "speculative",
+        },
+    )[0]
+    event = create_event(
+        db,
+        normalized_item_id=rumor.id,
+        aggregation_key="WBG:jungle:2026off",
+        title="WBG 打野转会",
+        summary="WBG 正在考察打野候选。",
+        category="转会",
+        event_type="transfer_saga",
+        lifecycle_status="unconfirmed",
+    )
+
+    official_raw = RawItem(
+        source_id=rumor.raw_item.source_id,
+        external_id="distribution-official-transfer",
+        native_title="WBG 官宣 Beichuan 加盟",
+        content_blocks=[
+            {
+                "id": "b0001",
+                "type": "paragraph",
+                "text": "WBG 官宣 Beichuan 加盟并担任打野。",
+            }
+        ],
+        published_at=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+    db.add(official_raw)
+    db.flush()
+    official = NormalizedItem(
+        raw_item_id=official_raw.id,
+        normalized_title="WBG 官宣 Beichuan 加盟",
+        normalized_text="WBG 官宣 Beichuan 加盟并担任打野。",
+        summary="Beichuan 正式加盟 WBG。",
+        category="转会",
+        entities=[
+            {"name": "Beichuan", "type": "player"},
+            {"name": "WBG", "type": "team"},
+        ],
+        content_type="official_fact",
+        primary_topic="roster",
+        importance_score=0.6,
+        credibility="official",
+        credibility_score=1,
+        credibility_evidence=[],
+        analysis_model="fixture",
+    )
+    db.add(official)
+    db.flush()
+    official_claim = persist_generated_claims(
+        db,
+        official,
+        fact_claims=[
+            {
+                "subject": {"name": "Beichuan", "type": "player"},
+                "predicate": "transfers_to",
+                "object": {"team": "WBG", "position": "jungle"},
+                "temporal_role": "event",
+                "supersedes_hint": "WBG",
+            }
+        ],
+        attribution={
+            "claimed_by": "WBG",
+            "stance": "confirms",
+            "certainty": "confirmed",
+        },
+    )[0]
+    add_message_to_event(
+        db,
+        event_id=event.id,
+        normalized_item_id=official.id,
+        lifecycle_status="confirmed",
+        is_official_confirmation=True,
+    )
+    db.commit()
+
+    db.refresh(official_claim)
+    db.refresh(rumor_claim)
+    assert official_claim.supersedes_claim_id == rumor_claim.id
+    assert rumor_claim.status == "superseded"
+    assert official_claim.attribution["claimed_by"] == "WBG"
+    assert official_claim.temporal_role == "event"
+    assert db.query(Claim).filter(Claim.claim_type == "fact_claim").count() == 2
 
 
 def test_claim_backfill_creates_event_links_and_is_idempotent(

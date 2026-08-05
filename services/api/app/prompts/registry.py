@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 FACT_EXTRACTION_OPERATION = "事实抽取"
 CLASSIFICATION_OPERATION = "分类"
+CLAIM_GENERATION_OPERATION = "断言生成"
 IMPORTANCE_SCORING_OPERATION = "重要性评分"
 RELEVANCE_OPERATION = "相关性判断"
 TRANSLATION_OPERATION = "翻译"
@@ -11,6 +12,7 @@ PRODUCTION_LLM_OPERATIONS = frozenset(
     {
         FACT_EXTRACTION_OPERATION,
         CLASSIFICATION_OPERATION,
+        CLAIM_GENERATION_OPERATION,
         IMPORTANCE_SCORING_OPERATION,
         RELEVANCE_OPERATION,
         TRANSLATION_OPERATION,
@@ -32,13 +34,17 @@ class PromptRegistry:
     _versions = {
         FACT_EXTRACTION_OPERATION: ("fact-extraction", "v1"),
         CLASSIFICATION_OPERATION: ("classification", "v1"),
+        CLAIM_GENERATION_OPERATION: ("claim-generation", "v2-timeline"),
         IMPORTANCE_SCORING_OPERATION: (
             "importance-scoring",
             "v3-five-dimensions",
         ),
         RELEVANCE_OPERATION: ("relevance", "v2-product-scope"),
         TRANSLATION_OPERATION: ("translation", "v2-contextual-chunks"),
-        EVENT_AGGREGATION_OPERATION: ("event-decision", "v3-editorial-policy"),
+        EVENT_AGGREGATION_OPERATION: (
+            "event-decision",
+            "v4-multi-membership",
+        ),
         KNOWLEDGE_ORGANIZATION_OPERATION: (
             "knowledge-organization",
             "v2-evaluation-gated",

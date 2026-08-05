@@ -104,8 +104,13 @@ def test_concurrent_message_update_creates_one_membership_and_revision(
         def synchronized_membership_lookup(
             db: Session,
             normalized_item_id: int,
+            lookup_event_id: int,
         ) -> EventMessage | None:
-            membership = original_membership_lookup(db, normalized_item_id)
+            membership = original_membership_lookup(
+                db,
+                normalized_item_id,
+                lookup_event_id,
+            )
             if not getattr(thread_state, "initial_lookup_complete", False):
                 thread_state.initial_lookup_complete = True
                 barrier.wait()

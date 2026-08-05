@@ -35,6 +35,15 @@ class Claim(Base):
     )
     stance: Mapped[str] = mapped_column(String(20), default="asserts", index=True)
     claim_type: Mapped[str] = mapped_column(String(40), default="statement", index=True)
+    temporal_role: Mapped[str] = mapped_column(
+        String(20), default="state", index=True
+    )
+    attribution: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    supersedes_claim_id: Mapped[int | None] = mapped_column(
+        ForeignKey("claims.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     extraction_model: Mapped[str] = mapped_column(String(120))
     schema_version: Mapped[str] = mapped_column(String(40), default="claim-v1")
@@ -61,6 +70,10 @@ class Claim(Base):
         CheckConstraint(
             "status IN ('active', 'superseded', 'withdrawn')",
             name="ck_claims_status",
+        ),
+        CheckConstraint(
+            "temporal_role IN ('state', 'event', 'prediction')",
+            name="ck_claims_temporal_role",
         ),
         CheckConstraint("revision >= 1", name="ck_claims_revision"),
     )

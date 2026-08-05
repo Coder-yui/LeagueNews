@@ -232,11 +232,20 @@ def test_reclaimed_worker_fences_stale_business_writes() -> None:
                 execution_mode="automatic",
                 candidate_snapshot=[],
                 decision_draft={
-                    "decision": "create",
-                    "reason": "new event",
-                    "title": "Fenced event",
-                    "summary": "Only worker B may create this event.",
-                    "category": "news",
+                    "memberships": [
+                        {
+                            "target": "new",
+                            "event_type": "other",
+                            "aggregation_key": f"fencing:{suffix}",
+                            "membership_role": "primary",
+                            "evidence_stance": "supports",
+                            "update_kind": "new_fact",
+                            "lifecycle_status": "developing",
+                            "timeline_note": "Only worker B may create this event.",
+                            "is_official_confirmation": False,
+                        }
+                    ],
+                    "candidate_rejections": [],
                 },
             )
             worker_b.add(event_run)

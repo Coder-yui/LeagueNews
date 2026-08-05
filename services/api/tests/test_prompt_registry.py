@@ -3,6 +3,7 @@ import pytest
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
+    CLAIM_GENERATION_OPERATION,
     EVENT_AGGREGATION_OPERATION,
     PRODUCTION_LLM_OPERATIONS,
 )
@@ -27,7 +28,7 @@ def test_all_production_llm_operations_are_registered() -> None:
         schema_version="EventDecisionDraft:v1",
     )
     assert prompt.name == "event-decision"
-    assert prompt.version == "v3-editorial-policy"
+    assert prompt.version == "v4-multi-membership"
     classification = prompt_registry.resolve(
         operation=CLASSIFICATION_OPERATION,
         content="dual-axis contract",
@@ -35,6 +36,13 @@ def test_all_production_llm_operations_are_registered() -> None:
     )
     assert classification.name == "classification"
     assert classification.version == "v1"
+    claim_generation = prompt_registry.resolve(
+        operation=CLAIM_GENERATION_OPERATION,
+        content="timeline claim contract",
+        schema_version="ClaimGenerationResult:v1",
+    )
+    assert claim_generation.name == "claim-generation"
+    assert claim_generation.version == "v2-timeline"
 
 
 def test_unregistered_operations_require_explicit_experimental_opt_in() -> None:

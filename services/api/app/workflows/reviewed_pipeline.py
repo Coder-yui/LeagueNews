@@ -27,7 +27,7 @@ from app.models.raw_item import RawItem
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
 from app.services.llm import LLMClient, execution_metadata
-from app.services.claims import extract_traceable_claim
+from app.services.claims import persist_generated_claims
 from app.services.credibility import source_reliability_history
 from app.services.media_publication import publish_raw_item_media
 from app.services.pipeline_execution import (
@@ -49,6 +49,7 @@ FACT_STAGE = "fact_extract"
 CLASSIFY_STAGE = "classify"
 CREDIBILITY_STAGE = "credibility"
 IMPORTANCE_STAGE = "importance"
+CLAIM_STAGE = "claim_gen"
 ITEM_STAGE = "item_analysis"
 
 OFFICIAL_CONNECTORS = {"riot_official", "tencent_lol"}
@@ -95,6 +96,7 @@ async def start_item_processing(
         CLASSIFY_STAGE,
         CREDIBILITY_STAGE,
         IMPORTANCE_STAGE,
+        CLAIM_STAGE,
         ITEM_STAGE,
     }:
         raise ValueError(f"unsupported restart stage: {restart_from_stage}")
@@ -170,6 +172,10 @@ async def start_item_processing(
         await _generate_importance_review(
             db, run, **_guard_kwargs(execution_guard)
         )
+    elif restart_from_stage == CLAIM_STAGE:
+        await _generate_claim_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     else:
         await _generate_item_review(db, run, **_guard_kwargs(execution_guard))
     return run
@@ -220,6 +226,8 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
         await _generate_credibility_review(db, restarted)
     elif restarted.current_stage == IMPORTANCE_STAGE:
         await _generate_importance_review(db, restarted)
+    elif restarted.current_stage == CLAIM_STAGE:
+        await _generate_claim_review(db, restarted)
     else:
         raise ValueError(f"unsupported restart stage: {restarted.current_stage}")
     return restarted
@@ -275,6 +283,10 @@ async def resume_item_processing(
             )
         elif run.current_stage == IMPORTANCE_STAGE:
             await _generate_importance_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
+        elif run.current_stage == CLAIM_STAGE:
+            await _generate_claim_review(
                 db, run, **_guard_kwargs(execution_guard)
             )
         else:
@@ -411,6 +423,19 @@ async def approve_review(
         run.context = {
             **run.context,
             "approved_importance_proposal": review.proposal,
+        }
+        _record_checkpoint(db, review)
+        run.status = "running"
+        run.current_stage = CLAIM_STAGE
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        await _generate_claim_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
+    elif review.stage == CLAIM_STAGE:
+        run.context = {
+            **run.context,
+            "approved_claim_proposal": review.proposal,
         }
         _record_checkpoint(db, review)
         run.status = "running"
@@ -950,6 +975,70 @@ async def _generate_importance_review(
         raise
 
 
+async def _generate_claim_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
+    try:
+        translation = run.context.get("approved_translation_proposal")
+        facts = run.context.get("approved_fact_proposal")
+        classification = run.context.get("approved_classification_proposal")
+        if not isinstance(translation, dict):
+            raise ValueError(
+                "claim generation stage requires an approved translation proposal"
+            )
+        if not isinstance(facts, dict):
+            raise ValueError(
+                "claim generation stage requires an approved fact proposal"
+            )
+        if not isinstance(classification, dict):
+            raise ValueError(
+                "claim generation stage requires an approved classification proposal"
+            )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        claims = await LLMClient().generate_claims(
+            content=_analysis_content(translation),
+            extracted_facts={
+                key: facts[key]
+                for key in ("title", "summary", "category", "entities")
+                if key in facts
+            },
+            classification={
+                key: classification[key]
+                for key in (
+                    "content_type",
+                    "topic",
+                    "secondary_topics",
+                    "entity_roles",
+                    "temporal",
+                )
+                if key in classification
+            },
+            source_context=_source_context(run.raw_item),
+        )
+        proposal = {
+            **claims.model_dump(mode="json"),
+            "analysis_model": settings.model_name,
+            "_execution_metadata": {
+                "claim_generation": execution_metadata(claims),
+            },
+        }
+        _replace_pending_review(
+            db,
+            run=run,
+            stage=CLAIM_STAGE,
+            proposal=proposal,
+        )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+    except Exception as exc:
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
+        raise
+
+
 async def _generate_item_review(
     db: Session,
     run: ProcessingRun,
@@ -964,6 +1053,7 @@ async def _generate_item_review(
         )
         credibility_proposal = run.context.get("approved_credibility_proposal")
         importance_proposal = run.context.get("approved_importance_proposal")
+        claim_proposal = run.context.get("approved_claim_proposal")
         if not isinstance(translation_proposal, dict):
             raise ValueError("analysis stage requires an approved translation proposal")
         if not isinstance(fact_proposal, dict):
@@ -980,6 +1070,10 @@ async def _generate_item_review(
             raise ValueError(
                 "analysis stage requires an approved importance proposal"
             )
+        if not isinstance(claim_proposal, dict):
+            raise ValueError(
+                "analysis stage requires an approved claim proposal"
+            )
         assert_execution_owned(db, execution_guard)
         db.commit()
         proposal = await _build_item_proposal(
@@ -989,6 +1083,7 @@ async def _generate_item_review(
             classification_proposal=classification_proposal,
             credibility_proposal=credibility_proposal,
             importance_proposal=importance_proposal,
+            claim_proposal=claim_proposal,
             knowledge_snapshot=list(fact_proposal.get("knowledge_rules") or []),
         )
         _replace_pending_review(db, run=run, stage=ITEM_STAGE, proposal=proposal)
@@ -1007,6 +1102,7 @@ async def _build_item_proposal(
     classification_proposal: dict[str, Any],
     credibility_proposal: dict[str, Any],
     importance_proposal: dict[str, Any],
+    claim_proposal: dict[str, Any],
     knowledge_snapshot: list[dict[str, object]] | None = None,
     ocr_corrections: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
@@ -1069,12 +1165,15 @@ async def _build_item_proposal(
         },
         "language": raw_item.language,
         "analysis_model": settings.model_name,
-        "analysis_version": "pipeline-redesign-p1",
+        "analysis_version": "pipeline-redesign-p2",
+        "fact_claims": list(claim_proposal.get("fact_claims") or []),
+        "attribution": dict(claim_proposal.get("attribution") or {}),
         "_execution_metadata": {
             **dict(facts.get("_execution_metadata") or {}),
             **dict(classification.get("_execution_metadata") or {}),
             **dict(credibility_proposal.get("_execution_metadata") or {}),
             **dict(importance_proposal.get("_execution_metadata") or {}),
+            **dict(claim_proposal.get("_execution_metadata") or {}),
         },
         "knowledge_rules": knowledge_snapshot or [],
         "ocr_corrections": ocr_corrections or [],
@@ -1256,7 +1355,12 @@ def _apply_normalized_item(
         )
     )
     db.flush()
-    extract_traceable_claim(db, item)
+    persist_generated_claims(
+        db,
+        item,
+        fact_claims=list(proposal.get("fact_claims") or []),
+        attribution=dict(proposal.get("attribution") or {}),
+    )
     return item
 
 
@@ -1330,6 +1434,7 @@ def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
         CLASSIFY_STAGE: {"analysis_correction"},
         CREDIBILITY_STAGE: {"analysis_correction"},
         IMPORTANCE_STAGE: {"analysis_correction"},
+        CLAIM_STAGE: {"analysis_correction"},
         ITEM_STAGE: {"analysis_correction"},
         TRANSLATION_STAGE: {"translation_term", "translation_correction"},
     }

@@ -666,7 +666,7 @@ def test_new_raw_revision_replaces_event_member_without_duplicate_revision() -> 
         ) == 1
 
 
-def test_event_importance_override_is_not_raised_by_member_message_score() -> None:
+def test_event_importance_uses_member_base_and_event_type_cap() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
@@ -706,5 +706,5 @@ def test_event_importance_override_is_not_raised_by_member_message_score() -> No
 
         assert weekly.importance_score == 0.9
         assert daily.importance_score == 0.9
-        assert event.importance_score == 0.4
+        assert event.importance_score == 0.75
         assert event.current_revision == 1

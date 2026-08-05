@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.domain.ontology import EventRoute, route_event_types
 from app.models.event import Event, EventMessage
 from app.models.normalized_item import NormalizedItem
 from app.services.raw_item_versions import superseded_normalized_item_ids
@@ -36,6 +37,7 @@ _ROTATION_TERMS = ("轮换", "每日更新", "每周更新", "daily rotation", "
 class EventCandidate:
     event_id: int
     event_key: str | None
+    aggregation_key: str | None
     title: str
     summary: str
     category: str
@@ -43,9 +45,23 @@ class EventCandidate:
     event_type: str
     lifecycle_status: str
     credibility_status: str
+    timeline_nodes: tuple[str, ...]
+    member_count: int
     match_level: str
     score: float
     reasons: tuple[str, ...]
+
+
+def aggregation_routes(item: NormalizedItem) -> list[EventRoute]:
+    return route_event_types(
+        content_type=item.content_type,
+        topic=item.primary_topic,
+        title=item.translated_title or item.normalized_title,
+        summary=item.summary,
+        entities=list(item.entities),
+        facets=dict(item.facets),
+        published_at=item.raw_item.published_at,
+    )
 
 
 def _event_date_key(item: NormalizedItem, text: str) -> str | None:
@@ -81,6 +97,9 @@ def _event_date_key(item: NormalizedItem, text: str) -> str | None:
 
 
 def stable_event_key(item: NormalizedItem) -> str | None:
+    routes = aggregation_routes(item)
+    if routes:
+        return routes[0].aggregation_key
     entity_text = " ".join(
         str(entity.get("canonical_name") or entity.get("name") or "")
         for entity in item.entities
@@ -200,7 +219,12 @@ def event_aggregation_policy(item: NormalizedItem) -> dict[str, object] | None:
             else None
         ),
         "importance_range": [0.3, 0.45],
-        "required_event_type": "activity",
+        "required_event_type": "shop_rotation",
+        "aggregation_key": (
+            f"mythic_shop:week:{iso_week}"
+            if is_cn
+            else None
+        ),
         "daily_update_kind": "context",
     }
 
@@ -272,6 +296,11 @@ def _item_context(item: NormalizedItem) -> str:
             item.translated_title or item.normalized_title,
             item.summary,
             entities,
+            " ".join(
+                f"{claim.subject} {claim.predicate} {claim.object_value}"
+                for claim in item.claims
+                if claim.status == "active"
+            ),
         )
     )
 
@@ -282,6 +311,12 @@ def _event_context(event: Event) -> str:
             event.title,
             event.summary,
             " ".join(sorted(_event_entity_names(event))),
+            " ".join(
+                f"{claim.subject} {claim.predicate} {claim.object_value}"
+                for message in event.messages
+                if message.membership_status == "active"
+                for claim in message.normalized_item.claims
+            ),
         )
     )
 
@@ -321,18 +356,36 @@ def _within_window(item: NormalizedItem, event: Event) -> tuple[bool, int | None
         // 86_400
     )
     category_family = _category_family(item.category)
-    if category_family == "patch" or event.event_type == "patch":
+    if category_family == "patch" or event.event_type in {
+        "patch",
+        "patch_cycle",
+        "sr_patch",
+        "tft_patch",
+    }:
         window_days = 45
     elif (
         category_family == "game_mode"
         or event.event_type == "major_gameplay_change"
     ):
         window_days = 180
-    elif category_family == "roster" or event.event_type in {"transfer", "roster"}:
+    elif category_family == "roster" or event.event_type in {
+        "transfer",
+        "roster",
+        "transfer_saga",
+    }:
         window_days = 180
-    elif category_family == "esports" or event.event_type in {"match", "tournament"}:
+    elif category_family == "esports" or event.event_type in {
+        "match",
+        "tournament",
+        "daily_matches",
+        "major_match",
+        "qualification_saga",
+    }:
         window_days = 14
-    elif category_family == "activity" or event.event_type == "activity":
+    elif category_family == "activity" or event.event_type in {
+        "activity",
+        "shop_rotation",
+    }:
         window_days = 90
     else:
         window_days = 7
@@ -343,11 +396,11 @@ def find_event_candidates(
     db: Session,
     *,
     normalized_item_id: int,
-    limit: int = 5,
+    limit: int = 8,
     include_event_ids: set[int] | None = None,
 ) -> list[EventCandidate]:
-    if limit < 1 or limit > 5:
-        raise ValueError("candidate limit must be between 1 and 5")
+    if limit < 1 or limit > 8:
+        raise ValueError("candidate limit must be between 1 and 8")
 
     item = db.scalar(
         select(NormalizedItem)
@@ -357,6 +410,10 @@ def find_event_candidates(
     if item is None:
         raise ValueError(f"normalized item {normalized_item_id} not found")
 
+    routes = aggregation_routes(item)
+    aggregation_keys = {
+        route.aggregation_key for route in routes
+    }
     item_key = stable_event_key(item)
     item_entities = _entity_names(item)
     superseded_item_ids = set(superseded_normalized_item_ids(db, item))
@@ -372,12 +429,14 @@ def find_event_candidates(
     ]
     if item_key is not None:
         recall_filters.append(Event.event_key == item_key)
+    if aggregation_keys:
+        recall_filters.append(Event.aggregation_key.in_(aggregation_keys))
     statement = (
         select(Event)
         .options(
-            selectinload(Event.messages).selectinload(
-                EventMessage.normalized_item
-            )
+            selectinload(Event.messages)
+            .selectinload(EventMessage.normalized_item)
+            .selectinload(NormalizedItem.claims)
         )
         .where(
             or_(*recall_filters),
@@ -409,10 +468,17 @@ def find_event_candidates(
         if supersedes_member:
             score += 200
             reasons.append("当前消息是该事件成员的更新版本")
-        exact_key = item_key is not None and event.event_key == item_key
+        exact_key = (
+            event.aggregation_key in aggregation_keys
+            if event.aggregation_key is not None
+            else item_key is not None and event.event_key == item_key
+        )
         if exact_key:
-            score += 100
-            reasons.append(f"稳定事件键精确匹配：{item_key}")
+            score += 300
+            reasons.append(
+                "聚合键精确匹配："
+                f"{event.aggregation_key or item_key}"
+            )
 
         within_window, distance = _within_window(item, event)
         if within_window:
@@ -430,21 +496,34 @@ def find_event_candidates(
 
         overlapping_entities = sorted(item_entities & _event_entity_names(event))
         if overlapping_entities:
-            score += min(30, 15 * len(overlapping_entities))
-            reasons.append("核心实体重叠：" + "、".join(overlapping_entities))
+            score += min(200, 100 * len(overlapping_entities))
+            reasons.append(
+                "实体重叠召回：" + "、".join(overlapping_entities)
+            )
 
         title_similarity = _similarity(
             item.translated_title or item.normalized_title,
             event.title,
         )
         if title_similarity >= 0.15:
-            score += round(title_similarity * 20, 4)
+            score += round(title_similarity * 40, 4)
             reasons.append(f"标题相似度 {title_similarity:.2f}")
+
+        semantic_similarity = _similarity(
+            _item_context(item),
+            _event_context(event),
+        )
+        if semantic_similarity >= 0.12:
+            score += round(semantic_similarity * 100, 4)
+            reasons.append(
+                f"fact_claim语义相似召回 {semantic_similarity:.2f}"
+            )
 
         has_identity_signal = (
             supersedes_member
             or exact_key
             or bool(overlapping_entities)
+            or semantic_similarity >= 0.12
             or title_similarity >= 0.15
         )
         if (
@@ -456,11 +535,6 @@ def find_event_candidates(
             continue
         match_level = "strong" if has_identity_signal else "broad"
         if not has_identity_signal:
-            context_similarity = _similarity(
-                _item_context(item),
-                _event_context(event),
-            )
-            score += round(context_similarity * 20, 4)
             reasons.append(
                 "宽召回候选：时间范围相符，交由事件编辑判断别名、父级对象或附属内容关系"
             )
@@ -468,6 +542,7 @@ def find_event_candidates(
             EventCandidate(
                 event_id=event.id,
                 event_key=event.event_key,
+                aggregation_key=event.aggregation_key,
                 title=event.title,
                 summary=event.summary[:800],
                 category=event.category,
@@ -475,6 +550,23 @@ def find_event_candidates(
                 event_type=event.event_type,
                 lifecycle_status=event.lifecycle_status,
                 credibility_status=event.credibility_status,
+                timeline_nodes=tuple(
+                    message.normalized_item.summary[:200]
+                    for message in sorted(
+                        (
+                            value
+                            for value in event.messages
+                            if value.membership_status == "active"
+                        ),
+                        key=lambda value: (
+                            value.source_published_at or value.added_at
+                        ),
+                    )[-5:]
+                ),
+                member_count=sum(
+                    message.membership_status == "active"
+                    for message in event.messages
+                ),
                 match_level=match_level,
                 score=round(score, 4),
                 reasons=tuple(reasons),

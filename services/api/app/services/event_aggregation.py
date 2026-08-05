@@ -6,6 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.domain.importance import TOPIC_RANGES
+from app.domain.ontology import TIMELINE_EVENT_TYPES, topic_from_category
 from app.models.event import Event, EventMessage, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.services.claims import (
@@ -238,10 +240,82 @@ def _calibrate_resolved_sources(
         )
 
 
+def _refresh_event_importance(db: Session, event: Event) -> None:
+    memberships = list(
+        db.scalars(
+            select(EventMessage).where(
+                EventMessage.event_id == event.id,
+                EventMessage.membership_status == "active",
+            )
+        )
+    )
+    if not memberships:
+        event.importance_score = 0
+        event.importance_evidence = []
+        return
+    items = {
+        item.id: item
+        for item in db.scalars(
+            select(NormalizedItem).where(
+                NormalizedItem.id.in_(
+                    membership.normalized_item_id
+                    for membership in memberships
+                )
+            )
+        )
+    }
+    if event.event_type in TIMELINE_EVENT_TYPES:
+        significant = [
+            membership
+            for membership in memberships
+            if membership.is_significant_update
+        ] or memberships
+        latest = max(
+            significant,
+            key=lambda membership: (
+                membership.source_published_at or membership.added_at,
+                membership.normalized_item_id,
+            ),
+        )
+        base_item = items[latest.normalized_item_id]
+        base = base_item.importance_score
+    else:
+        base_item = max(
+            items.values(),
+            key=lambda item: (item.importance_score, item.id),
+        )
+        base = base_item.importance_score
+    confirmation_boost = 1.3 if event.official_source_count else 1.0
+    corroboration_boost = 1 + 0.05 * min(
+        max(event.independent_source_count - 1, 0),
+        4,
+    )
+    topic = base_item.primary_topic or topic_from_category(event.category)
+    topic_cap = (
+        0.8
+        if topic == "roster"
+        else TOPIC_RANGES.get(topic, TOPIC_RANGES["other"])[1]
+    )
+    event.importance_score = round(
+        min(
+            topic_cap,
+            base * confirmation_boost * corroboration_boost,
+        ),
+        6,
+    )
+    event.importance_evidence = [
+        f"base={base:.3f}（成员消息 {base_item.id}）",
+        f"confirmation_boost={confirmation_boost:.2f}",
+        f"corroboration_boost={corroboration_boost:.2f}",
+        f"topic_cap={topic_cap:.2f}",
+    ]
+
+
 def refresh_event_projection(db: Session, event: Event) -> None:
     """Recompute derived fields after an event membership is withdrawn or restored."""
     _refresh_publish_range(db, event)
     _refresh_editorial_metrics(db, event)
+    _refresh_event_importance(db, event)
     active_count = db.scalar(
         select(func.count(EventMessage.normalized_item_id)).where(
             EventMessage.event_id == event.id,
@@ -327,6 +401,7 @@ def create_event(
         )
         _refresh_publish_range(db, event)
         _refresh_editorial_metrics(db, event)
+        _refresh_event_importance(db, event)
         db.add(
             EventRevision(
                 event_id=event.id,
@@ -476,6 +551,7 @@ def add_message_to_event(
         )
         _refresh_publish_range(db, event)
         _refresh_editorial_metrics(db, event)
+        _refresh_event_importance(db, event)
         if is_significant_update:
             db.add(
                 EventRevision(

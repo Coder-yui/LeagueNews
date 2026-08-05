@@ -11,6 +11,7 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.services.event_aggregation import create_event
 from app.services.event_candidates import (
+    aggregation_routes,
     event_aggregation_policy,
     find_event_candidates,
     stable_event_key,
@@ -26,6 +27,8 @@ def _add_item(
     published_at: datetime,
     entities: list[dict[str, str]] | None = None,
     category: str = "版本更新",
+    content_type: str | None = None,
+    primary_topic: str | None = None,
     revision: int = 1,
     supersedes_raw_item_id: int | None = None,
 ) -> NormalizedItem:
@@ -57,6 +60,8 @@ def _add_item(
         translation_status="not_required",
         analysis_model="test",
         analysis_version="test",
+        content_type=content_type,
+        primary_topic=primary_topic or "other",
     )
     db.add(item)
     db.commit()
@@ -142,6 +147,78 @@ def test_stable_keys_cover_lpl_matches_and_transfer_claims(db: Session) -> None:
     assert stable_event_key(match) == "matchday:lpl:2026-07-20"
     assert stable_event_key(transfer) == "transfer:2026:knight:blg"
     assert stable_event_key(mode) == "mode:classic-mode"
+
+
+def test_program_routes_patch_component_roster_and_match_windows(
+    db: Session,
+) -> None:
+    source = Source(name="Route Source", connector_type="riot_official")
+    db.add(source)
+    db.commit()
+    patch = _add_item(
+        db,
+        source_id=source.id,
+        index=13,
+        title="26.15 更新公告：经典模式正式上线",
+        published_at=datetime(2026, 7, 31, tzinfo=UTC),
+        entities=[
+            {"name": "26.15", "type": "patch", "role": "core"},
+            {"name": "经典模式", "type": "game_mode", "role": "affected"},
+        ],
+        content_type="official_fact",
+        primary_topic="patch",
+    )
+    roster = _add_item(
+        db,
+        source_id=source.id,
+        index=14,
+        title="传闻：WBG 正在考虑新的打野候选",
+        published_at=datetime(2026, 7, 31, tzinfo=UTC),
+        entities=[{"name": "WBG", "type": "team", "role": "core"}],
+        category="转会",
+        content_type="insider_rumor",
+        primary_topic="roster",
+    )
+    regular = _add_item(
+        db,
+        source_id=source.id,
+        index=15,
+        title="LPL 常规赛赛果",
+        published_at=datetime(2026, 8, 1, tzinfo=UTC),
+        entities=[{"name": "LPL", "type": "league", "role": "core"}],
+        category="赛事",
+        content_type="match_result",
+        primary_topic="esports",
+    )
+    final = _add_item(
+        db,
+        source_id=source.id,
+        index=16,
+        title="LPL 总决赛赛果",
+        published_at=datetime(2026, 8, 2, tzinfo=UTC),
+        entities=[{"name": "LPL", "type": "tournament", "role": "core"}],
+        category="赛事",
+        content_type="match_result",
+        primary_topic="esports",
+    )
+
+    patch_routes = aggregation_routes(patch)
+    assert [
+        (route.event_type, route.aggregation_key, route.membership_role)
+        for route in patch_routes
+    ] == [
+        ("patch_cycle", "patch:26.15", "primary"),
+        ("major_gameplay_change", "gameplay:经典模式", "component"),
+    ]
+    assert [
+        (route.event_type, route.aggregation_key)
+        for route in aggregation_routes(roster)
+    ] == [("transfer_saga", "WBG:jungle:2026off")]
+    assert [
+        (route.event_type, route.aggregation_key)
+        for route in aggregation_routes(regular)
+    ] == [("daily_matches", "lpl:2026-08-01")]
+    assert aggregation_routes(final)[0].event_type == "major_match"
 
 
 def test_lpl_schedule_and_result_share_matchday_key_out_of_order(
@@ -252,7 +329,7 @@ def test_candidate_search_returns_exact_patch_match_with_reasons(db: Session) ->
     assert first == repeated
     assert first[0].event_id == event.id
     assert first[0].score >= 100
-    assert any("稳定事件键精确匹配" in reason for reason in first[0].reasons)
+    assert any("聚合键精确匹配" in reason for reason in first[0].reasons)
 
 
 def test_candidate_search_can_return_zero_candidates(db: Session) -> None:
@@ -288,12 +365,12 @@ def test_candidate_search_can_return_zero_candidates(db: Session) -> None:
     assert find_event_candidates(db, normalized_item_id=incoming.id) == []
 
 
-def test_candidate_search_is_ranked_and_capped_at_five(db: Session) -> None:
+def test_candidate_search_is_ranked_and_capped_at_eight(db: Session) -> None:
     source = Source(name="Limit Source", connector_type="manual")
     db.add(source)
     db.commit()
     base_time = datetime(2026, 7, 1, tzinfo=UTC)
-    for index in range(6):
+    for index in range(9):
         member = _add_item(
             db,
             source_id=source.id,
@@ -322,13 +399,13 @@ def test_candidate_search_is_ranked_and_capped_at_five(db: Session) -> None:
 
     candidates = find_event_candidates(db, normalized_item_id=incoming.id)
 
-    assert len(candidates) == 5
+    assert len(candidates) == 8
     assert [candidate.score for candidate in candidates] == sorted(
         (candidate.score for candidate in candidates),
         reverse=True,
     )
-    with pytest.raises(ValueError, match="between 1 and 5"):
-        find_event_candidates(db, normalized_item_id=incoming.id, limit=6)
+    with pytest.raises(ValueError, match="between 1 and 8"):
+        find_event_candidates(db, normalized_item_id=incoming.id, limit=9)
 
 
 def test_superseded_event_member_is_an_exact_candidate(db: Session) -> None:
@@ -498,6 +575,8 @@ def test_cn_mythic_shop_rotations_share_weekly_event_identity(db: Session) -> No
             }
         ],
         category="国服活动",
+        content_type="aggregation",
+        primary_topic="activity",
     )
     daily = _add_item(
         db,
@@ -513,27 +592,30 @@ def test_cn_mythic_shop_rotations_share_weekly_event_identity(db: Session) -> No
             }
         ],
         category="游戏活动",
+        content_type="aggregation",
+        primary_topic="activity",
     )
 
-    assert stable_event_key(weekly) == "mythic-shop:cn:2026-w30"
-    assert stable_event_key(daily) == "mythic-shop:cn:2026-w30"
+    assert stable_event_key(weekly) == "mythic_shop:week:30"
+    assert stable_event_key(daily) == "mythic_shop:week:30"
     assert event_aggregation_policy(daily)["cadence"] == "daily"
 
     event = create_event(
         db,
         normalized_item_id=weekly.id,
         event_key=stable_event_key(weekly),
+        aggregation_key=stable_event_key(weekly),
         title="2026年第30周国服神话商城轮换",
         summary="本周神话商城进行轮换。",
         category="国服活动",
-        event_type="activity",
+        event_type="shop_rotation",
         importance_score=0.4,
     )
     candidates = find_event_candidates(db, normalized_item_id=daily.id)
 
     assert candidates[0].event_id == event.id
     assert candidates[0].match_level == "strong"
-    assert any("稳定事件键精确匹配" in reason for reason in candidates[0].reasons)
+    assert any("聚合键精确匹配" in reason for reason in candidates[0].reasons)
 
 
 def test_x_mythic_shop_rotation_is_not_a_cn_event(db: Session) -> None:

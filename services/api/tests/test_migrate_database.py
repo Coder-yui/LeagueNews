@@ -46,4 +46,4 @@ def test_migration_ledger_is_contiguous_and_self_records_version(
     monkeypatch.setenv("MIGRATIONS_DIR", str(migrations))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "039_add_source_reliability_and_scoring_stages.sql"
+    assert files[-1].name == "040_add_timeline_claims_and_claim_stage.sql"

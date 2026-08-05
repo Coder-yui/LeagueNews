@@ -285,23 +285,88 @@ def test_importance_prompt_uses_five_dimension_contract() -> None:
     assert "evidence 必须引用消息中的具体文本依据，不得编造" in prompt
 
 
+def test_claim_generation_uses_atomic_timeline_contract() -> None:
+    response = json.dumps(
+        {
+            "fact_claims": [
+                {
+                    "subject": {"name": "Beichuan", "type": "player"},
+                    "predicate": "considered_for",
+                    "object": {"team": "WBG", "position": "jungle"},
+                    "temporal_role": "prediction",
+                    "supersedes_hint": None,
+                }
+            ],
+            "attribution": {
+                "claimed_by": "爆料人",
+                "stance": "asserts",
+                "certainty": "speculative",
+            },
+        }
+    )
+    client, completions = _client_with_responses([response])
+
+    result = asyncio.run(
+        client.generate_claims(
+            content="爆料人称 WBG 正在考虑 Beichuan 作为打野候选。",
+            extracted_facts={"title": "WBG 打野候选"},
+            classification={
+                "content_type": "insider_rumor",
+                "topic": "roster",
+            },
+            source_context={"source_name": "爆料人"},
+        )
+    )
+
+    assert result.fact_claims[0].predicate == "considered_for"
+    assert result.fact_claims[0].subject["name"] == "Beichuan"
+    assert result.attribution.claimed_by == "爆料人"
+    metadata = execution_metadata(result)
+    assert metadata["prompt_name"] == "claim-generation"
+    assert metadata["prompt_version"] == "v2-timeline"
+    messages = completions.calls[0]["messages"]
+    assert isinstance(messages, list)
+    prompt = messages[0]["content"]
+    assert "subject 是事实主体本身" in prompt
+    assert "considered_for 用于\"考虑中\"的候选" in prompt
+    assert "supersedes_hint 帮助下游" in prompt
+
+
 def test_event_create_with_candidates_requires_explicit_rejections() -> None:
     invalid_create = json.dumps(
         {
-            "decision": "create",
-            "reason": "误认为是独立事件",
-            "title": "测试服礼包封面",
-            "summary": "出现礼包封面。",
-            "category": "测试服资讯",
+            "memberships": [
+                {
+                    "target": "new",
+                    "event_type": "release_saga",
+                    "aggregation_key": "release:retro-bundle",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "developing",
+                    "timeline_note": "测试服出现礼包封面",
+                    "is_official_confirmation": False,
+                }
+            ],
+            "candidate_rejections": [],
         }
     )
     valid_update = json.dumps(
         {
-            "decision": "update",
-            "reason": "礼包是已有模式的附属内容",
-            "candidate_event_id": 8,
-            "update_kind": "context",
-            "evidence_stance": "context",
+            "memberships": [
+                {
+                    "target": "existing:8",
+                    "event_type": "major_gameplay_change",
+                    "aggregation_key": "gameplay:经典模式",
+                    "membership_role": "component",
+                    "evidence_stance": "context",
+                    "update_kind": "context",
+                    "lifecycle_status": "developing",
+                    "timeline_note": "礼包封面提供经典模式旁证",
+                    "is_official_confirmation": False,
+                }
+            ],
+            "candidate_rejections": [],
         }
     )
     client, completions = _client_with_responses([invalid_create, valid_update])
@@ -315,6 +380,7 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
             candidates=[
                 {
                     "event_id": 8,
+                    "aggregation_key": "gameplay:经典模式",
                     "title": "经典玩法正式公布",
                     "summary": "拳头公布经典玩法。",
                     "core_entities": ["classic mode"],
@@ -326,12 +392,12 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
         )
     )
 
-    assert result.decision == "update"
-    assert result.update_kind == "context"
-    assert result.evidence_stance == "context"
+    assert result.memberships[0].target == "existing:8"
+    assert result.memberships[0].update_kind == "context"
+    assert result.memberships[0].evidence_stance == "context"
     metadata = execution_metadata(result)
     assert metadata["prompt_name"] == "event-decision"
-    assert metadata["prompt_version"] == "v3-editorial-policy"
+    assert metadata["prompt_version"] == "v4-multi-membership"
     assert metadata["json_schema_version"] == "EventDecisionDraft:v1"
     assert str(metadata["prompt_hash"]).startswith("sha256:")
     assert len(completions.calls) == 2
@@ -343,26 +409,40 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
 def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
     duplicate_create = json.dumps(
         {
-            "decision": "create",
-            "reason": "错误地把赛程和赛果拆开",
+            "memberships": [
+                {
+                    "target": "new",
+                    "event_type": "daily_matches",
+                    "aggregation_key": "lpl:2026-07-26",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "scheduled",
+                    "timeline_note": "7月26日赛程发布",
+                    "is_official_confirmation": False,
+                }
+            ],
             "candidate_rejections": [
                 {"event_id": 21, "reason": "生命周期不同"}
             ],
-            "event_key": "matchday:lpl:2026-07-26",
-            "event_type": "match",
-            "lifecycle_status": "scheduled",
-            "title": "7月26日赛程预告",
-            "summary": "三场比赛即将进行。",
-            "category": "LPL赛程",
         }
     )
     valid_update = json.dumps(
         {
-            "decision": "update",
-            "reason": "赛程和赛果属于同一比赛日事件",
-            "candidate_event_id": 21,
-            "event_type": "match",
-            "lifecycle_status": "scheduled",
+            "memberships": [
+                {
+                    "target": "existing:21",
+                    "event_type": "daily_matches",
+                    "aggregation_key": "lpl:2026-07-26",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "scheduled",
+                    "timeline_note": "7月26日赛程发布",
+                    "is_official_confirmation": False,
+                }
+            ],
+            "candidate_rejections": [],
         }
     )
     client, completions = _client_with_responses(
@@ -379,30 +459,31 @@ def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
                 {
                     "event_id": 21,
                     "event_key": "matchday:lpl:2026-07-26",
+                    "aggregation_key": "lpl:2026-07-26",
                     "title": "2026LPL第三赛段7月26日赛果",
                     "summary": "当日三场比赛已经结束。",
-                    "event_type": "match",
+                    "event_type": "daily_matches",
                     "lifecycle_status": "completed",
                 }
             ],
-            stable_event_key="matchday:lpl:2026-07-26",
+            stable_event_key="lpl:2026-07-26",
             knowledge_rules=[],
         )
     )
 
     assert len(completions.calls) == 2
-    assert result.decision == "update"
-    assert result.candidate_event_id == 21
-    assert result.lifecycle_status == "completed"
-    assert result.update_kind == "context"
-    assert result.evidence_stance == "context"
+    membership = result.memberships[0]
+    assert membership.target == "existing:21"
+    assert membership.lifecycle_status == "completed"
+    assert membership.update_kind == "context"
+    assert membership.evidence_stance == "context"
 
 
 def test_event_prompt_explains_lpl_matchday_lifecycle() -> None:
     response = json.dumps(
         {
-            "decision": "not_event",
-            "reason": "测试提示词",
+            "memberships": [],
+            "candidate_rejections": [],
         }
     )
     client, completions = _client_with_responses([response])
@@ -419,29 +500,33 @@ def test_event_prompt_explains_lpl_matchday_lifecycle() -> None:
     messages = completions.calls[0]["messages"]
     assert isinstance(messages, list)
     prompt = messages[0]["content"]
-    assert "LPL 普通常规赛按比赛日聚合" in prompt
-    assert "scheduled、live、completed 是同一事件的生命周期" in prompt
+    assert "周期窗口型事件（shop_rotation/daily_matches）" in prompt
+    assert "总决赛、世界赛关键场单独成事件" in prompt
 
 
-def test_cn_mythic_shop_policy_rejects_not_event_and_caps_importance() -> None:
+def test_cn_mythic_shop_policy_rejects_empty_membership() -> None:
     invalid = json.dumps(
         {
-            "decision": "not_event",
-            "reason": "误认为例行轮换不是事件",
+            "memberships": [],
+            "candidate_rejections": [],
         }
     )
     valid = json.dumps(
         {
-            "decision": "create",
-            "reason": "创建本周国服神话商城小事件",
-            "event_key": "mythic-shop:cn:2026-w30",
-            "event_type": "activity",
-            "lifecycle_status": "live",
-            "title": "2026年第30周国服神话商城轮换",
-            "summary": "本周神话商城轮换内容已公布。",
-            "category": "国服活动",
-            "importance_score": 0.9,
-            "importance_evidence": ["国服商城常规周轮换，影响有限。"],
+            "memberships": [
+                {
+                    "target": "new",
+                    "event_type": "shop_rotation",
+                    "aggregation_key": "mythic_shop:week:30",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "live",
+                    "timeline_note": "本周轮换内容公布",
+                    "is_official_confirmation": False,
+                }
+            ],
+            "candidate_rejections": [],
         }
     )
     client, completions = _client_with_responses([invalid, valid])
@@ -457,29 +542,32 @@ def test_cn_mythic_shop_policy_rejects_not_event_and_caps_importance() -> None:
         client.propose_event(
             item={"title": "神话商城每周轮换", "event_policy": policy},
             candidates=[],
-            stable_event_key="mythic-shop:cn:2026-w30",
+            stable_event_key="mythic_shop:week:30",
             knowledge_rules=[],
         )
     )
 
-    assert result.decision == "create"
-    assert result.importance_score == 0.45
+    assert result.memberships[0].event_type == "shop_rotation"
     assert len(completions.calls) == 2
 
 
 def test_cn_mythic_shop_policy_normalizes_required_event_type() -> None:
     response = json.dumps(
         {
-            "decision": "create",
-            "reason": "创建本周国服神话商城小事件",
-            "event_key": "mythic-shop:cn:2026-w30",
-            "event_type": "other",
-            "lifecycle_status": "live",
-            "title": "2026年第30周国服神话商城轮换",
-            "summary": "本周神话商城轮换内容已公布。",
-            "category": "国服活动",
-            "importance_score": 0.4,
-            "importance_evidence": ["国服商城常规周轮换，影响有限。"],
+            "memberships": [
+                {
+                    "target": "new",
+                    "event_type": "other",
+                    "aggregation_key": "mythic_shop:week:30",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "live",
+                    "timeline_note": "本周轮换内容公布",
+                    "is_official_confirmation": False,
+                }
+            ],
+            "candidate_rejections": [],
         }
     )
     client, completions = _client_with_responses([response])
@@ -496,30 +584,38 @@ def test_cn_mythic_shop_policy_normalizes_required_event_type() -> None:
                 },
             },
             candidates=[],
-            stable_event_key="mythic-shop:cn:2026-w30",
+            stable_event_key="mythic_shop:week:30",
             knowledge_rules=[],
         )
     )
 
-    assert result.event_type == "activity"
-    assert result.importance_score == 0.4
+    assert result.memberships[0].event_type == "shop_rotation"
     assert len(completions.calls) == 1
 
 
 def test_international_mythic_shop_policy_requires_not_event() -> None:
     invalid = json.dumps(
         {
-            "decision": "create",
-            "reason": "误建国际服轮换事件",
-            "title": "Mythic Shop Rotation",
-            "summary": "International rotation.",
-            "category": "皮肤资讯",
+            "memberships": [
+                {
+                    "target": "new",
+                    "event_type": "shop_rotation",
+                    "aggregation_key": "mythic_shop:week:30",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "live",
+                    "timeline_note": "国际服轮换",
+                    "is_official_confirmation": False,
+                }
+            ],
+            "candidate_rejections": [],
         }
     )
     valid = json.dumps(
         {
-            "decision": "not_event",
-            "reason": "X 来源的国际服轮换不进入国服事件层",
+            "memberships": [],
+            "candidate_rejections": [],
         }
     )
     client, completions = _client_with_responses([invalid, valid])
@@ -542,33 +638,30 @@ def test_international_mythic_shop_policy_requires_not_event() -> None:
         )
     )
 
-    assert result.decision == "not_event"
+    assert result.memberships == []
     assert len(completions.calls) == 2
 
 
 def test_cn_daily_mythic_shop_update_must_be_context() -> None:
     invalid = json.dumps(
         {
-            "decision": "update",
-            "reason": "加入本周轮换",
-            "candidate_event_id": 12,
-            "event_type": "activity",
-            "update_kind": "new_fact",
-            "importance_score": 0.4,
+            "memberships": [
+                {
+                    "target": "existing:12",
+                    "event_type": "shop_rotation",
+                    "aggregation_key": "mythic_shop:week:30",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "live",
+                    "timeline_note": "每日轮换补充",
+                    "is_official_confirmation": False,
+                }
+            ],
+            "candidate_rejections": [],
         }
     )
-    valid = json.dumps(
-        {
-            "decision": "update",
-            "reason": "每日内容作为本周轮换的补充",
-            "candidate_event_id": 12,
-            "event_type": "activity",
-            "update_kind": "context",
-            "evidence_stance": "context",
-            "importance_score": 0.35,
-        }
-    )
-    client, completions = _client_with_responses([invalid, valid])
+    client, completions = _client_with_responses([invalid])
 
     result = asyncio.run(
         client.propose_event(
@@ -582,15 +675,21 @@ def test_cn_daily_mythic_shop_update_must_be_context() -> None:
                     "importance_range": [0.3, 0.45],
                 },
             },
-            candidates=[{"event_id": 12, "title": "本周国服神话商城轮换"}],
-            stable_event_key="mythic-shop:cn:2026-w30",
+            candidates=[
+                {
+                    "event_id": 12,
+                    "title": "本周国服神话商城轮换",
+                    "aggregation_key": "mythic_shop:week:30",
+                }
+            ],
+            stable_event_key="mythic_shop:week:30",
             knowledge_rules=[],
         )
     )
 
-    assert result.decision == "update"
-    assert result.update_kind == "context"
-    assert result.evidence_stance == "context"
+    assert result.memberships[0].target == "existing:12"
+    assert result.memberships[0].update_kind == "context"
+    assert result.memberships[0].evidence_stance == "context"
     assert len(completions.calls) == 1
 
 

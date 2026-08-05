@@ -13,6 +13,7 @@ from app.models.source import Source
 from app.models.workflow import KnowledgeRule
 from app.schemas.event_workflow import (
     EventDecisionDraft,
+    EventMembershipDraft,
     EventReviewRejection,
 )
 from app.services.event_aggregation import create_event
@@ -60,6 +61,8 @@ def _item(db: Session, source: Source, index: int, title: str) -> NormalizedItem
         translation_status="not_required",
         analysis_model="test",
         analysis_version="test",
+        content_type="official_notice",
+        primary_topic="patch",
     )
     db.add(item)
     db.commit()
@@ -89,13 +92,16 @@ async def test_create_draft_does_not_write_event_until_approved(
         monkeypatch,
         [
             EventDecisionDraft(
-                decision="create",
-                reason="新的版本事件",
-                event_key="patch:26.13",
-                title="英雄联盟 26.13 版本",
-                summary="版本预览发布。",
-                category="版本更新",
-                change_note="创建版本事件",
+                memberships=[
+                    EventMembershipDraft(
+                        target="new",
+                        event_type="patch_cycle",
+                        aggregation_key="patch:26.13",
+                        timeline_note="版本预览发布",
+                        lifecycle_status="developing",
+                        is_official_confirmation=True,
+                    )
+                ]
             )
         ],
     )
@@ -112,7 +118,8 @@ async def test_create_draft_does_not_write_event_until_approved(
     approve_event_review(db, review, note="确认")
 
     event = db.scalar(select(Event))
-    assert event.event_key == "patch:26.13"
+    assert event.aggregation_key == "patch:26.13"
+    assert event.event_type == "patch_cycle"
     assert event.current_revision == 1
     assert run.status == "completed"
     assert run.outcome == "created"
@@ -131,6 +138,7 @@ async def test_update_can_only_apply_snapshotted_candidate(
         db,
         normalized_item_id=preview.id,
         event_key="patch:26.13",
+        aggregation_key="patch:26.13",
         title="26.13 版本预览",
         summary="初始",
         category="版本更新",
@@ -140,13 +148,15 @@ async def test_update_can_only_apply_snapshotted_candidate(
         monkeypatch,
         [
             EventDecisionDraft(
-                decision="update",
-                reason="命中同一版本",
-                candidate_event_id=event.id,
-                title="26.13 版本完整预览",
-                summary="补充完整改动。",
-                change_note="新增完整预览",
-                new_facts=["公布完整数值"],
+                memberships=[
+                    EventMembershipDraft(
+                        target=f"existing:{event.id}",
+                        event_type="patch_cycle",
+                        aggregation_key="patch:26.13",
+                        timeline_note="公布完整数值",
+                        lifecycle_status="developing",
+                    )
+                ]
             )
         ],
     )
@@ -178,7 +188,7 @@ async def test_not_event_approval_leaves_formal_events_unchanged(
     item = _item(db, source, 0, "一次性公告")
     _mock_decisions(
         monkeypatch,
-        [EventDecisionDraft(decision="not_event", reason="不形成持续事件")],
+        [EventDecisionDraft(memberships=[])],
     )
     run = await start_event_aggregation(db, item)
     review = db.scalar(
@@ -193,6 +203,66 @@ async def test_not_event_approval_leaves_formal_events_unchanged(
 
 
 @pytest.mark.anyio
+async def test_one_message_can_create_primary_and_component_memberships(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Source(name="Workflow Multi", connector_type="riot_official")
+    db.add(source)
+    db.commit()
+    item = _item(db, source, 0, "26.13 更新公告：经典模式上线")
+    _mock_decisions(
+        monkeypatch,
+        [
+            EventDecisionDraft(
+                memberships=[
+                    EventMembershipDraft(
+                        target="new",
+                        event_type="patch_cycle",
+                        aggregation_key="patch:26.13",
+                        membership_role="primary",
+                        timeline_note="26.13 更新公告发布",
+                        is_official_confirmation=True,
+                    ),
+                    EventMembershipDraft(
+                        target="new",
+                        event_type="major_gameplay_change",
+                        aggregation_key="gameplay:经典模式",
+                        membership_role="component",
+                        timeline_note="经典模式随版本更新上线",
+                        is_official_confirmation=True,
+                    ),
+                ]
+            )
+        ],
+    )
+
+    run = await start_event_aggregation(db, item)
+    review = db.scalar(
+        select(EventReviewTask).where(
+            EventReviewTask.event_aggregation_run_id == run.id
+        )
+    )
+    approve_event_review(db, review, note=None)
+
+    messages = list(
+        db.scalars(
+            select(EventMessage)
+            .where(EventMessage.normalized_item_id == item.id)
+            .order_by(EventMessage.membership_role)
+        )
+    )
+    assert {message.membership_role for message in messages} == {
+        "primary",
+        "component",
+    }
+    assert {
+        db.get(Event, message.event_id).event_type for message in messages
+    } == {"patch_cycle", "major_gameplay_change"}
+    assert run.outcome == "created"
+
+
+@pytest.mark.anyio
 async def test_reject_records_knowledge_and_retry_supersedes_run(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -204,14 +274,16 @@ async def test_reject_records_knowledge_and_retry_supersedes_run(
     _mock_decisions(
         monkeypatch,
         [
-            EventDecisionDraft(decision="not_event", reason="错误判断"),
+            EventDecisionDraft(memberships=[]),
             EventDecisionDraft(
-                decision="create",
-                reason="纠正后创建",
-                event_key="patch:26.13",
-                title="26.13 版本",
-                summary="版本事件",
-                category="版本更新",
+                memberships=[
+                    EventMembershipDraft(
+                        target="new",
+                        event_type="patch_cycle",
+                        aggregation_key="patch:26.13",
+                        timeline_note="纠正后创建版本时间线",
+                    )
+                ]
             ),
         ],
     )

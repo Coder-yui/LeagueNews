@@ -9,6 +9,30 @@ from app.models.intelligence import Claim, EventClaim
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 
+TIMELINE_PREDICATES = {
+    "transfers_to",
+    "considered_for",
+    "leaves",
+    "stays",
+    "retires",
+    "releases",
+    "goes_live",
+    "previews",
+    "delays",
+    "patches",
+    "buffs",
+    "nerfs",
+    "reworks",
+    "adds_mode",
+    "wins",
+    "loses",
+    "advances",
+    "eliminated",
+    "rotates",
+    "discounts",
+    "gifts",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ClaimBackfillReport:
@@ -52,6 +76,12 @@ def extract_traceable_claim(db: Session, item: NormalizedItem) -> Claim:
         effective_at=item.raw_item.published_at,
         stance="asserts",
         claim_type="statement",
+        temporal_role="state",
+        attribution={
+            "claimed_by": item.raw_item.author_name or item.raw_item.source.name,
+            "stance": "asserts",
+            "certainty": "confirmed",
+        },
         evidence=evidence,
         extraction_model=item.analysis_model,
         confidence=1.0 if raw_text else 0.8,
@@ -65,6 +95,139 @@ def extract_traceable_claim(db: Session, item: NormalizedItem) -> Claim:
     db.add(claim)
     db.flush()
     return claim
+
+
+def persist_generated_claims(
+    db: Session,
+    item: NormalizedItem,
+    *,
+    fact_claims: list[dict[str, object]],
+    attribution: dict[str, object],
+) -> list[Claim]:
+    for existing in item.claims:
+        if existing.status == "active":
+            existing.status = "superseded"
+    base_revision = (
+        db.scalar(
+            select(func.max(Claim.revision)).where(
+                Claim.normalized_item_id == item.id
+            )
+        )
+        or 0
+    )
+    evidence = [
+        {
+            "block_id": block.get("id"),
+            "block_index": index,
+            "source": "raw",
+            "quote": str(block.get("text") or "")[:500],
+        }
+        for index, block in enumerate(item.raw_item.content_blocks)
+        if block.get("text")
+    ][:5]
+    certainty = str(attribution.get("certainty") or "speculative")
+    confidence = {
+        "confirmed": 1.0,
+        "likely": 0.8,
+        "speculative": 0.55,
+    }.get(certainty, 0.55)
+    persisted = []
+    for offset, draft in enumerate(fact_claims, start=1):
+        predicate = str(draft.get("predicate") or "")
+        if predicate not in TIMELINE_PREDICATES:
+            raise ValueError(f"unsupported fact claim predicate: {predicate}")
+        claim = Claim(
+            normalized_item_id=item.id,
+            subject=dict(draft.get("subject") or {}),
+            predicate=predicate,
+            object_value=dict(draft.get("object") or {}),
+            effective_at=item.raw_item.published_at,
+            stance=(
+                "contradicts"
+                if attribution.get("stance") == "refutes"
+                else "asserts"
+            ),
+            claim_type="fact_claim",
+            temporal_role=str(draft.get("temporal_role") or "state"),
+            attribution={
+                **attribution,
+                "at": (
+                    item.raw_item.published_at.isoformat()
+                    if item.raw_item.published_at
+                    else None
+                ),
+            },
+            evidence=evidence,
+            extraction_model=item.analysis_model,
+            schema_version="claim-v2-timeline",
+            confidence=confidence,
+            revision=base_revision + offset,
+            provenance={
+                "normalized_item_revision": item.current_revision,
+                "raw_item_id": item.raw_item_id,
+                "strategy": "atomic-fact-claims-v2",
+                "supersedes_hint": draft.get("supersedes_hint"),
+            },
+        )
+        db.add(claim)
+        persisted.append(claim)
+    db.flush()
+    return persisted
+
+
+def _subject_identity(subject: dict[str, object]) -> tuple[str, str]:
+    return (
+        str(subject.get("canonical_name") or subject.get("name") or "").casefold(),
+        str(subject.get("type") or "").casefold(),
+    )
+
+
+def _resolve_event_supersession(
+    db: Session,
+    *,
+    event_id: int,
+    claim: Claim,
+) -> None:
+    hint = str(claim.provenance.get("supersedes_hint") or "").casefold()
+    if not hint and claim.predicate not in {
+        "transfers_to",
+        "goes_live",
+        "releases",
+        "patches",
+    }:
+        return
+    statement = (
+        select(Claim)
+        .join(EventClaim, EventClaim.claim_id == Claim.id)
+        .where(
+            EventClaim.event_id == event_id,
+            Claim.id != claim.id,
+        )
+        .order_by(Claim.effective_at.desc(), Claim.id.desc())
+    )
+    if claim.effective_at is not None:
+        statement = statement.where(
+            (Claim.effective_at.is_(None))
+            | (Claim.effective_at <= claim.effective_at)
+        )
+    prior_claims = list(db.scalars(statement))
+    identity = _subject_identity(claim.subject)
+    predecessor = next(
+        (
+            prior
+            for prior in prior_claims
+            if _subject_identity(prior.subject) == identity
+            and (
+                not hint
+                or hint in str(prior.object_value).casefold()
+                or hint in str(prior.subject).casefold()
+            )
+        ),
+        None,
+    )
+    if predecessor is not None:
+        claim.supersedes_claim_id = predecessor.id
+        predecessor.status = "superseded"
 
 
 def link_item_claims_to_event(
@@ -87,6 +250,13 @@ def link_item_claims_to_event(
             db.add(
                 EventClaim(event_id=event_id, claim_id=claim_id, relation=relation)
             )
+            claim = db.get(Claim, claim_id)
+            if claim is not None:
+                _resolve_event_supersession(
+                    db,
+                    event_id=event_id,
+                    claim=claim,
+                )
 
 
 def unlink_item_claims_from_event(

@@ -29,6 +29,7 @@ def _message_payload(message: EventMessage) -> dict[str, Any]:
     return {
         "normalized_item_id": item.id,
         "relation_type": message.relation_type,
+        "membership_role": message.membership_role,
         "evidence_stance": message.evidence_stance,
         "is_official_confirmation": message.is_official_confirmation,
         "is_significant_update": message.is_significant_update,
@@ -51,6 +52,7 @@ def _summary_payload(event: Event) -> dict[str, Any]:
     return {
         "id": event.id,
         "event_key": event.event_key,
+        "aggregation_key": event.aggregation_key,
         "title": event.title,
         "summary": event.summary,
         "category": event.category,

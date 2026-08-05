@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from app.core.config import settings
 from app.prompts import prompt_registry
 from app.prompts.registry import (
+    CLASSIFICATION_OPERATION,
     EVENT_AGGREGATION_OPERATION,
     FACT_EXTRACTION_OPERATION,
     IMPORTANCE_SCORING_OPERATION,
@@ -52,6 +53,61 @@ class FactExtractionResult(BaseModel):
     summary: str = Field(min_length=1)
     category: str = Field(min_length=1, max_length=60)
     entities: list[ExtractedEntity] = Field(max_length=5)
+
+
+class ClassifiedEntityRole(BaseModel):
+    name: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    role: Literal["core", "context", "affected"]
+
+
+class ClassificationTemporal(BaseModel):
+    is_recurring: bool
+    recurrence_window: Literal["daily", "weekly", "patch_cycle"] | None
+    certainty: Literal["confirmed", "likely", "speculative"]
+
+
+class ClassificationResult(BaseModel):
+    content_type: Literal[
+        "official_fact",
+        "official_notice",
+        "match_result",
+        "insider_rumor",
+        "insider_confirmed",
+        "data_mine",
+        "aggregation",
+        "community_noise",
+    ]
+    topic: Literal[
+        "patch",
+        "champion",
+        "game_mode",
+        "esports",
+        "roster",
+        "skin",
+        "activity",
+        "service",
+        "community",
+        "business",
+        "other",
+    ]
+    secondary_topics: list[
+        Literal[
+            "patch",
+            "champion",
+            "game_mode",
+            "esports",
+            "roster",
+            "skin",
+            "activity",
+            "service",
+            "community",
+            "business",
+            "other",
+        ]
+    ] = Field(default_factory=list, max_length=2)
+    entity_roles: list[ClassifiedEntityRole] = Field(default_factory=list)
+    temporal: ClassificationTemporal
 
 
 class ImportanceDimension(BaseModel):
@@ -219,6 +275,63 @@ class LLMClient:
             max_tokens=900,
             schema=FactExtractionResult,
             operation=FACT_EXTRACTION_OPERATION,
+        )
+
+    async def classify(
+        self,
+        *,
+        content: str,
+        extracted_facts: dict[str, object],
+        source_context: dict[str, object] | None = None,
+    ) -> ClassificationResult:
+        prompt = """你是英雄联盟中文资讯的分类器。只依据当前消息的文本与图片OCR结果分类，
+不判断重要性、不判断可信度、不改写事实。
+
+输出严格 JSON：
+{
+  "content_type": <见下方枚举>,
+  "topic": <见下方枚举>,
+  "secondary_topics": [最多2个次要topic],
+  "entity_roles": [
+    {"name": 实体名, "type": 实体类型, "role": "core|context|affected"}
+  ],
+  "temporal": {
+    "is_recurring": bool,        // 是否属于周期性内容(如每日商城/每周活动)
+    "recurrence_window": "daily|weekly|patch_cycle|null",
+    "certainty": "confirmed|likely|speculative"  // 措辞确定性,不等于可信度
+  }
+}
+
+content_type 枚举与判定规则：
+- official_fact: 官方账号发布的既成事实（皮肤已上线、更新已生效）
+- official_notice: 官方预告、活动规则、赛程安排（尚未发生但官方确定）
+- match_result: 已结束比赛的比分结果
+- insider_rumor: 非官方账号的爆料，且措辞含试探性（"考虑中""据说""官宣为准"）
+- insider_confirmed: 非官方账号但措辞确定（"确认""已敲定"），仍非官方
+- data_mine: 测试服/客户端文件挖掘、开发者技术披露
+- aggregation: 明显转载/搬运其他来源的内容（含转发、引用官方原文）
+- community_noise: 抽奖、应援、纯个人感想，无新增事实
+
+判定要点：
+1. content_type 看"谁说的+怎么说的"，topic 看"说的是什么"，二者独立。
+2. certainty 只反映消息本身措辞的确定程度，不要因为是官方就填 confirmed——
+   官方预告未来的事仍是 confirmed（官方有权决定），爆料人的"确认"最多 likely。
+3. entity_roles 的 core 是新闻主角（转会的选手、更新的英雄、上线的皮肤、
+   对阵的战队），context 是背景实体（赛事名、版本号、俱乐部），
+   affected 是被波及实体（被修复bug涉及的皮肤）。批量版本图里的英雄列表
+   不要全标 core。
+4. is_recurring=true 用于每日神话商城、每周活动这类会周期重复的内容，
+   供下游按时间窗口聚合。"""
+        return await self._validated_json_completion(
+            prompt=prompt,
+            payload={
+                "content": content,
+                "extracted_facts": extracted_facts,
+                "source_context": source_context or {},
+            },
+            max_tokens=900,
+            schema=ClassificationResult,
+            operation=CLASSIFICATION_OPERATION,
         )
 
     async def score_importance(

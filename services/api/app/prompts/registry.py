@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 ITEM_ANALYSIS_OPERATION = "单条分析"
 FACT_EXTRACTION_OPERATION = "事实抽取"
+CLASSIFICATION_OPERATION = "分类"
 IMPORTANCE_SCORING_OPERATION = "重要性评分"
 RELEVANCE_OPERATION = "相关性判断"
 TRANSLATION_OPERATION = "翻译"
@@ -11,6 +12,7 @@ PRODUCTION_LLM_OPERATIONS = frozenset(
     {
         ITEM_ANALYSIS_OPERATION,
         FACT_EXTRACTION_OPERATION,
+        CLASSIFICATION_OPERATION,
         IMPORTANCE_SCORING_OPERATION,
         RELEVANCE_OPERATION,
         TRANSLATION_OPERATION,
@@ -32,6 +34,7 @@ class PromptRegistry:
     _versions = {
         ITEM_ANALYSIS_OPERATION: ("item-analysis", "v5-importance-rubric"),
         FACT_EXTRACTION_OPERATION: ("fact-extraction", "v1"),
+        CLASSIFICATION_OPERATION: ("classification", "v1"),
         IMPORTANCE_SCORING_OPERATION: (
             "importance-scoring",
             "v2-five-dimensions",

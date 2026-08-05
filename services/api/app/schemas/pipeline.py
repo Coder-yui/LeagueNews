@@ -8,6 +8,8 @@ PipelineStage = Literal[
     "relevance",
     "image_ocr",
     "translation",
+    "fact_extract",
+    "classify",
     "item_analysis",
     "event_decision",
 ]

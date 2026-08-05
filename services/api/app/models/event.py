@@ -28,6 +28,9 @@ class Event(Base):
     event_key: Mapped[str | None] = mapped_column(
         String(160), nullable=True, unique=True, index=True
     )
+    aggregation_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(500))
     summary: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(60), index=True)
@@ -103,6 +106,7 @@ class EventMessage(Base):
         primary_key=True,
     )
     relation_type: Mapped[str] = mapped_column(String(30), default="primary")
+    membership_role: Mapped[str] = mapped_column(String(20), default="primary")
     evidence_stance: Mapped[str] = mapped_column(String(20), default="supports")
     independence_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_official_confirmation: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -130,14 +134,11 @@ class EventMessage(Base):
     )
 
     __table_args__ = (
-        Index(
-            "uq_event_messages_active_normalized_item",
-            "normalized_item_id",
-            unique=True,
-            postgresql_where=text("membership_status = 'active'"),
-            sqlite_where=text("membership_status = 'active'"),
-        ),
         CheckConstraint("relation_type = 'primary'", name="ck_event_messages_relation_type"),
+        CheckConstraint(
+            "membership_role IN ('primary', 'component', 'cross_ref')",
+            name="ck_event_messages_membership_role",
+        ),
         CheckConstraint(
             "membership_status IN ('active', 'withdrawn')",
             name="ck_event_messages_membership_status",

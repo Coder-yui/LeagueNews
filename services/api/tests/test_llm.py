@@ -7,6 +7,7 @@ import pytest
 from app.core.config import settings
 from app.services.llm import (
     AnalysisResult,
+    ClassificationResult,
     LLMAnalysisError,
     LLMClient,
     LLMConfigurationError,
@@ -60,6 +61,49 @@ def test_analysis_result_rejects_more_than_five_entities() -> None:
                 "importance_evidence": ["属于版本更新。"],
             }
         )
+
+
+def test_classification_uses_registered_dual_axis_prompt() -> None:
+    response = json.dumps(
+        {
+            "content_type": "insider_rumor",
+            "topic": "roster",
+            "secondary_topics": ["esports"],
+            "entity_roles": [
+                {"name": "WBG", "type": "team", "role": "core"}
+            ],
+            "temporal": {
+                "is_recurring": False,
+                "recurrence_window": None,
+                "certainty": "speculative",
+            },
+        }
+    )
+    client, completions = _client_with_responses([response])
+
+    result = asyncio.run(
+        client.classify(
+            content="WBG正在考虑新的打野，最后以官宣为准。",
+            extracted_facts={
+                "title": "WBG打野传闻",
+                "summary": "WBG正在考虑新打野。",
+                "category": "转会",
+                "entities": [{"name": "WBG", "type": "team"}],
+            },
+            source_context={"source_name": "_尧阿尧y_"},
+        )
+    )
+
+    assert isinstance(result, ClassificationResult)
+    assert result.content_type == "insider_rumor"
+    assert result.topic == "roster"
+    metadata = execution_metadata(result)
+    assert metadata["prompt_name"] == "classification"
+    assert metadata["prompt_version"] == "v1"
+    messages = completions.calls[0]["messages"]
+    assert isinstance(messages, list)
+    assert "content_type 看\"谁说的+怎么说的\"" in messages[0]["content"]
+    assert "is_recurring=true 用于每日神话商城" in messages[0]["content"]
 
 
 def test_language_detection() -> None:

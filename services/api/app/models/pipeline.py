@@ -57,7 +57,8 @@ class PipelineCorrection(Base):
     __table_args__ = (
         CheckConstraint(
             "restart_from_stage IN "
-            "('relevance', 'image_ocr', 'translation', 'item_analysis', 'event_decision')",
+            "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', "
+            "'item_analysis', 'event_decision')",
             name="ck_pipeline_corrections_restart_stage",
         ),
         CheckConstraint(
@@ -116,7 +117,8 @@ class ProcessingCheckpoint(Base):
     __table_args__ = (
         CheckConstraint(
             "stage IN "
-            "('relevance', 'image_ocr', 'translation', 'item_analysis', 'event_decision')",
+            "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', "
+            "'item_analysis', 'event_decision')",
             name="ck_processing_checkpoints_stage",
         ),
         CheckConstraint(

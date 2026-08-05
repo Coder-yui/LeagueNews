@@ -2,6 +2,7 @@ import pytest
 
 from app.prompts import prompt_registry
 from app.prompts.registry import (
+    CLASSIFICATION_OPERATION,
     EVENT_AGGREGATION_OPERATION,
     PRODUCTION_LLM_OPERATIONS,
 )
@@ -27,6 +28,13 @@ def test_all_production_llm_operations_are_registered() -> None:
     )
     assert prompt.name == "event-decision"
     assert prompt.version == "v3-editorial-policy"
+    classification = prompt_registry.resolve(
+        operation=CLASSIFICATION_OPERATION,
+        content="dual-axis contract",
+        schema_version="ClassificationResult:v1",
+    )
+    assert classification.name == "classification"
+    assert classification.version == "v1"
 
 
 def test_unregistered_operations_require_explicit_experimental_opt_in() -> None:

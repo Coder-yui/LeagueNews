@@ -75,6 +75,7 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         "summary": item.summary,
         "category": item.category,
         "entities": item.entities,
+        "content_type": item.content_type,
         "primary_topic": item.primary_topic,
         "secondary_topics": item.secondary_topics,
         "facets": item.facets,

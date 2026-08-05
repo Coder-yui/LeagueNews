@@ -11,11 +11,13 @@ from app.core.database import Base
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem
+from app.models.pipeline import ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
 from app.services.llm import (
+    ClassificationResult,
     FactExtractionResult,
     ImportanceResult,
     LLMClient,
@@ -332,7 +334,7 @@ def test_approving_ocr_stages_extractions_then_moves_to_translation_review(monke
         assert result.status == "awaiting_review"
 
 
-def test_approving_translation_moves_to_analysis_review(monkeypatch) -> None:
+def test_approving_translation_moves_to_fact_review(monkeypatch) -> None:
     translation_proposal = {
         "normalized_text": "Patch preview from a designer.",
         "translated_title": "26.15版本预览",
@@ -344,16 +346,16 @@ def test_approving_translation_moves_to_analysis_review(monkeypatch) -> None:
         "translated_media_extractions": [],
     }
 
-    async def fake_generate_item_review(db, run):
-        assert run.current_stage == "item_analysis"
+    async def fake_generate_fact_review(db, run):
+        assert run.current_stage == "fact_extract"
         assert run.context["approved_translation_proposal"] == translation_proposal
         run.status = "awaiting_review"
         db.commit()
 
     monkeypatch.setattr(
         reviewed_pipeline,
-        "_generate_item_review",
-        fake_generate_item_review,
+        "_generate_fact_review",
+        fake_generate_fact_review,
     )
 
     with _session() as db:
@@ -378,9 +380,61 @@ def test_approving_translation_moves_to_analysis_review(monkeypatch) -> None:
         result = asyncio.run(approve_review(db, review, note="翻译通过"))
 
         assert review.status == "approved"
-        assert result.current_stage == "item_analysis"
+        assert result.current_stage == "fact_extract"
         assert result.status == "awaiting_review"
         assert raw.normalized_item is None
+
+
+def test_approving_fact_checkpoint_moves_to_classification(monkeypatch) -> None:
+    fact_proposal = {
+        "title": "WBG打野传闻",
+        "summary": "WBG正在考虑新打野。",
+        "category": "转会",
+        "entities": [{"name": "WBG", "type": "team"}],
+    }
+
+    async def fake_generate_classification_review(db, run):
+        assert run.current_stage == "classify"
+        assert run.context["approved_fact_proposal"] == fact_proposal
+        run.status = "awaiting_review"
+        db.commit()
+
+    monkeypatch.setattr(
+        reviewed_pipeline,
+        "_generate_classification_review",
+        fake_generate_classification_review,
+    )
+    with _session() as db:
+        raw = _raw_item(db)
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="awaiting_review",
+            current_stage="fact_extract",
+            context={"approved_translation_proposal": {"translated_title": "传闻"}},
+        )
+        db.add(run)
+        db.flush()
+        review = ReviewTask(
+            processing_run_id=run.id,
+            stage="fact_extract",
+            status="pending",
+            proposal=fact_proposal,
+        )
+        db.add(review)
+        db.commit()
+
+        result = asyncio.run(approve_review(db, review, note=None))
+
+        assert result.current_stage == "classify"
+        checkpoint = db.scalar(
+            select(ProcessingCheckpoint).where(
+                ProcessingCheckpoint.processing_run_id == run.id,
+                ProcessingCheckpoint.stage == "fact_extract",
+            )
+        )
+        assert checkpoint is not None
+        assert checkpoint.output_snapshot["title"] == "WBG打野传闻"
 
 
 def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
@@ -409,7 +463,25 @@ def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
             novelty={"score": 3, "evidence": "属于新版本预览。"},
         )
 
+    async def fake_classify(_self, **_payload):
+        return ClassificationResult.model_validate(
+            {
+                "content_type": "official_notice",
+                "topic": "patch",
+                "secondary_topics": [],
+                "entity_roles": [
+                    {"name": "26.15", "type": "patch", "role": "core"}
+                ],
+                "temporal": {
+                    "is_recurring": False,
+                    "recurrence_window": None,
+                    "certainty": "confirmed",
+                },
+            }
+        )
+
     monkeypatch.setattr(LLMClient, "extract_facts", fake_extract)
+    monkeypatch.setattr(LLMClient, "classify", fake_classify)
     monkeypatch.setattr(LLMClient, "score_importance", fake_importance)
     with _session() as db:
         raw = _raw_item(db)
@@ -458,6 +530,8 @@ def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
     assert proposal["credibility"] == "unverified"
     assert proposal["credibility_score"] == 0.6
     assert proposal["credibility_evidence"] == ["信源“测试信源”的配置权威度为 60"]
+    assert proposal["content_type"] == "official_notice"
+    assert proposal["primary_topic"] == "patch"
 
 
 def test_source_authority_uses_sixty_for_tieba_and_one_hundred_for_official() -> None:
@@ -472,17 +546,17 @@ def test_source_authority_uses_sixty_for_tieba_and_one_hundred_for_official() ->
 
 
 def test_chinese_item_skips_translation_review(monkeypatch) -> None:
-    generated_item_reviews: list[int] = []
+    generated_fact_reviews: list[int] = []
 
-    async def fake_generate_item_review(db, run):
-        generated_item_reviews.append(run.id)
+    async def fake_generate_fact_review(db, run):
+        generated_fact_reviews.append(run.id)
         run.status = "awaiting_review"
         db.commit()
 
     monkeypatch.setattr(
         reviewed_pipeline,
-        "_generate_item_review",
-        fake_generate_item_review,
+        "_generate_fact_review",
+        fake_generate_fact_review,
     )
 
     with _session() as db:
@@ -505,9 +579,9 @@ def test_chinese_item_skips_translation_review(monkeypatch) -> None:
         asyncio.run(reviewed_pipeline._generate_translation_review(db, run))
 
         db.refresh(run)
-        assert run.current_stage == "item_analysis"
+        assert run.current_stage == "fact_extract"
         assert run.status == "awaiting_review"
-        assert generated_item_reviews == [run.id]
+        assert generated_fact_reviews == [run.id]
         assert run.context["approved_translation_proposal"]["translation_status"] == "not_required"
         translation_reviews = list(
             db.scalars(

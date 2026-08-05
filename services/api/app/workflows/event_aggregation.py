@@ -190,6 +190,7 @@ async def _generate_review(
         "summary": item.summary,
         "category": item.category,
         "entities": item.entities,
+        "content_type": item.content_type,
         "importance_score": item.importance_score,
         "credibility": item.credibility,
         "credibility_score": item.credibility_score,

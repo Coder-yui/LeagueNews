@@ -13,7 +13,7 @@ from app.domain.importance import (
     IMPORTANCE_POLICY_VERSION,
     calculate_importance,
 )
-from app.domain.ontology import ONTOLOGY_VERSION, normalize_entities, topic_from_category
+from app.domain.ontology import ONTOLOGY_VERSION, normalize_entities
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import (
     NormalizedItem,
@@ -41,8 +41,10 @@ from app.workflows.understand_media import (
 
 RELEVANCE_STAGE = "relevance"
 OCR_STAGE = "image_ocr"
-ITEM_STAGE = "item_analysis"
 TRANSLATION_STAGE = "translation"
+FACT_STAGE = "fact_extract"
+CLASSIFY_STAGE = "classify"
+ITEM_STAGE = "item_analysis"
 
 OFFICIAL_CONNECTORS = {"riot_official", "tencent_lol"}
 OFFICIAL_ACCOUNTS = {
@@ -84,6 +86,8 @@ async def start_item_processing(
         RELEVANCE_STAGE,
         OCR_STAGE,
         TRANSLATION_STAGE,
+        FACT_STAGE,
+        CLASSIFY_STAGE,
         ITEM_STAGE,
     }:
         raise ValueError(f"unsupported restart stage: {restart_from_stage}")
@@ -145,6 +149,12 @@ async def start_item_processing(
         await _generate_translation_review(
             db, run, **_guard_kwargs(execution_guard)
         )
+    elif restart_from_stage == FACT_STAGE:
+        await _generate_fact_review(db, run, **_guard_kwargs(execution_guard))
+    elif restart_from_stage == CLASSIFY_STAGE:
+        await _generate_classification_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     else:
         await _generate_item_review(db, run, **_guard_kwargs(execution_guard))
     return run
@@ -187,6 +197,10 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
         await _generate_item_review(db, restarted)
     elif restarted.current_stage == TRANSLATION_STAGE:
         await _generate_translation_review(db, restarted)
+    elif restarted.current_stage == FACT_STAGE:
+        await _generate_fact_review(db, restarted)
+    elif restarted.current_stage == CLASSIFY_STAGE:
+        await _generate_classification_review(db, restarted)
     else:
         raise ValueError(f"unsupported restart stage: {restarted.current_stage}")
     return restarted
@@ -226,6 +240,14 @@ async def resume_item_processing(
             )
         elif run.current_stage == ITEM_STAGE:
             await _generate_item_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
+        elif run.current_stage == FACT_STAGE:
+            await _generate_fact_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
+        elif run.current_stage == CLASSIFY_STAGE:
+            await _generate_classification_review(
                 db, run, **_guard_kwargs(execution_guard)
             )
         else:
@@ -319,6 +341,32 @@ async def approve_review(
         await _generate_translation_review(
             db, run, **_guard_kwargs(execution_guard)
         )
+    elif review.stage == FACT_STAGE:
+        run.context = {
+            **run.context,
+            "approved_fact_proposal": review.proposal,
+        }
+        _record_checkpoint(db, review)
+        run.status = "running"
+        run.current_stage = CLASSIFY_STAGE
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        await _generate_classification_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
+    elif review.stage == CLASSIFY_STAGE:
+        run.context = {
+            **run.context,
+            "approved_classification_proposal": review.proposal,
+        }
+        _record_checkpoint(db, review)
+        run.status = "running"
+        run.current_stage = ITEM_STAGE
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        await _generate_item_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     elif review.stage == ITEM_STAGE:
         item = _apply_normalized_item(
             db,
@@ -349,10 +397,10 @@ async def approve_review(
         }
         _record_checkpoint(db, review)
         run.status = "running"
-        run.current_stage = ITEM_STAGE
+        run.current_stage = FACT_STAGE
         assert_execution_owned(db, execution_guard)
         db.commit()
-        await _generate_item_review(
+        await _generate_fact_review(
             db, run, **_guard_kwargs(execution_guard)
         )
     else:
@@ -587,7 +635,26 @@ async def _generate_ocr_review(
         raise
 
 
-async def _generate_item_review(
+def _analysis_content(translation_proposal: dict[str, Any]) -> str:
+    translated_blocks = list(
+        translation_proposal.get("translated_content_blocks") or []
+    )
+    content = text_from_content_blocks(translated_blocks)
+    translated_structures = [
+        value.get("translated_data")
+        for value in translation_proposal.get("translated_media_extractions", [])
+        if isinstance(value, dict)
+        and isinstance(value.get("translated_data"), dict)
+    ]
+    if translated_structures:
+        content += "\n\n[图片版本改动结构化中文译文]\n" + json.dumps(
+            translated_structures,
+            ensure_ascii=False,
+        )
+    return content
+
+
+async def _generate_fact_review(
     db: Session,
     run: ProcessingRun,
     *,
@@ -596,7 +663,106 @@ async def _generate_item_review(
     try:
         translation_proposal = run.context.get("approved_translation_proposal")
         if not isinstance(translation_proposal, dict):
+            raise ValueError(
+                "fact extraction stage requires an approved translation proposal"
+            )
+        rules = _knowledge_texts(db, "analysis", run.raw_item)
+        knowledge_snapshot = _knowledge_rule_snapshot(
+            db, "analysis", run.raw_item
+        )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        client = LLMClient()
+        facts = await client.extract_facts(
+            title=str(translation_proposal.get("translated_title") or ""),
+            content=_analysis_content(translation_proposal),
+            source_context=_source_context(run.raw_item),
+            knowledge_rules=rules,
+        )
+        proposal = {
+            **facts.model_dump(mode="json"),
+            "analysis_model": settings.model_name,
+            "_execution_metadata": {
+                "fact_extraction": execution_metadata(facts),
+            },
+            "knowledge_rules": knowledge_snapshot,
+        }
+        _replace_pending_review(
+            db, run=run, stage=FACT_STAGE, proposal=proposal
+        )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+    except Exception as exc:
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
+        raise
+
+
+async def _generate_classification_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
+    try:
+        translation_proposal = run.context.get("approved_translation_proposal")
+        fact_proposal = run.context.get("approved_fact_proposal")
+        if not isinstance(translation_proposal, dict):
+            raise ValueError(
+                "classification stage requires an approved translation proposal"
+            )
+        if not isinstance(fact_proposal, dict):
+            raise ValueError(
+                "classification stage requires an approved fact proposal"
+            )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        client = LLMClient()
+        classification = await client.classify(
+            content=_analysis_content(translation_proposal),
+            extracted_facts={
+                key: fact_proposal[key]
+                for key in ("title", "summary", "category", "entities")
+                if key in fact_proposal
+            },
+            source_context=_source_context(run.raw_item),
+        )
+        proposal = {
+            **classification.model_dump(mode="json"),
+            "analysis_model": settings.model_name,
+            "_execution_metadata": {
+                "classification": execution_metadata(classification),
+            },
+        }
+        _replace_pending_review(
+            db, run=run, stage=CLASSIFY_STAGE, proposal=proposal
+        )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+    except Exception as exc:
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
+        raise
+
+
+async def _generate_item_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
+    try:
+        translation_proposal = run.context.get("approved_translation_proposal")
+        fact_proposal = run.context.get("approved_fact_proposal")
+        classification_proposal = run.context.get(
+            "approved_classification_proposal"
+        )
+        if not isinstance(translation_proposal, dict):
             raise ValueError("analysis stage requires an approved translation proposal")
+        if not isinstance(fact_proposal, dict):
+            raise ValueError("analysis stage requires an approved fact proposal")
+        if not isinstance(classification_proposal, dict):
+            raise ValueError(
+                "analysis stage requires an approved classification proposal"
+            )
         rules = _knowledge_texts(db, "analysis", run.raw_item)
         knowledge_snapshot = _knowledge_rule_snapshot(
             db, "analysis", run.raw_item
@@ -606,6 +772,8 @@ async def _generate_item_review(
         proposal = await _build_item_proposal(
             raw_item=run.raw_item,
             translation_proposal=translation_proposal,
+            fact_proposal=fact_proposal,
+            classification_proposal=classification_proposal,
             rules=rules,
             knowledge_snapshot=knowledge_snapshot,
         )
@@ -621,36 +789,47 @@ async def _build_item_proposal(
     *,
     raw_item: RawItem,
     translation_proposal: dict[str, Any],
+    fact_proposal: dict[str, Any] | None = None,
+    classification_proposal: dict[str, Any] | None = None,
     rules: list[str],
     knowledge_snapshot: list[dict[str, object]] | None = None,
     ocr_corrections: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
-    translated_blocks = list(translation_proposal.get("translated_content_blocks") or [])
-    chinese_text = text_from_content_blocks(translated_blocks)
-    translated_structures = [
-        value.get("translated_data")
-        for value in translation_proposal.get("translated_media_extractions", [])
-        if isinstance(value, dict) and isinstance(value.get("translated_data"), dict)
-    ]
-    analysis_content = chinese_text
-    if translated_structures:
-        analysis_content += "\n\n[图片版本改动结构化中文译文]\n" + json.dumps(
-            translated_structures,
-            ensure_ascii=False,
-        )
+    analysis_content = _analysis_content(translation_proposal)
     client = LLMClient()
-    facts = await client.extract_facts(
-        title=str(translation_proposal.get("translated_title") or ""),
-        content=analysis_content,
-        source_context=_source_context(raw_item),
-        knowledge_rules=rules,
-    )
+    facts = fact_proposal
+    if facts is None:
+        result = await client.extract_facts(
+            title=str(translation_proposal.get("translated_title") or ""),
+            content=analysis_content,
+            source_context=_source_context(raw_item),
+            knowledge_rules=rules,
+        )
+        facts = result.model_dump(mode="json")
+        facts["_execution_metadata"] = execution_metadata(result)
+    classification = classification_proposal
+    if classification is None:
+        result = await client.classify(
+            content=analysis_content,
+            extracted_facts={
+                key: facts[key]
+                for key in ("title", "summary", "category", "entities")
+                if key in facts
+            },
+            source_context=_source_context(raw_item),
+        )
+        classification = result.model_dump(mode="json")
+        classification["_execution_metadata"] = execution_metadata(result)
     importance = await client.score_importance(
         content=analysis_content,
-        extracted_facts=facts.model_dump(mode="json"),
+        extracted_facts={
+            key: facts[key]
+            for key in ("title", "summary", "category", "entities")
+            if key in facts
+        },
     )
     authority = _source_authority(raw_item)
-    primary_topic = topic_from_category(facts.category)
+    primary_topic = str(classification["topic"])
     importance_dimensions = {
         name: getattr(importance, name).model_dump(mode="json") for name in DIMENSIONS
     }
@@ -662,18 +841,36 @@ async def _build_item_proposal(
     is_official = authority >= 100
     return {
         **translation_proposal,
-        "normalized_title": facts.title,
-        "summary": facts.summary,
-        "category": facts.category,
+        "normalized_title": str(facts["title"]),
+        "summary": str(facts["summary"]),
+        "category": str(facts["category"]),
         "entities": normalize_entities(
-            [entity.model_dump(mode="json") for entity in facts.entities]
+            [
+                {
+                    **dict(entity),
+                    "role": next(
+                        (
+                            role.get("role")
+                            for role in classification.get("entity_roles", [])
+                            if isinstance(role, dict)
+                            and role.get("name") == entity.get("name")
+                        ),
+                        "context",
+                    ),
+                }
+                for entity in facts.get("entities", [])
+                if isinstance(entity, dict)
+            ]
         ),
+        "content_type": classification["content_type"],
         "primary_topic": primary_topic,
-        "secondary_topics": [],
+        "secondary_topics": list(classification.get("secondary_topics") or []),
         "facets": {
             "product_scope": "lol_pc",
             "region": "unknown",
             "information_stage": "announcement",
+            "entity_roles": list(classification.get("entity_roles") or []),
+            "temporal": dict(classification.get("temporal") or {}),
         },
         "ontology_version": ONTOLOGY_VERSION,
         "importance_score": importance_score,
@@ -703,9 +900,10 @@ async def _build_item_proposal(
         "credibility_policy_version": "credibility-v1-components",
         "language": raw_item.language,
         "analysis_model": settings.model_name,
-        "analysis_version": "v5-importance-rubric",
+        "analysis_version": "pipeline-redesign-p0",
         "_execution_metadata": {
-            "fact_extraction": execution_metadata(facts),
+            "fact_extraction": facts.get("_execution_metadata", {}),
+            "classification": classification.get("_execution_metadata", {}),
             "importance_scoring": execution_metadata(importance),
         },
         "knowledge_rules": knowledge_snapshot or [],
@@ -768,10 +966,10 @@ async def _generate_translation_review(
                 "approved_translation_proposal": proposal,
             }
             run.status = "running"
-            run.current_stage = ITEM_STAGE
+            run.current_stage = FACT_STAGE
             assert_execution_owned(db, execution_guard)
             db.commit()
-            await _generate_item_review(
+            await _generate_fact_review(
                 db, run, **_guard_kwargs(execution_guard)
             )
             return
@@ -800,6 +998,7 @@ def _apply_normalized_item(
         "summary",
         "category",
         "entities",
+        "content_type",
         "primary_topic",
         "secondary_topics",
         "facets",
@@ -957,6 +1156,8 @@ def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
     allowed = {
         RELEVANCE_STAGE: {"relevance_correction"},
         OCR_STAGE: {"ocr_error"},
+        FACT_STAGE: {"analysis_correction"},
+        CLASSIFY_STAGE: {"analysis_correction"},
         ITEM_STAGE: {"analysis_correction"},
         TRANSLATION_STAGE: {"translation_term", "translation_correction"},
     }

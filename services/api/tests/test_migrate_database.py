@@ -46,4 +46,4 @@ def test_migration_ledger_is_contiguous_and_self_records_version(
     monkeypatch.setenv("MIGRATIONS_DIR", str(migrations))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "037_add_ontology_claims_and_digests.sql"
+    assert files[-1].name == "038_add_multi_membership_and_classification.sql"

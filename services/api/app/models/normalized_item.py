@@ -19,6 +19,7 @@ class NormalizedItem(Base):
     summary: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(60), index=True)
     entities: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    content_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     primary_topic: Mapped[str] = mapped_column(String(40), default="other", index=True)
     secondary_topics: Mapped[list[str]] = mapped_column(JSON, default=list)
     facets: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

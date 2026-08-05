@@ -14,6 +14,7 @@ class NormalizedItemRead(BaseModel):
     summary: str
     category: str
     entities: list[dict[str, Any]]
+    content_type: str | None
     primary_topic: str
     secondary_topics: list[str]
     facets: dict[str, Any]
@@ -66,6 +67,7 @@ class PublishedItemRead(BaseModel):
     summary: str
     category: str
     entities: list[dict[str, Any]]
+    content_type: str | None
     primary_topic: str
     secondary_topics: list[str]
     facets: dict[str, Any]

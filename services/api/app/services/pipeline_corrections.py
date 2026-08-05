@@ -19,6 +19,8 @@ from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_publication import withdraw_raw_item_media
 from app.workflows.event_aggregation import start_event_aggregation
 from app.workflows.reviewed_pipeline import (
+    CLASSIFY_STAGE,
+    FACT_STAGE,
     ITEM_STAGE,
     OCR_STAGE,
     RELEVANCE_STAGE,
@@ -60,7 +62,9 @@ def _checkpoint_before(
     predecessor = {
         OCR_STAGE: RELEVANCE_STAGE,
         TRANSLATION_STAGE: OCR_STAGE,
-        ITEM_STAGE: TRANSLATION_STAGE,
+        FACT_STAGE: TRANSLATION_STAGE,
+        CLASSIFY_STAGE: FACT_STAGE,
+        ITEM_STAGE: CLASSIFY_STAGE,
         EVENT_STAGE: ITEM_STAGE,
     }.get(restart_from_stage)
     if predecessor is None:
@@ -94,20 +98,48 @@ def _resume_context(
                 "approved_media_extraction_ids", []
             )
         return {"approved_media_extraction_ids": extraction_ids or []}
-    if restart_from_stage == ITEM_STAGE:
-        proposal = context.get("approved_translation_proposal")
-        if proposal is None and checkpoint is not None:
-            proposal = checkpoint.output_snapshot
-        if proposal is None:
+    if restart_from_stage in {FACT_STAGE, CLASSIFY_STAGE, ITEM_STAGE}:
+        translation = context.get("approved_translation_proposal")
+        if (
+            translation is None
+            and restart_from_stage == FACT_STAGE
+            and checkpoint is not None
+        ):
+            translation = checkpoint.output_snapshot
+        if translation is None:
             raise ValueError(
                 "no approved translation checkpoint is available; restart from translation"
             )
-        return {
+        result = {
             "approved_media_extraction_ids": context.get(
                 "approved_media_extraction_ids", []
             ),
-            "approved_translation_proposal": proposal,
+            "approved_translation_proposal": translation,
         }
+        if restart_from_stage in {CLASSIFY_STAGE, ITEM_STAGE}:
+            facts = context.get("approved_fact_proposal")
+            if (
+                facts is None
+                and restart_from_stage == CLASSIFY_STAGE
+                and checkpoint is not None
+            ):
+                facts = checkpoint.output_snapshot
+            if facts is None:
+                raise ValueError(
+                    "no approved fact checkpoint is available; restart from fact_extract"
+                )
+            result["approved_fact_proposal"] = facts
+        if restart_from_stage == ITEM_STAGE:
+            classification = context.get("approved_classification_proposal")
+            if classification is None and checkpoint is not None:
+                classification = checkpoint.output_snapshot
+            if classification is None:
+                raise ValueError(
+                    "no approved classification checkpoint is available; "
+                    "restart from classify"
+                )
+            result["approved_classification_proposal"] = classification
+        return result
     return {}
 
 
@@ -147,43 +179,46 @@ def _withdraw_event_membership(
     item: NormalizedItem,
     correction: PipelineCorrection,
 ) -> int | None:
-    membership = db.scalar(
-        select(EventMessage).where(
-            EventMessage.normalized_item_id == item.id,
-            EventMessage.membership_status == "active",
+    memberships = list(
+        db.scalars(
+            select(EventMessage).where(
+                EventMessage.normalized_item_id == item.id,
+                EventMessage.membership_status == "active",
+            )
         )
     )
-    if membership is None:
+    if not memberships:
         return None
     now = datetime.now(UTC)
-    event = membership.event
-    unlink_item_claims_from_event(
-        db,
-        normalized_item_id=item.id,
-        event_id=event.id,
-    )
-    membership.membership_status = "withdrawn"
-    membership.withdrawn_at = now
-    membership.withdrawal_reason = correction.reason
-    membership.source_correction_id = correction.id
-    event.current_revision += 1
-    db.flush()
-    refresh_event_projection(db, event)
-    db.add(
-        EventRevision(
+    for membership in memberships:
+        event = membership.event
+        unlink_item_claims_from_event(
+            db,
+            normalized_item_id=item.id,
             event_id=event.id,
-            revision=event.current_revision,
-            title=event.title,
-            summary=event.summary,
-            change_note=f"撤回消息 {item.id}：{correction.reason}",
-            evidence_snapshot={
-                "action": "withdraw_membership",
-                "normalized_item_id": item.id,
-                "correction_id": correction.id,
-            },
         )
-    )
-    return event.id
+        membership.membership_status = "withdrawn"
+        membership.withdrawn_at = now
+        membership.withdrawal_reason = correction.reason
+        membership.source_correction_id = correction.id
+        event.current_revision += 1
+        db.flush()
+        refresh_event_projection(db, event)
+        db.add(
+            EventRevision(
+                event_id=event.id,
+                revision=event.current_revision,
+                title=event.title,
+                summary=event.summary,
+                change_note=f"撤回消息 {item.id}：{correction.reason}",
+                evidence_snapshot={
+                    "action": "withdraw_membership",
+                    "normalized_item_id": item.id,
+                    "correction_id": correction.id,
+                },
+            )
+        )
+    return memberships[0].event_id
 
 
 async def create_and_start_correction(

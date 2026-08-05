@@ -53,10 +53,15 @@ def _membership_snapshot(
     }
 
 
-def _existing_membership(db: Session, normalized_item_id: int) -> EventMessage | None:
+def _existing_membership(
+    db: Session,
+    normalized_item_id: int,
+    event_id: int,
+) -> EventMessage | None:
     return db.scalar(
         select(EventMessage).where(
             EventMessage.normalized_item_id == normalized_item_id,
+            EventMessage.event_id == event_id,
             EventMessage.membership_status == "active",
         )
     )
@@ -65,6 +70,7 @@ def _existing_membership(db: Session, normalized_item_id: int) -> EventMessage |
 def _superseded_memberships(
     db: Session,
     item: NormalizedItem,
+    event_id: int,
 ) -> list[EventMessage]:
     normalized_item_ids = superseded_normalized_item_ids(db, item)
     if not normalized_item_ids:
@@ -73,6 +79,7 @@ def _superseded_memberships(
         db.scalars(
             select(EventMessage).where(
                 EventMessage.normalized_item_id.in_(normalized_item_ids),
+                EventMessage.event_id == event_id,
                 EventMessage.membership_status == "active",
             )
         )
@@ -209,9 +216,11 @@ def create_event(
     summary: str,
     category: str,
     event_key: str | None = None,
+    aggregation_key: str | None = None,
     status: str = "active",
     event_type: str = "other",
     lifecycle_status: str = "developing",
+    membership_role: str = "primary",
     evidence_stance: str = "supports",
     independence_key: str | None = None,
     is_official_confirmation: bool | None = None,
@@ -223,18 +232,6 @@ def create_event(
     commit: bool = True,
 ) -> Event:
     item = _get_normalized_item(db, normalized_item_id)
-    membership = _existing_membership(db, normalized_item_id)
-    if membership is not None:
-        raise EventMembershipConflictError(
-            f"normalized item {normalized_item_id} already belongs to event "
-            f"{membership.event_id}"
-        )
-    superseded_memberships = _superseded_memberships(db, item)
-    if superseded_memberships:
-        raise EventMembershipConflictError(
-            f"an earlier raw revision already belongs to event "
-            f"{superseded_memberships[0].event_id}; update that event instead"
-        )
 
     try:
         official_confirmation = (
@@ -244,6 +241,7 @@ def create_event(
         )
         event = Event(
             event_key=event_key,
+            aggregation_key=aggregation_key,
             title=title,
             summary=summary,
             category=category,
@@ -268,6 +266,7 @@ def create_event(
                 event_id=event.id,
                 normalized_item_id=item.id,
                 relation_type="primary",
+                membership_role=membership_role,
                 evidence_stance=evidence_stance,
                 independence_key=independence_key or _default_independence_key(item),
                 is_official_confirmation=official_confirmation,
@@ -318,6 +317,7 @@ def add_message_to_event(
     title: str | None = None,
     summary: str | None = None,
     lifecycle_status: str | None = None,
+    membership_role: str = "primary",
     evidence_stance: str = "supports",
     independence_key: str | None = None,
     is_official_confirmation: bool | None = None,
@@ -329,33 +329,15 @@ def add_message_to_event(
     evidence: dict[str, Any] | None = None,
     commit: bool = True,
 ) -> tuple[Event, bool]:
-    membership = _existing_membership(db, normalized_item_id)
+    membership = _existing_membership(db, normalized_item_id, event_id)
     if membership is not None:
-        if membership.event_id != event_id:
-            raise EventMembershipConflictError(
-                f"normalized item {normalized_item_id} already belongs to event "
-                f"{membership.event_id}"
-            )
         event = db.get(Event, event_id)
         if event is None:
             raise EventNotFoundError(f"event {event_id} not found")
         return event, False
 
     item = _get_normalized_item(db, normalized_item_id)
-    replaced_memberships = _superseded_memberships(db, item)
-    conflicting_membership = next(
-        (
-            predecessor
-            for predecessor in replaced_memberships
-            if predecessor.event_id != event_id
-        ),
-        None,
-    )
-    if conflicting_membership is not None:
-        raise EventMembershipConflictError(
-            f"superseded normalized item {conflicting_membership.normalized_item_id} "
-            f"belongs to event {conflicting_membership.event_id}"
-        )
+    replaced_memberships = _superseded_memberships(db, item, event_id)
     event = db.scalar(
         select(Event).where(Event.id == event_id).with_for_update()
     )
@@ -364,13 +346,8 @@ def add_message_to_event(
     # The optimistic lookup above may race. Recheck after serializing updates
     # on the event row so a waiter observes the membership committed by the
     # lock holder and returns an idempotent result without another revision.
-    locked_membership = _existing_membership(db, normalized_item_id)
+    locked_membership = _existing_membership(db, normalized_item_id, event_id)
     if locked_membership is not None:
-        if locked_membership.event_id != event_id:
-            raise EventMembershipConflictError(
-                f"normalized item {normalized_item_id} already belongs to event "
-                f"{locked_membership.event_id}"
-            )
         return event, False
     lifecycle_regression = (
         event.event_type == "match"
@@ -412,6 +389,7 @@ def add_message_to_event(
         )
         membership_values = {
             "relation_type": "primary",
+            "membership_role": membership_role,
             "evidence_stance": evidence_stance,
             "independence_key": independence_key or _default_independence_key(item),
             "is_official_confirmation": official_confirmation,
@@ -478,8 +456,8 @@ def add_message_to_event(
             db.commit()
     except IntegrityError as exc:
         db.rollback()
-        membership = _existing_membership(db, normalized_item_id)
-        if membership is not None and membership.event_id == event_id:
+        membership = _existing_membership(db, normalized_item_id, event_id)
+        if membership is not None:
             existing_event = db.get(Event, event_id)
             if existing_event is not None:
                 return existing_event, False

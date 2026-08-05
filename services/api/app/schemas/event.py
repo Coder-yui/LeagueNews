@@ -7,6 +7,7 @@ from pydantic import BaseModel
 class EventSummaryRead(BaseModel):
     id: int
     event_key: str | None
+    aggregation_key: str | None
     title: str
     summary: str
     category: str
@@ -31,6 +32,7 @@ class EventSummaryRead(BaseModel):
 class EventMessageRead(BaseModel):
     normalized_item_id: int
     relation_type: str
+    membership_role: str
     evidence_stance: str
     is_official_confirmation: bool
     is_significant_update: bool

@@ -3,7 +3,6 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -16,7 +15,6 @@ from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.services.event_aggregation import (
-    EventMembershipConflictError,
     add_message_to_event,
     create_event,
 )
@@ -246,7 +244,7 @@ def test_new_raw_revision_replaces_membership_and_event_claim_atomically() -> No
         ) is not None
 
 
-def test_message_cannot_belong_to_two_events() -> None:
+def test_message_can_belong_to_two_events_with_distinct_roles() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
@@ -282,22 +280,33 @@ def test_message_cannot_belong_to_two_events() -> None:
             category="测试",
         )
 
-        with pytest.raises(EventMembershipConflictError):
-            add_message_to_event(
-                db,
-                event_id=event_two.id,
-                normalized_item_id=first.id,
-            )
-
-        db.add(
-            EventMessage(
-                event_id=event_two.id,
-                normalized_item_id=first.id,
-                relation_type="primary",
+        _, added = add_message_to_event(
+            db,
+            event_id=event_two.id,
+            normalized_item_id=first.id,
+            membership_role="component",
+        )
+        assert added is True
+        memberships = list(
+            db.scalars(
+                select(EventMessage)
+                .where(EventMessage.normalized_item_id == first.id)
+                .order_by(EventMessage.event_id)
             )
         )
-        with pytest.raises(IntegrityError):
-            db.commit()
+        assert len(memberships) == 2
+        assert [membership.membership_role for membership in memberships] == [
+            "primary",
+            "component",
+        ]
+
+        _, added = add_message_to_event(
+            db,
+            event_id=event_two.id,
+            normalized_item_id=first.id,
+            membership_role="cross_ref",
+        )
+        assert added is False
 
 
 def test_event_read_api_returns_timeline_and_revision_history() -> None:

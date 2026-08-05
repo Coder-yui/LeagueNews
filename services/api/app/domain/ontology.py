@@ -1,6 +1,16 @@
 from typing import Final
 
 ONTOLOGY_VERSION: Final = "lol-news-v1"
+CONTENT_TYPES: Final = {
+    "official_fact",
+    "official_notice",
+    "match_result",
+    "insider_rumor",
+    "insider_confirmed",
+    "data_mine",
+    "aggregation",
+    "community_noise",
+}
 PRIMARY_TOPICS: Final = {
     "patch",
     "esports",

@@ -27,7 +27,7 @@ class NormalizedItem(Base):
     importance_score: Mapped[float] = mapped_column(Float, index=True)
     importance_dimensions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     importance_policy_version: Mapped[str] = mapped_column(
-        String(80), default="importance-v1-five-dimensions"
+        String(80), default="importance-v2-five-dimensions"
     )
     importance_calculation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     credibility: Mapped[str] = mapped_column(String(30), index=True)
@@ -35,7 +35,7 @@ class NormalizedItem(Base):
     credibility_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
     credibility_components: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     credibility_policy_version: Mapped[str] = mapped_column(
-        String(80), default="credibility-v1-components"
+        String(80), default="credibility-v2-four-factor-beta"
     )
     language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     source_language: Mapped[str | None] = mapped_column(String(30), nullable=True)

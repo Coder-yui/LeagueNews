@@ -10,6 +10,8 @@ PipelineStage = Literal[
     "translation",
     "fact_extract",
     "classify",
+    "credibility",
+    "importance",
     "item_analysis",
     "event_decision",
 ]

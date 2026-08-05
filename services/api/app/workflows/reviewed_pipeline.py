@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 
 from app.content_blocks import has_quoted_post, text_from_content_blocks
 from app.core.config import settings
+from app.domain.credibility import CREDIBILITY_POLICY_VERSION, calculate_item_credibility
 from app.domain.importance import (
     DIMENSIONS,
     IMPORTANCE_POLICY_VERSION,
+    apply_actionability_signals,
     calculate_importance,
 )
 from app.domain.ontology import ONTOLOGY_VERSION, normalize_entities
@@ -26,6 +28,7 @@ from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, Revi
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
 from app.services.llm import LLMClient, execution_metadata
 from app.services.claims import extract_traceable_claim
+from app.services.credibility import source_reliability_history
 from app.services.media_publication import publish_raw_item_media
 from app.services.pipeline_execution import (
     PipelineExecutionGuard,
@@ -44,6 +47,8 @@ OCR_STAGE = "image_ocr"
 TRANSLATION_STAGE = "translation"
 FACT_STAGE = "fact_extract"
 CLASSIFY_STAGE = "classify"
+CREDIBILITY_STAGE = "credibility"
+IMPORTANCE_STAGE = "importance"
 ITEM_STAGE = "item_analysis"
 
 OFFICIAL_CONNECTORS = {"riot_official", "tencent_lol"}
@@ -88,6 +93,8 @@ async def start_item_processing(
         TRANSLATION_STAGE,
         FACT_STAGE,
         CLASSIFY_STAGE,
+        CREDIBILITY_STAGE,
+        IMPORTANCE_STAGE,
         ITEM_STAGE,
     }:
         raise ValueError(f"unsupported restart stage: {restart_from_stage}")
@@ -155,6 +162,14 @@ async def start_item_processing(
         await _generate_classification_review(
             db, run, **_guard_kwargs(execution_guard)
         )
+    elif restart_from_stage == CREDIBILITY_STAGE:
+        await _generate_credibility_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
+    elif restart_from_stage == IMPORTANCE_STAGE:
+        await _generate_importance_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
     else:
         await _generate_item_review(db, run, **_guard_kwargs(execution_guard))
     return run
@@ -201,6 +216,10 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
         await _generate_fact_review(db, restarted)
     elif restarted.current_stage == CLASSIFY_STAGE:
         await _generate_classification_review(db, restarted)
+    elif restarted.current_stage == CREDIBILITY_STAGE:
+        await _generate_credibility_review(db, restarted)
+    elif restarted.current_stage == IMPORTANCE_STAGE:
+        await _generate_importance_review(db, restarted)
     else:
         raise ValueError(f"unsupported restart stage: {restarted.current_stage}")
     return restarted
@@ -248,6 +267,14 @@ async def resume_item_processing(
             )
         elif run.current_stage == CLASSIFY_STAGE:
             await _generate_classification_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
+        elif run.current_stage == CREDIBILITY_STAGE:
+            await _generate_credibility_review(
+                db, run, **_guard_kwargs(execution_guard)
+            )
+        elif run.current_stage == IMPORTANCE_STAGE:
+            await _generate_importance_review(
                 db, run, **_guard_kwargs(execution_guard)
             )
         else:
@@ -358,6 +385,32 @@ async def approve_review(
         run.context = {
             **run.context,
             "approved_classification_proposal": review.proposal,
+        }
+        _record_checkpoint(db, review)
+        run.status = "running"
+        run.current_stage = CREDIBILITY_STAGE
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        await _generate_credibility_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
+    elif review.stage == CREDIBILITY_STAGE:
+        run.context = {
+            **run.context,
+            "approved_credibility_proposal": review.proposal,
+        }
+        _record_checkpoint(db, review)
+        run.status = "running"
+        run.current_stage = IMPORTANCE_STAGE
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        await _generate_importance_review(
+            db, run, **_guard_kwargs(execution_guard)
+        )
+    elif review.stage == IMPORTANCE_STAGE:
+        run.context = {
+            **run.context,
+            "approved_importance_proposal": review.proposal,
         }
         _record_checkpoint(db, review)
         run.status = "running"
@@ -743,6 +796,160 @@ async def _generate_classification_review(
         raise
 
 
+async def _generate_credibility_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
+    try:
+        classification = run.context.get("approved_classification_proposal")
+        if not isinstance(classification, dict):
+            raise ValueError(
+                "credibility stage requires an approved classification proposal"
+            )
+        temporal = classification.get("temporal")
+        if not isinstance(temporal, dict):
+            raise ValueError("classification proposal has no temporal evidence")
+        history = source_reliability_history(db, run.raw_item.source)
+        reliability = (
+            history.confirmed_count + history.alpha
+        ) / (
+            history.confirmed_count
+            + history.refuted_count
+            + history.alpha
+            + history.beta
+        )
+        reliability = round(reliability, 6)
+        score, components = calculate_item_credibility(
+            source_reliability=reliability,
+            certainty=str(temporal.get("certainty") or "speculative"),
+            content_type=(
+                str(classification["content_type"])
+                if classification.get("content_type") is not None
+                else None
+            ),
+        )
+        source_component = components["source_reliability"]
+        assert isinstance(source_component, dict)
+        source_component.update(
+            {
+                "history_id": history.id,
+                "confirmed_count": history.confirmed_count,
+                "refuted_count": history.refuted_count,
+                "alpha": history.alpha,
+                "beta": history.beta,
+            }
+        )
+        is_official = (
+            _source_authority(run.raw_item) >= 100
+            and classification.get("content_type")
+            in {"official_fact", "official_notice", "match_result"}
+        )
+        proposal = {
+            "credibility": "official" if is_official else "unverified",
+            "credibility_score": score,
+            "credibility_evidence": [
+                f"source_reliability={reliability:.3f}",
+                "statement_certainty="
+                f"{components['statement_certainty']['value']:.3f}",
+                f"content_type_prior={components['content_type_prior']['value']:.3f}",
+                "staleness_penalty="
+                f"{components['staleness']['penalty']:.3f}",
+            ],
+            "credibility_components": components,
+            "credibility_policy_version": CREDIBILITY_POLICY_VERSION,
+            "analysis_model": settings.model_name,
+            "_execution_metadata": {
+                "credibility": {
+                    "policy_version": CREDIBILITY_POLICY_VERSION,
+                    "decision_source": "deterministic",
+                }
+            },
+        }
+        _replace_pending_review(
+            db,
+            run=run,
+            stage=CREDIBILITY_STAGE,
+            proposal=proposal,
+        )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+    except Exception as exc:
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
+        raise
+
+
+async def _generate_importance_review(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> None:
+    try:
+        translation = run.context.get("approved_translation_proposal")
+        facts = run.context.get("approved_fact_proposal")
+        classification = run.context.get("approved_classification_proposal")
+        if not isinstance(translation, dict):
+            raise ValueError(
+                "importance stage requires an approved translation proposal"
+            )
+        if not isinstance(facts, dict):
+            raise ValueError("importance stage requires an approved fact proposal")
+        if not isinstance(classification, dict):
+            raise ValueError(
+                "importance stage requires an approved classification proposal"
+            )
+        content = _analysis_content(translation)
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+        client = LLMClient()
+        importance = await client.score_importance(
+            content=content,
+            extracted_facts={
+                key: facts[key]
+                for key in ("title", "summary", "category", "entities")
+                if key in facts
+            },
+        )
+        dimensions = apply_actionability_signals(
+            {
+                name: getattr(importance, name).model_dump(mode="json")
+                for name in DIMENSIONS
+            },
+            content=content,
+        )
+        score, calculation = calculate_importance(
+            dimensions,
+            primary_topic=str(classification["topic"]),
+            content=content,
+        )
+        proposal = {
+            "importance_score": score,
+            "importance_evidence": [
+                str(dimensions[name]["evidence"]) for name in DIMENSIONS
+            ],
+            "importance_dimensions": dimensions,
+            "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+            "importance_calculation": calculation,
+            "analysis_model": settings.model_name,
+            "_execution_metadata": {
+                "importance_scoring": execution_metadata(importance),
+            },
+        }
+        _replace_pending_review(
+            db,
+            run=run,
+            stage=IMPORTANCE_STAGE,
+            proposal=proposal,
+        )
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+    except Exception as exc:
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
+        raise
+
+
 async def _generate_item_review(
     db: Session,
     run: ProcessingRun,
@@ -755,6 +962,8 @@ async def _generate_item_review(
         classification_proposal = run.context.get(
             "approved_classification_proposal"
         )
+        credibility_proposal = run.context.get("approved_credibility_proposal")
+        importance_proposal = run.context.get("approved_importance_proposal")
         if not isinstance(translation_proposal, dict):
             raise ValueError("analysis stage requires an approved translation proposal")
         if not isinstance(fact_proposal, dict):
@@ -763,10 +972,14 @@ async def _generate_item_review(
             raise ValueError(
                 "analysis stage requires an approved classification proposal"
             )
-        rules = _knowledge_texts(db, "analysis", run.raw_item)
-        knowledge_snapshot = _knowledge_rule_snapshot(
-            db, "analysis", run.raw_item
-        )
+        if not isinstance(credibility_proposal, dict):
+            raise ValueError(
+                "analysis stage requires an approved credibility proposal"
+            )
+        if not isinstance(importance_proposal, dict):
+            raise ValueError(
+                "analysis stage requires an approved importance proposal"
+            )
         assert_execution_owned(db, execution_guard)
         db.commit()
         proposal = await _build_item_proposal(
@@ -774,8 +987,9 @@ async def _generate_item_review(
             translation_proposal=translation_proposal,
             fact_proposal=fact_proposal,
             classification_proposal=classification_proposal,
-            rules=rules,
-            knowledge_snapshot=knowledge_snapshot,
+            credibility_proposal=credibility_proposal,
+            importance_proposal=importance_proposal,
+            knowledge_snapshot=list(fact_proposal.get("knowledge_rules") or []),
         )
         _replace_pending_review(db, run=run, stage=ITEM_STAGE, proposal=proposal)
         assert_execution_owned(db, execution_guard)
@@ -789,56 +1003,16 @@ async def _build_item_proposal(
     *,
     raw_item: RawItem,
     translation_proposal: dict[str, Any],
-    fact_proposal: dict[str, Any] | None = None,
-    classification_proposal: dict[str, Any] | None = None,
-    rules: list[str],
+    fact_proposal: dict[str, Any],
+    classification_proposal: dict[str, Any],
+    credibility_proposal: dict[str, Any],
+    importance_proposal: dict[str, Any],
     knowledge_snapshot: list[dict[str, object]] | None = None,
     ocr_corrections: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
-    analysis_content = _analysis_content(translation_proposal)
-    client = LLMClient()
     facts = fact_proposal
-    if facts is None:
-        result = await client.extract_facts(
-            title=str(translation_proposal.get("translated_title") or ""),
-            content=analysis_content,
-            source_context=_source_context(raw_item),
-            knowledge_rules=rules,
-        )
-        facts = result.model_dump(mode="json")
-        facts["_execution_metadata"] = execution_metadata(result)
     classification = classification_proposal
-    if classification is None:
-        result = await client.classify(
-            content=analysis_content,
-            extracted_facts={
-                key: facts[key]
-                for key in ("title", "summary", "category", "entities")
-                if key in facts
-            },
-            source_context=_source_context(raw_item),
-        )
-        classification = result.model_dump(mode="json")
-        classification["_execution_metadata"] = execution_metadata(result)
-    importance = await client.score_importance(
-        content=analysis_content,
-        extracted_facts={
-            key: facts[key]
-            for key in ("title", "summary", "category", "entities")
-            if key in facts
-        },
-    )
-    authority = _source_authority(raw_item)
     primary_topic = str(classification["topic"])
-    importance_dimensions = {
-        name: getattr(importance, name).model_dump(mode="json") for name in DIMENSIONS
-    }
-    importance_score, importance_calculation = calculate_importance(
-        importance_dimensions,
-        primary_topic=primary_topic,
-    )
-    credibility_score = max(0.0, min(authority, 100) / 100)
-    is_official = authority >= 100
     return {
         **translation_proposal,
         "normalized_title": str(facts["title"]),
@@ -873,38 +1047,34 @@ async def _build_item_proposal(
             "temporal": dict(classification.get("temporal") or {}),
         },
         "ontology_version": ONTOLOGY_VERSION,
-        "importance_score": importance_score,
-        "importance_evidence": [
-            str(importance_dimensions[name]["evidence"]) for name in DIMENSIONS
-        ],
-        "importance_dimensions": importance_dimensions,
-        "importance_policy_version": IMPORTANCE_POLICY_VERSION,
-        "importance_calculation": importance_calculation,
-        "credibility": "official" if is_official else "unverified",
-        "credibility_score": credibility_score,
-        "credibility_evidence": [
-            (
-                f"信源“{raw_item.source.name}”被配置为官方来源（权威度 {authority}）"
-                if is_official
-                else f"信源“{raw_item.source.name}”的配置权威度为 {authority}"
+        **{
+            key: importance_proposal[key]
+            for key in (
+                "importance_score",
+                "importance_evidence",
+                "importance_dimensions",
+                "importance_policy_version",
+                "importance_calculation",
             )
-        ],
-        "credibility_components": {
-            "source_prior": credibility_score,
-            "source_role": "first_party" if is_official else "third_party",
-            "is_repost": has_quoted_post(raw_item.content_blocks),
-            "evidence_quality": "direct_text",
-            "ocr_confidence": None,
-            "translation_confidence": None,
         },
-        "credibility_policy_version": "credibility-v1-components",
+        **{
+            key: credibility_proposal[key]
+            for key in (
+                "credibility",
+                "credibility_score",
+                "credibility_evidence",
+                "credibility_components",
+                "credibility_policy_version",
+            )
+        },
         "language": raw_item.language,
         "analysis_model": settings.model_name,
-        "analysis_version": "pipeline-redesign-p0",
+        "analysis_version": "pipeline-redesign-p1",
         "_execution_metadata": {
-            "fact_extraction": facts.get("_execution_metadata", {}),
-            "classification": classification.get("_execution_metadata", {}),
-            "importance_scoring": execution_metadata(importance),
+            **dict(facts.get("_execution_metadata") or {}),
+            **dict(classification.get("_execution_metadata") or {}),
+            **dict(credibility_proposal.get("_execution_metadata") or {}),
+            **dict(importance_proposal.get("_execution_metadata") or {}),
         },
         "knowledge_rules": knowledge_snapshot or [],
         "ocr_corrections": ocr_corrections or [],
@@ -1158,6 +1328,8 @@ def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
         OCR_STAGE: {"ocr_error"},
         FACT_STAGE: {"analysis_correction"},
         CLASSIFY_STAGE: {"analysis_correction"},
+        CREDIBILITY_STAGE: {"analysis_correction"},
+        IMPORTANCE_STAGE: {"analysis_correction"},
         ITEM_STAGE: {"analysis_correction"},
         TRANSLATION_STAGE: {"translation_term", "translation_correction"},
     }

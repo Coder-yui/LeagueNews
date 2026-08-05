@@ -17,7 +17,6 @@ from app.prompts.registry import (
     EVENT_AGGREGATION_OPERATION,
     FACT_EXTRACTION_OPERATION,
     IMPORTANCE_SCORING_OPERATION,
-    ITEM_ANALYSIS_OPERATION,
     KNOWLEDGE_ORGANIZATION_OPERATION,
     RELEVANCE_OPERATION,
     TRANSLATION_OPERATION,
@@ -37,15 +36,6 @@ class ExtractedEntity(BaseModel):
     name: str = Field(min_length=1)
     type: str = Field(min_length=1)
     canonical_name: str | None = None
-
-
-class AnalysisResult(BaseModel):
-    title: str = Field(min_length=1, max_length=500)
-    summary: str = Field(min_length=1)
-    category: str = Field(min_length=1, max_length=60)
-    entities: list[ExtractedEntity] = Field(max_length=5)
-    importance_score: float = Field(ge=0, le=1)
-    importance_evidence: list[str] = Field(min_length=1, max_length=4)
 
 
 class FactExtractionResult(BaseModel):
@@ -340,13 +330,22 @@ content_type 枚举与判定规则：
         content: str,
         extracted_facts: dict[str, object],
     ) -> ImportanceResult:
-        prompt = (
-            "你只评估英雄联盟资讯的重要性，不修改事实、分类、实体或可信度。"
-            "分别输出 impact_scope、magnitude、duration、actionability、novelty 五个对象；"
-            "每个对象只含 0 至 4 的离散 score 和仅基于当前消息的 evidence。"
-            "不要输出最终分数；最终分数、topic floor/cap 和权重由程序确定性计算。"
-            "官方身份不得加分，重复提醒或重复证据不得加分。"
-        )
+        prompt = """你只评估英雄联盟资讯的重要性，不修改事实、分类、实体或可信度。
+
+分别输出 5 个维度对象，每个含 0-4 离散 score 和仅基于当前消息的 evidence：
+- impact_scope: 影响范围。全服系统/全部玩家=4，单区服/单模式=2-3，个别玩家/小众=0-1
+- magnitude: 变化幅度。重做/新增/删除=4，显著调整=3，数值微调=1-2，无实质变化=0
+- actionability: 行动紧迫性。限时兑换码/限时活动=4，需尽快操作=3，
+  一般资讯无需行动=0-1。重复出现的日常内容(如每日商城)最高 2。
+- duration: 影响时长。永久性版本/系统=4，一个版本周期=3，赛季=2，一次性=0-1
+- novelty: 新颖度。首次发生/首个此类=4，常规但值得关注=2，
+  重复提醒/日常流水=0-1
+
+硬性约束：
+- 官方身份本身不加分（官方发的日常商城仍是低分）
+- 重复提醒、重复证据、转载不加分
+- 不要输出最终分数；最终分、topic floor/cap、权重由程序确定性计算
+- evidence 必须引用消息中的具体文本依据，不得编造"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
@@ -356,72 +355,6 @@ content_type 枚举与判定规则：
             max_tokens=400,
             schema=ImportanceResult,
             operation=IMPORTANCE_SCORING_OPERATION,
-        )
-
-    async def analyze(
-        self,
-        *,
-        title: str | None,
-        content: str,
-        source_context: dict[str, object] | None = None,
-        knowledge_rules: list[str] | None = None,
-    ) -> AnalysisResult:
-        prompt = (
-            "你是英雄联盟中文新闻编辑。请分析输入资讯，只输出一个完整的 JSON 对象，"
-            "不要输出 Markdown。必须包含 title、summary、category、entities、"
-            "importance_score、importance_evidence。"
-            "title、summary、category 和实体的展示名称必须使用简体中文；"
-            "entities 必须是对象数组，每个对象严格使用 name、type、canonical_name "
-            "三个键，禁止使用“英雄”“物品”等动态键；type 使用稳定英文类型；"
-            "实体只保留理解这条资讯最重要的 2 到 4 个，确有必要时最多 5 个；"
-            "当消息核心是某个模式、英雄、赛事、版本或活动的礼包、皮肤、图标、封面、"
-            "奖励、截图、测试服资源等附属内容时，entities 必须同时保留附属对象和文本"
-            "明确指向的父级对象，不得只提取礼包或素材；父级对象使用 game_mode、champion、"
-            "tournament、patch、activity 等稳定类型。不得凭空推测文本没有指向的父级对象。"
-            "版本图片里批量出现的英雄或装备不要全部作为新闻实体；"
-            "事实、专有名词原文和数值不得丢失。category 使用简短中文分类；"
-            "importance_score 必须为 0 到 1，并按以下统一尺度判断："
-            "正式版本改动、平衡调整为 0.88-1.00；新英雄或英雄重做为 0.92-1.00；"
-            "新模式、新地图或核心玩法系统为 0.85-0.98；版本预览或开发者前瞻为 0.80-0.92；"
-            "严重故障、账号安全、封禁或反作弊重大变化为 0.85-1.00。"
-            "仅限全球总决赛、MSI、先锋赛等拳头全球赛事：重大节点为 0.85-0.98；"
-            "普通场次无热门队伍为 0.58-0.66；中韩队伍默认属于热门队伍，"
-            "有中韩队伍参赛为 0.73-0.78，两支中韩或顶级热门队伍交锋为 0.76-0.80；"
-            "涉及晋级、淘汰、决赛或冠军时按重大节点评分。"
-            "LPL 决赛、冠军、世界赛资格或重大赛制变化为 0.72-0.88，"
-            "LPL 普通赛程和普通赛果如非决赛为 0.50-0.60，不得因为出现热门队伍"
-            "而突破 0.60；单一操作集锦、赛后调侃、二创视频或缺少实质赛况的信息"
-            "为 0.30-0.50。其他地方联赛应更低。"
-            "国服普通游戏活动为 0.66-0.72；国服大型活动为 0.80-0.95；"
-            "国服神话商城的常规每周或每日轮换属于低重要性小事件，为 0.30-0.45，"
-            "不得套用普通国服活动区间；"
-            "国际服普通游戏活动为 0.55-0.60；国际服大型活动为 0.70-0.85；"
-            "国服真正可免费获得皮肤的活动为 0.85-0.92，抽奖概率获得、"
-            "高额付费或条件苛刻的活动不算免费皮肤。国际服活动通常低于同类国服活动。"
-            "独立的新皮肤资讯为 0.70-0.80，根据英雄热度和皮肤品质调整；"
-            "新英雄伴生皮肤不得在新英雄高分上额外加分。明星选手转会最高 0.75；"
-            "明星选手退役为 0.70-0.80。商业合作和周边通常为 0.25-0.50，"
-            "社区招募或线下活动通常为 0.20-0.45，社交互动通常为 0.10-0.30。"
-            "按消息核心事实评分，不把多个附属主题机械相加；重复提醒和缺少实质信息应降分。"
-            "importance_evidence 用一到三条简短中文理由说明命中的内容类型、"
-            "分数区间及主要加减分因素，不要在其中讨论信源或可信度。"
-            "可信度与重要性相互独立，官方来源不代表消息一定重要。"
-            "approved_rules 仅是判断约束，不是当前消息的事实来源；其中出现的标题、"
-            "日期、实体或示例绝不能写入当前结果，除非它们也明确出现在当前 title 或 content 中。"
-            "如果当前内容信息不足，只能概括可观察内容，不得用规则中的旧消息补全。"
-            "不要判断消息可信度，可信度由系统根据信源配置确定。"
-        )
-        return await self._validated_json_completion(
-            prompt=prompt,
-            payload={
-                "title": title or "",
-                "content": content,
-                "source_context": source_context or {},
-                "approved_rules": knowledge_rules or [],
-            },
-            max_tokens=1200,
-            schema=AnalysisResult,
-            operation=ITEM_ANALYSIS_OPERATION,
         )
 
     async def propose_event(

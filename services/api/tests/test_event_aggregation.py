@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401
 from app.core.database import Base, get_db
 from app.main import app
+from app.models.credibility import SourceReliabilityHistory
 from app.models.event import EventMessage, EventRevision
 from app.models.intelligence import EventClaim
 from app.models.normalized_item import NormalizedItem
@@ -472,6 +473,37 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
         assert event.current_revision == 1
 
 
+def test_event_credibility_uses_full_item_strength_without_legacy_cap() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Reliable insider", connector_type="x_twitter")
+        db.add(source)
+        db.commit()
+        item = _add_normalized_item(
+            db,
+            source=source,
+            external_id="high-confidence",
+            title="高确定性爆料",
+            published_at=datetime(2026, 7, 1, tzinfo=UTC),
+            credibility="unverified",
+            credibility_score=0.95,
+        )
+
+        event = create_event(
+            db,
+            normalized_item_id=item.id,
+            title="传闻事件",
+            summary="单一高确定性信源。",
+            category="转会",
+            event_type="transfer",
+            lifecycle_status="unconfirmed",
+            is_official_confirmation=False,
+        )
+
+        assert event.credibility_score == pytest.approx(0.95)
+
+
 def test_official_confirmation_overrides_event_credibility() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
@@ -520,6 +552,14 @@ def test_official_confirmation_overrides_event_credibility() -> None:
         assert event.credibility_score == 1
         assert event.lifecycle_status == "confirmed"
         assert event.official_source_count == 1
+        history = db.scalar(
+            select(SourceReliabilityHistory).where(
+                SourceReliabilityHistory.source_id == reporter.id
+            )
+        )
+        assert history is not None
+        assert history.confirmed_count == 1
+        assert history.refuted_count == 0
 
 
 def test_late_schedule_cannot_regress_completed_match_event() -> None:

@@ -42,6 +42,8 @@ class EventMessageRead(BaseModel):
     summary: str
     source_name: str
     source_url: str | None
+    credibility_score: float
+    credibility_components: dict[str, Any]
 
 
 class EventRevisionRead(BaseModel):

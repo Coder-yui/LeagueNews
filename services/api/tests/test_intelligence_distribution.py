@@ -90,6 +90,28 @@ def test_ontology_and_importance_are_controlled_and_deterministic() -> None:
     assert calculation["final_score"] == patch_score
 
 
+def test_roster_cap_and_redemption_code_actionability_are_deterministic() -> None:
+    maximum = {
+        name: {"score": 4, "evidence": f"{name} evidence"} for name in DIMENSIONS
+    }
+    roster_score, roster_calculation = calculate_importance(
+        maximum,
+        primary_topic="roster",
+    )
+    assert roster_score == 0.6
+    assert roster_calculation["topic_cap"] == 0.6
+
+    minimum = {
+        name: {"score": 0, "evidence": f"{name} evidence"} for name in DIMENSIONS
+    }
+    _, redemption_calculation = calculate_importance(
+        minimum,
+        primary_topic="activity",
+        content="输入兑换码 CC-CLASS-ANNIE-T0123 可免费领取图标。",
+    )
+    assert redemption_calculation["scores"]["actionability"] == 4
+
+
 def test_claim_traces_to_raw_block_and_can_feed_multiple_events(db: Session) -> None:
     item = _item(db)
     claim = extract_traceable_claim(db, item)

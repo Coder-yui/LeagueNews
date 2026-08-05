@@ -58,7 +58,7 @@ class PipelineCorrection(Base):
         CheckConstraint(
             "restart_from_stage IN "
             "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', "
-            "'item_analysis', 'event_decision')",
+            "'credibility', 'importance', 'item_analysis', 'event_decision')",
             name="ck_pipeline_corrections_restart_stage",
         ),
         CheckConstraint(
@@ -118,7 +118,7 @@ class ProcessingCheckpoint(Base):
         CheckConstraint(
             "stage IN "
             "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', "
-            "'item_analysis', 'event_decision')",
+            "'credibility', 'importance', 'item_analysis', 'event_decision')",
             name="ck_processing_checkpoints_stage",
         ),
         CheckConstraint(

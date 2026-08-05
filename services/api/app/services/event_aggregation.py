@@ -12,6 +12,7 @@ from app.services.claims import (
     link_item_claims_to_event,
     unlink_item_claims_from_event,
 )
+from app.services.credibility import record_source_outcome
 from app.services.raw_item_versions import superseded_normalized_item_ids
 
 _MATCH_LIFECYCLE_RANK = {
@@ -111,6 +112,7 @@ def _default_independence_key(item: NormalizedItem) -> str:
 
 
 def _refresh_editorial_metrics(db: Session, event: Event) -> None:
+    previous_credibility_status = event.credibility_status
     memberships = list(
         db.scalars(
             select(EventMessage)
@@ -155,7 +157,7 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
             else:
                 official_support.add(key)
             continue
-        strength = min(0.85, max(0.0, item.credibility_score))
+        strength = max(0.0, min(1.0, item.credibility_score))
         target = (
             contradicting
             if membership.evidence_stance == "contradicts"
@@ -173,10 +175,24 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
         event.credibility_score = 0.5
         event.lifecycle_status = "disputed"
     elif official_contradiction:
+        if previous_credibility_status != "officially_refuted":
+            _calibrate_resolved_sources(
+                db,
+                memberships=memberships,
+                items=items,
+                official_supports=False,
+            )
         event.credibility_status = "officially_refuted"
         event.credibility_score = 0
         event.lifecycle_status = "officially_refuted"
     elif official_support:
+        if previous_credibility_status != "official_confirmed":
+            _calibrate_resolved_sources(
+                db,
+                memberships=memberships,
+                items=items,
+                official_supports=True,
+            )
         event.credibility_status = "official_confirmed"
         event.credibility_score = 1
         if event.lifecycle_status in {"developing", "unconfirmed", "disputed"}:
@@ -192,6 +208,34 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
             event.credibility_status = "single_source"
         else:
             event.credibility_status = "unverified"
+
+
+def _calibrate_resolved_sources(
+    db: Session,
+    *,
+    memberships: list[EventMessage],
+    items: dict[int, NormalizedItem],
+    official_supports: bool,
+) -> None:
+    outcomes_by_source: dict[int, bool] = {}
+    sources = {}
+    for membership in memberships:
+        if (
+            membership.is_official_confirmation
+            or membership.evidence_stance == "context"
+        ):
+            continue
+        item = items[membership.normalized_item_id]
+        source = item.raw_item.source
+        sources[source.id] = source
+        supports = membership.evidence_stance != "contradicts"
+        outcomes_by_source[source.id] = supports == official_supports
+    for source_id, was_confirmed in outcomes_by_source.items():
+        record_source_outcome(
+            db,
+            source=sources[source_id],
+            was_confirmed=was_confirmed,
+        )
 
 
 def refresh_event_projection(db: Session, event: Event) -> None:

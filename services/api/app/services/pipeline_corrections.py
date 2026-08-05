@@ -20,7 +20,9 @@ from app.services.media_publication import withdraw_raw_item_media
 from app.workflows.event_aggregation import start_event_aggregation
 from app.workflows.reviewed_pipeline import (
     CLASSIFY_STAGE,
+    CREDIBILITY_STAGE,
     FACT_STAGE,
+    IMPORTANCE_STAGE,
     ITEM_STAGE,
     OCR_STAGE,
     RELEVANCE_STAGE,
@@ -64,7 +66,9 @@ def _checkpoint_before(
         TRANSLATION_STAGE: OCR_STAGE,
         FACT_STAGE: TRANSLATION_STAGE,
         CLASSIFY_STAGE: FACT_STAGE,
-        ITEM_STAGE: CLASSIFY_STAGE,
+        CREDIBILITY_STAGE: CLASSIFY_STAGE,
+        IMPORTANCE_STAGE: CREDIBILITY_STAGE,
+        ITEM_STAGE: IMPORTANCE_STAGE,
         EVENT_STAGE: ITEM_STAGE,
     }.get(restart_from_stage)
     if predecessor is None:
@@ -98,7 +102,14 @@ def _resume_context(
                 "approved_media_extraction_ids", []
             )
         return {"approved_media_extraction_ids": extraction_ids or []}
-    if restart_from_stage in {FACT_STAGE, CLASSIFY_STAGE, ITEM_STAGE}:
+    scoring_stages = {
+        FACT_STAGE,
+        CLASSIFY_STAGE,
+        CREDIBILITY_STAGE,
+        IMPORTANCE_STAGE,
+        ITEM_STAGE,
+    }
+    if restart_from_stage in scoring_stages:
         translation = context.get("approved_translation_proposal")
         if (
             translation is None
@@ -116,7 +127,12 @@ def _resume_context(
             ),
             "approved_translation_proposal": translation,
         }
-        if restart_from_stage in {CLASSIFY_STAGE, ITEM_STAGE}:
+        if restart_from_stage in {
+            CLASSIFY_STAGE,
+            CREDIBILITY_STAGE,
+            IMPORTANCE_STAGE,
+            ITEM_STAGE,
+        }:
             facts = context.get("approved_fact_proposal")
             if (
                 facts is None
@@ -129,9 +145,17 @@ def _resume_context(
                     "no approved fact checkpoint is available; restart from fact_extract"
                 )
             result["approved_fact_proposal"] = facts
-        if restart_from_stage == ITEM_STAGE:
+        if restart_from_stage in {
+            CREDIBILITY_STAGE,
+            IMPORTANCE_STAGE,
+            ITEM_STAGE,
+        }:
             classification = context.get("approved_classification_proposal")
-            if classification is None and checkpoint is not None:
+            if (
+                classification is None
+                and restart_from_stage == CREDIBILITY_STAGE
+                and checkpoint is not None
+            ):
                 classification = checkpoint.output_snapshot
             if classification is None:
                 raise ValueError(
@@ -139,6 +163,30 @@ def _resume_context(
                     "restart from classify"
                 )
             result["approved_classification_proposal"] = classification
+        if restart_from_stage in {IMPORTANCE_STAGE, ITEM_STAGE}:
+            credibility = context.get("approved_credibility_proposal")
+            if (
+                credibility is None
+                and restart_from_stage == IMPORTANCE_STAGE
+                and checkpoint is not None
+            ):
+                credibility = checkpoint.output_snapshot
+            if credibility is None:
+                raise ValueError(
+                    "no approved credibility checkpoint is available; "
+                    "restart from credibility"
+                )
+            result["approved_credibility_proposal"] = credibility
+        if restart_from_stage == ITEM_STAGE:
+            importance = context.get("approved_importance_proposal")
+            if importance is None and checkpoint is not None:
+                importance = checkpoint.output_snapshot
+            if importance is None:
+                raise ValueError(
+                    "no approved importance checkpoint is available; "
+                    "restart from importance"
+                )
+            result["approved_importance_proposal"] = importance
         return result
     return {}
 

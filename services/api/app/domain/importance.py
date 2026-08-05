@@ -1,6 +1,7 @@
+import re
 from typing import Final
 
-IMPORTANCE_POLICY_VERSION: Final = "importance-v1-five-dimensions"
+IMPORTANCE_POLICY_VERSION: Final = "importance-v2-five-dimensions"
 DIMENSIONS: Final = (
     "impact_scope",
     "magnitude",
@@ -20,7 +21,7 @@ TOPIC_RANGES: Final = {
     "champion": (0.60, 1.0),
     "game_mode": (0.45, 0.98),
     "esports": (0.20, 0.98),
-    "roster": (0.20, 0.80),
+    "roster": (0.20, 0.60),
     "skin": (0.20, 0.80),
     "activity": (0.15, 0.92),
     "community": (0.05, 0.50),
@@ -28,13 +29,35 @@ TOPIC_RANGES: Final = {
     "service": (0.20, 1.0),
     "other": (0.05, 0.75),
 }
+_REDEMPTION_CODE = re.compile(r"\b[A-Z0-9]{2,}(?:-[A-Z0-9]{2,}){2,}\b")
+
+
+def apply_actionability_signals(
+    dimensions: dict[str, dict[str, object]],
+    *,
+    content: str,
+) -> dict[str, dict[str, object]]:
+    normalized = {
+        name: dict(dimensions.get(name, {}))
+        for name in DIMENSIONS
+    }
+    if "兑换码" in content or _REDEMPTION_CODE.search(content.upper()):
+        actionability = normalized["actionability"]
+        actionability["score"] = 4
+        actionability["evidence"] = (
+            f"{actionability.get('evidence', '')} "
+            "消息包含可立即使用的兑换码，程序规则将行动紧迫性校准为4。"
+        ).strip()
+    return normalized
 
 
 def calculate_importance(
     dimensions: dict[str, dict[str, object]],
     *,
     primary_topic: str,
+    content: str = "",
 ) -> tuple[float, dict[str, object]]:
+    dimensions = apply_actionability_signals(dimensions, content=content)
     scores = {
         name: max(0, min(4, int(dimensions.get(name, {}).get("score", 0))))
         for name in DIMENSIONS

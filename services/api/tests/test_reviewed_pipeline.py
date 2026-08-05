@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 import app.models  # noqa: F401
 import app.workflows.reviewed_pipeline as reviewed_pipeline
 from app.core.database import Base
+from app.models.credibility import SourceReliabilityHistory
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem
@@ -16,12 +17,6 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
-from app.services.llm import (
-    ClassificationResult,
-    FactExtractionResult,
-    ImportanceResult,
-    LLMClient,
-)
 from app.services.media_ocr import OCRResult
 from app.services.patch_table import PatchTableResult
 from app.workflows.reviewed_pipeline import (
@@ -437,52 +432,118 @@ def test_approving_fact_checkpoint_moves_to_classification(monkeypatch) -> None:
         assert checkpoint.output_snapshot["title"] == "WBG打野传闻"
 
 
-def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+def test_approving_classification_moves_to_credibility(monkeypatch) -> None:
+    classification_proposal = {
+        "content_type": "insider_rumor",
+        "topic": "roster",
+        "secondary_topics": [],
+        "entity_roles": [{"name": "WBG", "type": "team", "role": "core"}],
+        "temporal": {
+            "is_recurring": False,
+            "recurrence_window": None,
+            "certainty": "speculative",
+        },
+    }
 
-    async def fake_extract(_self, **payload):
-        captured.update(payload)
-        return FactExtractionResult.model_validate(
-            {
-                "title": "26.15版本预览",
-                "summary": "厄斐琉斯将在新版本中获得增强。",
-                "category": "版本更新",
-                "entities": [
-                    {"name": "26.15", "type": "patch"},
-                    {"name": "版本预览", "type": "document_type"},
-                ],
-            }
+    async def fake_generate_credibility_review(db, run):
+        assert run.current_stage == "credibility"
+        assert (
+            run.context["approved_classification_proposal"]
+            == classification_proposal
         )
+        run.status = "awaiting_review"
+        db.commit()
 
-    async def fake_importance(_self, **_payload):
-        return ImportanceResult(
-            impact_scope={"score": 4, "evidence": "影响所有玩家。"},
-            magnitude={"score": 3, "evidence": "包含平衡调整。"},
-            duration={"score": 3, "evidence": "持续一个版本周期。"},
-            actionability={"score": 3, "evidence": "玩家需要调整策略。"},
-            novelty={"score": 3, "evidence": "属于新版本预览。"},
+    monkeypatch.setattr(
+        reviewed_pipeline,
+        "_generate_credibility_review",
+        fake_generate_credibility_review,
+    )
+    with _session() as db:
+        raw = _raw_item(db)
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="awaiting_review",
+            current_stage="classify",
+            context={
+                "approved_translation_proposal": {},
+                "approved_fact_proposal": {},
+            },
         )
-
-    async def fake_classify(_self, **_payload):
-        return ClassificationResult.model_validate(
-            {
-                "content_type": "official_notice",
-                "topic": "patch",
-                "secondary_topics": [],
-                "entity_roles": [
-                    {"name": "26.15", "type": "patch", "role": "core"}
-                ],
-                "temporal": {
-                    "is_recurring": False,
-                    "recurrence_window": None,
-                    "certainty": "confirmed",
-                },
-            }
+        db.add(run)
+        db.flush()
+        review = ReviewTask(
+            processing_run_id=run.id,
+            stage="classify",
+            status="pending",
+            proposal=classification_proposal,
         )
+        db.add(review)
+        db.commit()
 
-    monkeypatch.setattr(LLMClient, "extract_facts", fake_extract)
-    monkeypatch.setattr(LLMClient, "classify", fake_classify)
-    monkeypatch.setattr(LLMClient, "score_importance", fake_importance)
+        result = asyncio.run(approve_review(db, review, note=None))
+
+        assert result.current_stage == "credibility"
+        checkpoint = db.scalar(
+            select(ProcessingCheckpoint).where(
+                ProcessingCheckpoint.processing_run_id == run.id,
+                ProcessingCheckpoint.stage == "classify",
+            )
+        )
+        assert checkpoint is not None
+
+
+def test_credibility_stage_persists_beta_prior_and_four_factors() -> None:
+    with _session() as db:
+        raw = _raw_item(db)
+        raw.source.name = "召唤师Park"
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="running",
+            current_stage="credibility",
+            context={
+                "approved_classification_proposal": {
+                    "content_type": "insider_confirmed",
+                    "topic": "roster",
+                    "temporal": {
+                        "is_recurring": False,
+                        "recurrence_window": None,
+                        "certainty": "likely",
+                    },
+                }
+            },
+        )
+        db.add(run)
+        db.commit()
+
+        asyncio.run(reviewed_pipeline._generate_credibility_review(db, run))
+
+        review = db.scalar(
+            select(ReviewTask).where(
+                ReviewTask.processing_run_id == run.id,
+                ReviewTask.stage == "credibility",
+            )
+        )
+        history = db.scalar(
+            select(SourceReliabilityHistory).where(
+                SourceReliabilityHistory.source_id == raw.source_id
+            )
+        )
+        assert review is not None
+        assert history is not None
+        assert (history.alpha, history.beta) == (7.5, 2.5)
+        assert review.proposal["credibility_score"] == pytest.approx(0.48)
+        assert {
+            "source_reliability",
+            "statement_certainty",
+            "content_type_prior",
+            "staleness",
+        } <= review.proposal["credibility_components"].keys()
+
+
+def test_analysis_assembles_only_approved_stage_outputs() -> None:
     with _session() as db:
         raw = _raw_item(db)
         proposal = asyncio.run(
@@ -514,22 +575,74 @@ def test_analysis_uses_only_approved_chinese_translation(monkeypatch) -> None:
                         }
                     ],
                 },
-                rules=["摘要只陈述已确认事实。"],
+                fact_proposal={
+                    "title": "26.15版本预览",
+                    "summary": "厄斐琉斯将在新版本中获得增强。",
+                    "category": "版本更新",
+                    "entities": [
+                        {"name": "26.15", "type": "patch"},
+                        {"name": "版本预览", "type": "document_type"},
+                    ],
+                },
+                classification_proposal={
+                    "content_type": "official_notice",
+                    "topic": "patch",
+                    "secondary_topics": [],
+                    "entity_roles": [
+                        {"name": "26.15", "type": "patch", "role": "core"}
+                    ],
+                    "temporal": {
+                        "is_recurring": False,
+                        "recurrence_window": None,
+                        "certainty": "confirmed",
+                    },
+                },
+                credibility_proposal={
+                    "credibility": "unverified",
+                    "credibility_score": 0.52,
+                    "credibility_evidence": ["四因子乘积"],
+                    "credibility_components": {
+                        "source_reliability": {"value": 0.75},
+                        "statement_certainty": {"value": 0.8},
+                        "content_type_prior": {"value": 0.95},
+                        "staleness": {"penalty": 0.0},
+                    },
+                    "credibility_policy_version": (
+                        "credibility-v2-four-factor-beta"
+                    ),
+                },
+                importance_proposal={
+                    "importance_score": 0.8,
+                    "importance_evidence": [
+                        "影响所有玩家。",
+                        "包含平衡调整。",
+                        "持续一个版本周期。",
+                        "玩家需要调整策略。",
+                        "属于新版本预览。",
+                    ],
+                    "importance_dimensions": {
+                        name: {"score": 3, "evidence": f"{name} evidence"}
+                        for name in (
+                            "impact_scope",
+                            "magnitude",
+                            "duration",
+                            "actionability",
+                            "novelty",
+                        )
+                    },
+                    "importance_policy_version": (
+                        "importance-v2-five-dimensions"
+                    ),
+                    "importance_calculation": {"final_score": 0.8},
+                },
             )
         )
 
-    assert captured["title"] == "26.15版本预览"
-    assert "厄斐琉斯获得增强" in str(captured["content"])
-    assert "攻击力提高" in str(captured["content"])
-    assert "Aphelios receives buffs" not in str(captured["content"])
-    assert captured["knowledge_rules"] == ["摘要只陈述已确认事实。"]
-    assert "glossary" not in captured
     assert proposal["summary"] == "厄斐琉斯将在新版本中获得增强。"
     assert proposal["normalized_text"] == "Aphelios receives buffs."
-    assert "属于新版本预览。" in proposal["importance_evidence"]
+    assert proposal["importance_score"] == 0.8
     assert proposal["credibility"] == "unverified"
-    assert proposal["credibility_score"] == 0.6
-    assert proposal["credibility_evidence"] == ["信源“测试信源”的配置权威度为 60"]
+    assert proposal["credibility_score"] == 0.52
     assert proposal["content_type"] == "official_notice"
     assert proposal["primary_topic"] == "patch"
 

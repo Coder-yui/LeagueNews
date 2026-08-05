@@ -39,6 +39,8 @@ def _message_payload(message: EventMessage) -> dict[str, Any]:
         "summary": item.summary,
         "source_name": raw_item.source.name,
         "source_url": raw_item.canonical_url,
+        "credibility_score": item.credibility_score,
+        "credibility_components": item.credibility_components,
     }
 
 

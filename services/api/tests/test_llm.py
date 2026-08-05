@@ -6,7 +6,6 @@ import pytest
 
 from app.core.config import settings
 from app.services.llm import (
-    AnalysisResult,
     ClassificationResult,
     LLMAnalysisError,
     LLMClient,
@@ -23,43 +22,11 @@ def test_missing_api_key_raises_configuration_error(monkeypatch: pytest.MonkeyPa
     client = LLMClient()
 
     with pytest.raises(LLMConfigurationError, match="OPENAI_API_KEY"):
-        asyncio.run(client.analyze(title="测试", content="测试内容"))
-
-
-def test_analysis_result_rejects_missing_fields() -> None:
-    with pytest.raises(ValueError):
-        AnalysisResult.model_validate({"title": "只有标题"})
-
-
-def test_analysis_result_accepts_complete_result() -> None:
-    result = AnalysisResult.model_validate(
-        {
-            "title": "版本更新预告",
-            "summary": "官方公布调整方向。",
-            "category": "版本更新",
-            "entities": [{"name": "26.14", "type": "patch"}],
-            "importance_score": 0.8,
-            "importance_evidence": ["属于版本预览，按对应区间评分。"],
-        }
-    )
-    assert result.importance_score == 0.8
-    assert not hasattr(result, "credibility_score")
-
-
-def test_analysis_result_rejects_more_than_five_entities() -> None:
-    with pytest.raises(ValueError, match="too_long"):
-        AnalysisResult.model_validate(
-            {
-                "title": "版本更新预告",
-                "summary": "官方公布调整方向。",
-                "category": "版本更新",
-                "entities": [
-                    {"name": f"实体{index}", "type": "champion"}
-                    for index in range(6)
-                ],
-                "importance_score": 0.8,
-                "importance_evidence": ["属于版本更新。"],
-            }
+        asyncio.run(
+            client.score_importance(
+                content="测试内容",
+                extracted_facts={"title": "测试"},
+            )
         )
 
 
@@ -287,41 +254,35 @@ def _client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeComple
     return client, completions
 
 
-def test_analysis_prompt_uses_approved_importance_rubric() -> None:
+def test_importance_prompt_uses_five_dimension_contract() -> None:
     response = json.dumps(
         {
-            "title": "新英雄公布",
-            "summary": "官方公布了一名新英雄。",
-            "category": "游戏更新",
-            "entities": [{"name": "新英雄", "type": "champion"}],
-            "importance_score": 0.95,
-            "importance_evidence": ["新英雄发布适用0.92至1.00区间。"],
+            name: {"score": 3, "evidence": f"{name} evidence"}
+            for name in (
+                "impact_scope",
+                "magnitude",
+                "duration",
+                "actionability",
+                "novelty",
+            )
         }
     )
     client, completions = _client_with_responses([response])
 
-    result = asyncio.run(
-        client.analyze(
-            title="New champion",
-            content="A new champion is revealed.",
-            source_context={"authority": 100},
-            knowledge_rules=[],
+    asyncio.run(
+        client.score_importance(
+            content="输入含限时兑换码。",
+            extracted_facts={"title": "限时活动"},
         )
     )
 
-    assert result.importance_score == 0.95
     messages = completions.calls[0]["messages"]
     assert isinstance(messages, list)
     prompt = messages[0]["content"]
-    assert "新英雄或英雄重做为 0.92-1.00" in prompt
-    assert "中韩队伍默认属于热门队伍" in prompt
-    assert "LPL 普通赛程和普通赛果如非决赛为 0.50-0.60" in prompt
-    assert "单一操作集锦、赛后调侃、二创视频" in prompt
-    assert "国服真正可免费获得皮肤的活动为 0.85-0.92" in prompt
-    assert "明星选手转会最高 0.75" in prompt
-    assert "官方来源不代表消息一定重要" in prompt
-    assert "不要在其中讨论信源或可信度" in prompt
-    assert "必须同时保留附属对象和文本明确指向的父级对象" in prompt
+    assert "限时兑换码/限时活动=4" in prompt
+    assert "重复出现的日常内容(如每日商城)最高 2" in prompt
+    assert "不要输出最终分数" in prompt
+    assert "evidence 必须引用消息中的具体文本依据，不得编造" in prompt
 
 
 def test_event_create_with_candidates_requires_explicit_rejections() -> None:

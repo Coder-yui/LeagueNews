@@ -717,7 +717,6 @@ def test_schema_business_error_is_returned_to_model_and_retried() -> None:
             title="2XKO update",
             content="A new fighter joins 2XKO.",
             source_context={},
-            knowledge_rules=[],
         )
     )
 
@@ -924,7 +923,6 @@ def test_two_invalid_schema_responses_raise_unified_error() -> None:
                 title="Patch preview",
                 content="Changes",
                 source_context={},
-                knowledge_rules=[],
             )
         )
 

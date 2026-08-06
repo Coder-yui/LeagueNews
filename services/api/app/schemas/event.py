@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class EventSummaryRead(BaseModel):
@@ -59,3 +59,21 @@ class EventRevisionRead(BaseModel):
 class EventDetailRead(EventSummaryRead):
     messages: list[EventMessageRead]
     revisions: list[EventRevisionRead]
+
+
+class EventPageRead(BaseModel):
+    items: list[EventSummaryRead]
+    total: int
+
+
+class EventAdminUpdate(BaseModel):
+    lifecycle_status: str | None = Field(default=None, min_length=1, max_length=40)
+    summary: str | None = Field(default=None, min_length=1)
+    latest_development: str | None = None
+    change_note: str = Field(default="管理台手动更新", min_length=1)
+
+
+class EventMembershipAdminCreate(BaseModel):
+    membership_role: str = Field(default="primary", pattern="^(primary|component|cross_ref)$")
+    evidence_stance: str = Field(default="supports", pattern="^(supports|contradicts|context)$")
+    timeline_note: str = Field(default="管理台手动归属", min_length=1)

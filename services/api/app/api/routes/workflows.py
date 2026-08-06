@@ -8,6 +8,7 @@ from app.schemas.workflow import (
     ProcessingRunRead,
     OCRReviewCorrection,
     ReviewApproval,
+    ReviewCorrectionApproval,
     ReviewRejection,
     ReviewTaskRead,
 )
@@ -66,6 +67,8 @@ def list_reviews(
         statement = statement.where(ReviewTask.status == status_filter)
     if stage:
         statement = statement.where(ReviewTask.stage == stage)
+    else:
+        statement = statement.where(ReviewTask.stage != "relevance")
     return list(db.scalars(statement))
 
 
@@ -101,6 +104,35 @@ def reject_review_task(
         return reject_review(db, review, payload=payload)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/reviews/{review_id}/correct-and-approve",
+    response_model=ProcessingRunRead,
+)
+async def correct_and_approve_review_task(
+    review_id: int,
+    payload: ReviewCorrectionApproval,
+    db: Session = Depends(get_db),
+) -> object:
+    review = db.get(ReviewTask, review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="review task not found")
+    corrections = payload.model_dump(exclude={"note"}, exclude_none=True)
+    review.proposal = {**review.proposal, **corrections}
+    try:
+        return await approve_review(
+            db,
+            review,
+            note=payload.note or "管理台修正后批准",
+        )
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except (LLMAnalysisError, OCRProcessingError, RuntimeError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
 @router.post("/reviews/{review_id}/correct-ocr", response_model=ProcessingRunRead)

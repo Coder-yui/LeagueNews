@@ -1,9 +1,23 @@
 import type { Digest, EventDetail, EventSummary, PublishedItem } from "./types";
 
-const apiUrl =
+export const apiUrl =
   process.env.INTERNAL_API_URL ??
   process.env.NEXT_PUBLIC_API_URL ??
   "http://localhost:8000/api/v1";
+
+export async function adminApi<T>(path: string, options?: RequestInit): Promise<T> {
+  const baseUrl = typeof window === "undefined" ? apiUrl : "/api/v1";
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) },
+    cache: options?.method && options.method !== "GET" ? "no-store" : options?.cache,
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `API returned ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
 
 export async function getPublishedItems(): Promise<PublishedItem[]> {
   try {

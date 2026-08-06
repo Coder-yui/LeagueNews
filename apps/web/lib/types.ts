@@ -52,6 +52,7 @@ export type PublishedItem = {
   title: string;
   summary: string;
   category: string;
+  content_type?: string | null;
   entities: Array<{
     name?: string;
     display_name?: string;
@@ -84,12 +85,185 @@ export type PublishedItem = {
   translated_content_blocks: ContentBlock[];
   translation_status: string;
   media_extractions: PublishedMediaExtraction[];
+  fact_claims?: Array<{
+    id: number;
+    subject: Record<string, unknown>;
+    predicate: string;
+    object_value: Record<string, unknown>;
+    attribution: Record<string, unknown>;
+    stance: string;
+    confidence: number;
+  }>;
+  event_memberships?: Array<{
+    event_id: number;
+    event_title: string;
+    event_type: string;
+    membership_role: string;
+    evidence_stance: string;
+  }>;
   created_at: string;
+};
+
+export type ProcessingRun = {
+  id: number;
+  raw_item_id?: number;
+  status: string;
+  outcome: string | null;
+  current_stage: string;
+  context: Record<string, unknown>;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+export type RawAdminItem = {
+  id: number;
+  source_id: number;
+  source_name: string;
+  source_connector_type: string;
+  external_id: string | null;
+  native_title: string | null;
+  display_title: string | null;
+  content_kind: string;
+  author_name: string | null;
+  language: string | null;
+  canonical_url: string | null;
+  content_blocks: ContentBlock[];
+  processing_status: string;
+  published_at: string | null;
+  ingested_at: string;
+  normalized_item_id: number | null;
+  content_type: string | null;
+  summary: string | null;
+  credibility_score: number | null;
+  importance_score: number | null;
+  current_pipeline_stage: string | null;
+  current_pipeline_job_id: number | null;
+  current_pipeline_job_status: string | null;
+  processing_runs: ProcessingRun[];
+};
+
+export type RawAdminPage = {
+  items: RawAdminItem[];
+  total: number;
+  total_items: number;
+  status_counts: Record<"all" | "failed" | "processing" | "completed", number>;
+  source_options: { id: number; name: string }[];
+  content_type_options: string[];
+};
+
+export type PublishedItemPage = {
+  items: PublishedItem[];
+  total: number;
+  topic_options: string[];
+  content_type_options: string[];
+};
+
+export type PipelineJob = {
+  id: number;
+  raw_item_id: number;
+  correction_id: number | null;
+  status: string;
+  current_stage: string;
+  processing_run_id: number | null;
+  attempts: number;
+  error_message: string | null;
+  last_checkpoint_id: number | null;
+  created_at: string;
+  started_at: string | null;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+export type PipelineCorrection = {
+  id: number;
+  raw_item_id: number;
+  normalized_item_id: number | null;
+  event_id: number | null;
+  restart_from_stage: string;
+  resume_mode: string;
+  reason: string;
+  status: string;
+  error_message: string | null;
+  requested_at: string;
+  completed_at: string | null;
+};
+
+export type ReviewTask = {
+  id: number;
+  processing_run_id: number;
+  stage: string;
+  status: string;
+  proposal: Record<string, unknown>;
+  feedback: Record<string, unknown>;
+  created_at: string;
+};
+
+export type EventReviewTask = {
+  id: number;
+  event_aggregation_run_id: number;
+  status: string;
+  proposal: Record<string, unknown>;
+  feedback: Record<string, unknown>;
+  created_at: string;
+};
+
+export type Source = {
+  id: number;
+  name: string;
+  connector_type: string;
+  external_key: string | null;
+  is_active: boolean;
+  created_at: string;
+};
+
+export type CollectionSchedule = {
+  id: number;
+  source_id: number;
+  source_name: string;
+  connector_type: string;
+  enabled: boolean;
+  interval_minutes: number;
+  retry_delay_minutes: number;
+  fetch_limit: number;
+  overlap_minutes: number;
+  options: Record<string, unknown>;
+  collection_cursor: Record<string, unknown>;
+  next_run_at: string | null;
+  run_requested_at: string | null;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  last_success_at: string | null;
+  last_status: string;
+  last_error: string | null;
+  consecutive_failures: number;
+  updated_at: string;
+};
+
+export type ConnectorRun = {
+  id: number;
+  source_id: number;
+  connector_type: string;
+  status: string;
+  discovered_count: number;
+  created_count: number;
+  revised_count: number;
+  skipped_count: number;
+  error_message: string | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
+export type ConnectorRunPage = {
+  items: ConnectorRun[];
+  total: number;
 };
 
 export type EventSummary = {
   id: number;
   event_key: string | null;
+  aggregation_key?: string | null;
   title: string;
   summary: string;
   category: string;
@@ -111,9 +285,15 @@ export type EventSummary = {
   updated_at: string;
 };
 
+export type EventPage = {
+  items: EventSummary[];
+  total: number;
+};
+
 export type EventMessage = {
   normalized_item_id: number;
   relation_type: string;
+  membership_role?: string | null;
   evidence_stance: string;
   is_official_confirmation: boolean;
   is_significant_update: boolean;
@@ -123,6 +303,8 @@ export type EventMessage = {
   summary: string;
   source_name: string;
   source_url: string | null;
+  credibility_score?: number | null;
+  credibility_components?: Record<string, unknown>;
 };
 
 export type EventRevision = {

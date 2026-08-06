@@ -17,6 +17,7 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
+from app.services.llm import RelevanceResult
 from app.services.media_ocr import OCRResult
 from app.services.patch_table import PatchTableResult
 from app.workflows.reviewed_pipeline import (
@@ -1010,39 +1011,78 @@ def test_analysis_rejection_creates_editable_knowledge_rule() -> None:
         assert rule.knowledge_type == "analysis"
 
 
-def test_relevance_rejection_ends_run_and_creates_knowledge() -> None:
+@pytest.mark.parametrize(
+    ("product_scope", "is_lol_relevant", "expected_stage", "expected_outcome"),
+    [
+        ("lol_pc", True, "translation", None),
+        ("uncertain", False, "translation", None),
+        ("unrelated", False, "relevance", "irrelevant"),
+    ],
+)
+def test_relevance_is_automatic_and_uncertain_continues(
+    monkeypatch,
+    product_scope: str,
+    is_lol_relevant: bool,
+    expected_stage: str,
+    expected_outcome: str | None,
+) -> None:
+    translation_calls: list[int] = []
+
+    async def fake_judge(_self, *, title, content, source_context):
+        return RelevanceResult(
+            product_scope=product_scope,
+            is_lol_relevant=is_lol_relevant,
+            confidence=0.6,
+            reason="测试判断",
+        )
+
+    async def fake_translation(db, run):
+        translation_calls.append(run.id)
+        run.status = "awaiting_review"
+        db.commit()
+
+    monkeypatch.setattr(
+        reviewed_pipeline.LLMClient, "judge_relevance", fake_judge
+    )
+    monkeypatch.setattr(
+        reviewed_pipeline, "_generate_translation_review", fake_translation
+    )
+
     with _session() as db:
         raw = _raw_item(db)
         run = ProcessingRun(
             raw_item_id=raw.id,
             workflow_type="item",
-            status="awaiting_review",
+            status="running",
             current_stage="relevance",
         )
         db.add(run)
-        db.flush()
-        review = ReviewTask(
-            processing_run_id=run.id,
-            stage="relevance",
-            status="pending",
-            proposal={"is_lol_relevant": False},
-        )
-        db.add(review)
         db.commit()
 
-        result = reject_review(
-            db,
-            review,
-            payload=ReviewRejection(
-                feedback_type="relevance_correction",
-                reason="该内容讨论英雄联盟端游版本改动，应判定为相关",
-            ),
-        )
+        asyncio.run(reviewed_pipeline._evaluate_relevance(db, run))
 
-        assert result.status == "rejected"
-        assert result.outcome == "review_rejected"
-        rule = db.scalar(select(KnowledgeRule))
-        assert rule.knowledge_type == "relevance"
+        checkpoint = db.scalar(
+            select(ProcessingCheckpoint).where(
+                ProcessingCheckpoint.processing_run_id == run.id,
+                ProcessingCheckpoint.stage == "relevance",
+            )
+        )
+        assert checkpoint is not None
+        assert checkpoint.decision_source == "automatic"
+        assert checkpoint.artifact_references["policy_version"] == "ai-direct-v1"
+        assert checkpoint.output_snapshot["product_scope"] == product_scope
+        assert run.context["relevance_decision"]["product_scope"] == product_scope
+        assert run.current_stage == expected_stage
+        assert run.outcome == expected_outcome
+        assert not list(
+            db.scalars(
+                select(ReviewTask).where(
+                    ReviewTask.processing_run_id == run.id,
+                    ReviewTask.stage == "relevance",
+                )
+            )
+        )
+        assert bool(translation_calls) is (expected_outcome is None)
 
 
 @pytest.mark.parametrize(
@@ -1056,7 +1096,7 @@ def test_restart_continues_from_rejected_stage(monkeypatch, stage: str) -> None:
         run.status = "awaiting_review"
         db.commit()
 
-    monkeypatch.setattr(reviewed_pipeline, "_generate_relevance_review", fake_review)
+    monkeypatch.setattr(reviewed_pipeline, "_evaluate_relevance", fake_review)
     monkeypatch.setattr(reviewed_pipeline, "_generate_ocr_review", fake_review)
     monkeypatch.setattr(reviewed_pipeline, "_generate_item_review", fake_review)
     monkeypatch.setattr(reviewed_pipeline, "_generate_translation_review", fake_review)

@@ -1,6 +1,10 @@
 import pytest
 
-from app.schemas.workflow import GlossaryTermUpdate, KnowledgeRuleUpdate
+from app.schemas.workflow import (
+    GlossaryTermUpdate,
+    KnowledgeRuleCreate,
+    KnowledgeRuleUpdate,
+)
 
 
 def test_rule_update_allows_manual_type_scope_and_text_changes() -> None:
@@ -18,6 +22,16 @@ def test_rule_update_allows_manual_type_scope_and_text_changes() -> None:
 def test_rule_update_rejects_unknown_knowledge_type() -> None:
     with pytest.raises(ValueError):
         KnowledgeRuleUpdate(knowledge_type="unknown")
+
+
+def test_relevance_rules_cannot_be_created_or_retyped() -> None:
+    with pytest.raises(ValueError):
+        KnowledgeRuleCreate(
+            knowledge_type="relevance",
+            rule_text="历史相关性规则不得进入新判断",
+        )
+    with pytest.raises(ValueError):
+        KnowledgeRuleUpdate(knowledge_type="relevance")
 
 
 def test_term_update_allows_all_manually_maintained_fields() -> None:

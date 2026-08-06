@@ -48,3 +48,8 @@ class ConnectorRunRead(BaseModel):
 
 class ConnectorRegistrationRead(BaseModel):
     connector_type: str
+
+
+class ConnectorRunPageRead(BaseModel):
+    items: list[ConnectorRunRead]
+    total: int

@@ -1,14 +1,19 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
 from app.models.media_extraction import MediaExtraction
+from app.models.event import EventMessage
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
 from app.models.raw_item import RawItem
-from app.schemas.normalized_item import NormalizedItemRead, PublishedItemRead
+from app.schemas.normalized_item import (
+    NormalizedItemRead,
+    PublishedItemPageRead,
+    PublishedItemRead,
+)
 from app.services.raw_item_versions import latest_normalized_item_condition
 
 router = APIRouter()
@@ -34,6 +39,8 @@ def _published_statement():
         selectinload(NormalizedItem.media_links)
         .selectinload(NormalizedItemMediaExtraction.media_extraction)
         .selectinload(MediaExtraction.media_asset),
+        selectinload(NormalizedItem.claims),
+        selectinload(NormalizedItem.event_memberships).selectinload(EventMessage.event),
     )
 
 
@@ -105,6 +112,30 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         ),
         "translation_status": item.translation_status,
         "media_extractions": media_extractions,
+        "fact_claims": [
+            {
+                "id": claim.id,
+                "subject": claim.subject,
+                "predicate": claim.predicate,
+                "object_value": claim.object_value,
+                "attribution": claim.attribution,
+                "stance": claim.stance,
+                "confidence": claim.confidence,
+            }
+            for claim in item.claims
+            if claim.status == "active"
+        ],
+        "event_memberships": [
+            {
+                "event_id": membership.event_id,
+                "event_title": membership.event.title,
+                "event_type": membership.event.event_type,
+                "membership_role": membership.membership_role,
+                "evidence_stance": membership.evidence_stance,
+            }
+            for membership in item.event_memberships
+            if membership.membership_status == "active"
+        ],
         "created_at": item.created_at,
     }
 
@@ -141,6 +172,106 @@ def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
         .limit(100)
     )
     return [_published_payload(item) for item in db.scalars(statement)]
+
+
+@router.get("/published-page", response_model=PublishedItemPageRead)
+def list_published_items_page(
+    primary_topic: str | None = None,
+    content_type: str | None = None,
+    minimum_credibility: float = Query(default=0, ge=0, le=1),
+    search: str | None = None,
+    sort_by: str = Query(default="time", pattern="^(time|credibility|importance)$"),
+    sort: str = Query(default="desc", pattern="^(asc|desc)$"),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    conditions = [
+        latest_normalized_item_condition(),
+        NormalizedItem.publication_status == "published",
+        NormalizedItem.credibility_score >= minimum_credibility,
+    ]
+    if primary_topic:
+        conditions.append(NormalizedItem.primary_topic == primary_topic)
+    if content_type:
+        conditions.append(
+            NormalizedItem.content_type.is_(None)
+            if content_type == "null"
+            else NormalizedItem.content_type == content_type
+        )
+    if search:
+        search_value = search.strip()
+        if search_value.isdigit():
+            conditions.append(NormalizedItem.id == int(search_value))
+        else:
+            pattern = f"%{search_value}%"
+            conditions.append(
+                or_(
+                    NormalizedItem.normalized_title.ilike(pattern),
+                    NormalizedItem.translated_title.ilike(pattern),
+                    NormalizedItem.summary.ilike(pattern),
+                )
+            )
+    count_statement = (
+        select(func.count(NormalizedItem.id))
+        .join(NormalizedItem.raw_item)
+        .where(*conditions)
+    )
+    total = db.scalar(count_statement) or 0
+    sort_column = {
+        "time": func.coalesce(RawItem.published_at, RawItem.ingested_at),
+        "credibility": NormalizedItem.credibility_score,
+        "importance": NormalizedItem.importance_score,
+    }[sort_by]
+    ordering = (
+        (sort_column.asc(), NormalizedItem.id.asc())
+        if sort == "asc"
+        else (sort_column.desc(), NormalizedItem.id.desc())
+    )
+    statement = (
+        _published_statement()
+        .where(*conditions)
+        .order_by(*ordering)
+        .offset(offset)
+        .limit(limit)
+    )
+    option_conditions = [
+        latest_normalized_item_condition(),
+        NormalizedItem.publication_status == "published",
+    ]
+    topic_options = [
+        value
+        for value in db.scalars(
+            select(NormalizedItem.primary_topic)
+            .where(*option_conditions)
+            .distinct()
+            .order_by(NormalizedItem.primary_topic)
+        )
+        if value
+    ]
+    content_type_options = [
+        value
+        for value in db.scalars(
+            select(NormalizedItem.content_type)
+            .where(*option_conditions)
+            .distinct()
+            .order_by(NormalizedItem.content_type)
+        )
+        if value
+    ]
+    if db.scalar(
+        select(func.count(NormalizedItem.id)).where(
+            *option_conditions,
+            NormalizedItem.content_type.is_(None),
+        )
+    ):
+        content_type_options.append("null")
+    return {
+        "items": [_published_payload(item) for item in db.scalars(statement)],
+        "total": total,
+        "topic_options": topic_options,
+        "content_type_options": content_type_options,
+    }
 
 
 @router.get("/{item_id}/published", response_model=PublishedItemRead)

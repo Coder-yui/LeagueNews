@@ -361,6 +361,8 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
         )
         assert added is True
         event_id = event.id
+        newer_item_id = newer_item.id
+        undated_item_id = undated_item.id
 
     def override_get_db():
         with Session(engine) as session:
@@ -370,8 +372,34 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
     try:
         with TestClient(app) as client:
             listing = client.get("/api/v1/events")
+            filtered = client.get(
+                "/api/v1/events?event_type=other&lifecycle_status=confirmed&limit=1&offset=0"
+            )
+            event_page = client.get(f"/api/v1/events/page?search={event_id}")
+            message_page = client.get(
+                f"/api/v1/normalized-items/published-page?search={newer_item_id}"
+            )
             detail = client.get(f"/api/v1/events/{event_id}")
             messages = client.get(f"/api/v1/events/{event_id}/messages")
+            updated = client.patch(
+                f"/api/v1/events/{event_id}",
+                json={
+                    "lifecycle_status": "confirmed",
+                    "summary": "Admin-updated summary",
+                    "change_note": "API test update",
+                },
+            )
+            withdrawn = client.delete(
+                f"/api/v1/events/{event_id}/messages/{undated_item_id}"
+            )
+            relinked = client.post(
+                f"/api/v1/events/{event_id}/messages/{undated_item_id}",
+                json={
+                    "membership_role": "component",
+                    "evidence_stance": "context",
+                    "timeline_note": "API test relink",
+                },
+            )
             missing = client.get("/api/v1/events/9999")
     finally:
         app.dependency_overrides.clear()
@@ -379,6 +407,14 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
     assert listing.status_code == 200
     assert listing.json()[0]["event_key"] == "test:api"
     assert listing.json()[0]["message_count"] == 3
+    assert filtered.status_code == 200
+    assert event_page.status_code == 200
+    assert event_page.json()["total"] == 1
+    assert event_page.json()["items"][0]["id"] == event_id
+    assert message_page.status_code == 200
+    assert message_page.json()["total"] == 1
+    assert message_page.json()["items"][0]["id"] == newer_item_id
+    assert [row["event_key"] for row in filtered.json()] == ["test:api"]
     assert detail.status_code == 200
     assert detail.json()["revisions"][0]["revision"] == 1
     assert [message["title"] for message in detail.json()["messages"]] == [
@@ -392,6 +428,24 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
         "API Item",
         "API Item Without Publish Time",
     ]
+    assert updated.status_code == 200
+    assert updated.json()["lifecycle_status"] == "confirmed"
+    assert updated.json()["summary"] == "Admin-updated summary"
+    assert updated.json()["revisions"][-1]["change_note"] == "API test update"
+    assert withdrawn.status_code == 200
+    assert withdrawn.json()["message_count"] == 2
+    assert withdrawn.json()["revisions"][-1]["change_note"] == (
+        f"管理台解除消息 {undated_item_id} 关联"
+    )
+    assert relinked.status_code == 200
+    assert relinked.json()["message_count"] == 3
+    relinked_message = next(
+        message
+        for message in relinked.json()["messages"]
+        if message["normalized_item_id"] == undated_item_id
+    )
+    assert relinked_message["membership_role"] == "component"
+    assert relinked_message["evidence_stance"] == "context"
     assert missing.status_code == 404
     assert missing.json()["detail"] == "event not found"
 

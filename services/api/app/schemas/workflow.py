@@ -43,6 +43,13 @@ class ReviewApproval(BaseModel):
     note: str | None = None
 
 
+class ReviewCorrectionApproval(BaseModel):
+    content_type: str | None = None
+    credibility_score: float | None = Field(default=None, ge=0, le=1)
+    importance_score: float | None = Field(default=None, ge=0, le=1)
+    note: str | None = None
+
+
 class OCRTableRecordCorrection(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     raw_changes: list[str] = Field(default_factory=list)
@@ -96,7 +103,6 @@ class GlossaryCorrection(BaseModel):
 
 class ReviewRejection(BaseModel):
     feedback_type: Literal[
-        "relevance_correction",
         "ocr_error",
         "translation_term",
         "translation_correction",
@@ -122,7 +128,7 @@ class ReviewRejection(BaseModel):
 
 class KnowledgeRuleCreate(BaseModel):
     knowledge_type: Literal[
-        "relevance", "analysis", "translation", "event_aggregation"
+        "analysis", "translation", "event_aggregation"
     ]
     scope: str = "global"
     rule_text: str = Field(min_length=1)
@@ -133,7 +139,7 @@ class KnowledgeRuleCreate(BaseModel):
 
 class KnowledgeRuleUpdate(BaseModel):
     knowledge_type: Literal[
-        "relevance", "analysis", "translation", "event_aggregation"
+        "analysis", "translation", "event_aggregation"
     ] | None = None
     scope: str | None = None
     rule_text: str | None = Field(default=None, min_length=1)

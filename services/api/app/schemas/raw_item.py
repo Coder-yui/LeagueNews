@@ -53,3 +53,37 @@ class RawItemRead(BaseModel):
     processing_status: str
     published_at: datetime | None
     ingested_at: datetime
+    source_name: str
+    source_connector_type: str
+    normalized_item_id: int | None = None
+    content_type: str | None = None
+    summary: str | None = None
+    credibility_score: float | None = None
+    importance_score: float | None = None
+    current_pipeline_stage: str | None = None
+    current_pipeline_job_id: int | None = None
+    current_pipeline_job_status: str | None = None
+    processing_runs: list["RawItemProcessingRunRead"] = []
+
+
+class RawItemProcessingRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: str
+    outcome: str | None
+    current_stage: str
+    context: dict[str, Any]
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+
+class RawItemAdminPageRead(BaseModel):
+    items: list[RawItemRead]
+    total: int
+    total_items: int
+    status_counts: dict[str, int]
+    source_options: list[dict[str, Any]]
+    content_type_options: list[str]

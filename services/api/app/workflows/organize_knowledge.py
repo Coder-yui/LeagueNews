@@ -9,7 +9,10 @@ async def organize_active_knowledge_rules(db: Session) -> list[KnowledgeRule]:
     source_rules = list(
         db.scalars(
             select(KnowledgeRule)
-            .where(KnowledgeRule.is_active.is_(True))
+            .where(
+                KnowledgeRule.is_active.is_(True),
+                KnowledgeRule.knowledge_type != "relevance",
+            )
             .order_by(
                 KnowledgeRule.knowledge_type,
                 KnowledgeRule.scope,

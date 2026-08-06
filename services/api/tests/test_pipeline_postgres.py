@@ -84,7 +84,7 @@ def test_workers_claim_one_job_once_and_manual_auto_share_active_run(
             return None
 
         monkeypatch.setattr(
-            "app.workflows.reviewed_pipeline._generate_relevance_review",
+            "app.workflows.reviewed_pipeline._evaluate_relevance",
             no_generation,
         )
         start_barrier = Barrier(2)

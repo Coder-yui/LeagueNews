@@ -149,7 +149,7 @@ async def start_item_processing(
         return concurrent
     db.refresh(run)
     if restart_from_stage == RELEVANCE_STAGE:
-        await _generate_relevance_review(
+        await _evaluate_relevance(
             db, run, **_guard_kwargs(execution_guard)
         )
     elif restart_from_stage == OCR_STAGE:
@@ -211,7 +211,7 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
     db.refresh(restarted)
 
     if restarted.current_stage == RELEVANCE_STAGE:
-        await _generate_relevance_review(db, restarted)
+        await _evaluate_relevance(db, restarted)
     elif restarted.current_stage == OCR_STAGE:
         await _generate_ocr_review(db, restarted)
     elif restarted.current_stage == ITEM_STAGE:
@@ -254,7 +254,7 @@ async def resume_item_processing(
         return run
     try:
         if run.current_stage == RELEVANCE_STAGE:
-            await _generate_relevance_review(
+            await _evaluate_relevance(
                 db, run, **_guard_kwargs(execution_guard)
             )
         elif run.current_stage == OCR_STAGE:
@@ -324,7 +324,7 @@ async def approve_review(
 
     if review.stage == RELEVANCE_STAGE:
         _record_checkpoint(db, review)
-        if bool(review.proposal.get("is_lol_relevant")):
+        if _should_continue_relevance(review.proposal):
             run.status = "running"
             if is_patch_preview(run.raw_item):
                 run.current_stage = OCR_STAGE
@@ -505,14 +505,10 @@ def reject_review(
     run.current_stage = review.stage
     run.completed_at = now
 
-    if payload.feedback_type in {"relevance_correction", "analysis_correction"}:
+    if payload.feedback_type == "analysis_correction":
         db.add(
             KnowledgeRule(
-                knowledge_type=(
-                    "relevance"
-                    if payload.feedback_type == "relevance_correction"
-                    else "analysis"
-                ),
+                knowledge_type="analysis",
                 scope=payload.knowledge_scope,
                 rule_text=payload.knowledge_rule or payload.reason or "",
                 correction_data=payload.corrected_values,
@@ -625,7 +621,7 @@ async def correct_ocr_review(
     return run
 
 
-async def _generate_relevance_review(
+async def _evaluate_relevance(
     db: Session,
     run: ProcessingRun,
     *,
@@ -633,33 +629,58 @@ async def _generate_relevance_review(
 ) -> None:
     raw_item = run.raw_item
     try:
-        selected_rules = _knowledge_rule_snapshot(
-            db, "relevance", raw_item
-        )
         title = raw_item.display_title
         content = text_from_content_blocks(raw_item.content_blocks)
         source_context = _source_context(raw_item)
-        knowledge_rules = _knowledge_texts_from_snapshot(selected_rules)
         assert_execution_owned(db, execution_guard)
         db.commit()
         result = await LLMClient().judge_relevance(
             title=title,
             content=content,
             source_context=source_context,
-            knowledge_rules=knowledge_rules,
         )
-        _replace_pending_review(
+        proposal = {
+            **result.model_dump(mode="json"),
+            "_execution_metadata": execution_metadata(result),
+        }
+        run.context = {
+            **run.context,
+            "relevance_decision": proposal,
+        }
+        _record_automatic_checkpoint(
             db,
             run=run,
             stage=RELEVANCE_STAGE,
-            proposal={
-                **result.model_dump(mode="json"),
-                "_execution_metadata": execution_metadata(result),
-                "knowledge_rules": selected_rules,
-            },
+            proposal=proposal,
+            policy_version="ai-direct-v1",
         )
+        should_continue = _should_continue_relevance(proposal)
+        if should_continue:
+            run.status = "running"
+            run.current_stage = (
+                OCR_STAGE if is_patch_preview(raw_item) else TRANSLATION_STAGE
+            )
+        else:
+            now = datetime.now(UTC)
+            run.status = "completed"
+            run.outcome = "irrelevant"
+            run.completed_at = now
+            if run.correction_id:
+                correction = db.get(PipelineCorrection, run.correction_id)
+                if correction is not None:
+                    correction.status = "completed"
+                    correction.completed_at = now
         assert_execution_owned(db, execution_guard)
         db.commit()
+        if should_continue:
+            if run.current_stage == OCR_STAGE:
+                await _generate_ocr_review(
+                    db, run, **_guard_kwargs(execution_guard)
+                )
+            else:
+                await _generate_translation_review(
+                    db, run, **_guard_kwargs(execution_guard)
+                )
     except Exception as exc:
         _mark_failed(db, run, exc, execution_guard=execution_guard)
         raise
@@ -1402,6 +1423,44 @@ def _record_checkpoint(
     return checkpoint
 
 
+def _record_automatic_checkpoint(
+    db: Session,
+    *,
+    run: ProcessingRun,
+    stage: str,
+    proposal: dict[str, Any],
+    policy_version: str,
+) -> ProcessingCheckpoint:
+    metadata = dict(proposal.get("_execution_metadata") or {})
+    checkpoint = ProcessingCheckpoint(
+        raw_item_id=run.raw_item_id,
+        processing_run_id=run.id,
+        correction_id=run.correction_id,
+        stage=stage,
+        output_snapshot=dict(proposal),
+        artifact_references={
+            "workflow_version": "reviewed-pipeline-v2",
+            "policy_version": policy_version,
+            "execution_metadata": metadata,
+        },
+        knowledge_snapshot={},
+        model_name=(
+            proposal.get("model")
+            or metadata.get("model")
+            or metadata.get("model_name")
+        ),
+        decision_source="automatic",
+    )
+    db.add(checkpoint)
+    return checkpoint
+
+
+def _should_continue_relevance(proposal: dict[str, Any]) -> bool:
+    return bool(proposal.get("is_lol_relevant")) or (
+        proposal.get("product_scope") == "uncertain"
+    )
+
+
 def _replace_pending_review(
     db: Session,
     *,
@@ -1428,7 +1487,6 @@ def _replace_pending_review(
 
 def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
     allowed = {
-        RELEVANCE_STAGE: {"relevance_correction"},
         OCR_STAGE: {"ocr_error"},
         FACT_STAGE: {"analysis_correction"},
         CLASSIFY_STAGE: {"analysis_correction"},

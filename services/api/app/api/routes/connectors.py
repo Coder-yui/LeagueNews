@@ -1,5 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.connectors.registry import connector_registry
@@ -7,6 +9,7 @@ from app.core.database import get_db
 from app.models.connector_run import ConnectorRun
 from app.schemas.connector import (
     ConnectorRegistrationRead,
+    ConnectorRunPageRead,
     ConnectorRunRead,
     ConnectorRunRequest,
 )
@@ -28,6 +31,38 @@ def list_connector_runs(db: Session = Depends(get_db)) -> list[ConnectorRun]:
     return list(
         db.scalars(select(ConnectorRun).order_by(ConnectorRun.started_at.desc()).limit(100))
     )
+
+
+@router.get("/runs/page", response_model=ConnectorRunPageRead)
+def list_connector_runs_page(
+    source_id: int | None = None,
+    status_filter: str = Query(
+        default="failed",
+        alias="status",
+        pattern="^(all|completed|failed)$",
+    ),
+    sort: str = Query(default="desc", pattern="^(asc|desc)$"),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    conditions = [ConnectorRun.source_id == source_id] if source_id is not None else []
+    if status_filter != "all":
+        conditions.append(ConnectorRun.status == status_filter)
+    total = db.scalar(select(func.count(ConnectorRun.id)).where(*conditions)) or 0
+    ordering = (
+        (ConnectorRun.started_at.asc(), ConnectorRun.id.asc())
+        if sort == "asc"
+        else (ConnectorRun.started_at.desc(), ConnectorRun.id.desc())
+    )
+    statement = (
+        select(ConnectorRun)
+        .where(*conditions)
+        .order_by(*ordering)
+        .offset(offset)
+        .limit(limit)
+    )
+    return {"items": list(db.scalars(statement)), "total": total}
 
 
 @router.post("/{connector_type}/run", response_model=ConnectorRunRead)

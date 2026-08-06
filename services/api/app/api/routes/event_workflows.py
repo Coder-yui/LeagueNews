@@ -8,6 +8,7 @@ from app.models.normalized_item import NormalizedItem
 from app.schemas.event_workflow import (
     EventAggregationRunRead,
     EventReviewApproval,
+    EventReviewCorrectionApproval,
     EventReviewRejection,
     EventReviewTaskRead,
 )
@@ -97,6 +98,30 @@ def reject_review(
     try:
         return reject_event_review(db, review, payload=payload)
     except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/reviews/{review_id}/correct-and-approve",
+    response_model=EventAggregationRunRead,
+)
+def correct_and_approve_event_review(
+    review_id: int,
+    payload: EventReviewCorrectionApproval,
+    db: Session = Depends(get_db),
+) -> EventAggregationRun:
+    review = db.get(EventReviewTask, review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="event review not found")
+    review.proposal = payload.decision_draft
+    try:
+        return approve_event_review(
+            db,
+            review,
+            note=payload.note or "管理台修改归属后批准",
+        )
+    except (RuntimeError, ValueError) as exc:
+        db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

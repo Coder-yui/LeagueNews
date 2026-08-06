@@ -187,13 +187,13 @@ class RelevanceResult(BaseModel):
         if self.product_scope in {"wild_rift", "2xko", "unrelated"} and self.is_lol_relevant:
             raise ValueError("excluded product_scope must set is_lol_relevant=false")
         if self.product_scope == "uncertain" and self.is_lol_relevant:
-            raise ValueError("uncertain scope cannot enter downstream processing")
+            raise ValueError("uncertain scope must preserve is_lol_relevant=false")
         return self
 
 
 class OrganizedKnowledgeRule(BaseModel):
     knowledge_type: Literal[
-        "relevance", "analysis", "translation", "event_aggregation"
+        "analysis", "translation", "event_aggregation"
     ]
     scope: str = Field(min_length=1, max_length=160)
     rule_text: str = Field(min_length=1, max_length=1000)
@@ -804,7 +804,6 @@ topic、entity_roles）和若干候选事件，决定这条消息如何归属。
         title: str | None,
         content: str,
         source_context: dict[str, object],
-        knowledge_rules: list[str],
     ) -> RelevanceResult:
         prompt = (
             "你是英雄联盟资讯范围审核员。判断输入是否属于本项目保留范围。"
@@ -812,13 +811,14 @@ topic、entity_roles）和若干候选事件，决定这条消息如何归属。
             "Riot 公司新闻，以及英雄联盟周边、音乐和商业合作。"
             "明确排除英雄联盟手游 Wild Rift 和 2XKO；普通私人内容也排除。"
             "不能仅凭账号身份判断，必须依据本条内容。只输出 JSON。\n"
+            "信息不足、无法可靠归类时使用 product_scope=uncertain，"
+            "并保持 is_lol_relevant=false；系统会将 uncertain 送入后续流程。\n"
             "字段：product_scope、is_lol_relevant、confidence、reason。"
         )
         payload = {
             "title": title or "",
             "content": content,
             "source_context": source_context,
-            "approved_rules": knowledge_rules,
         }
         return await self._validated_json_completion(
             prompt=prompt,

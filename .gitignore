@@ -7,6 +7,7 @@ node_modules/
 .pnpm-store/
 .pnpm-home/
 .next/
+.next-dev/
 out/
 pnpm-debug.log*
 *.tsbuildinfo

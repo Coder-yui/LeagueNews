@@ -143,6 +143,11 @@ class EventReviewApproval(BaseModel):
     note: str | None = None
 
 
+class EventReviewCorrectionApproval(BaseModel):
+    decision_draft: dict[str, Any]
+    note: str | None = None
+
+
 class EventReviewRejection(BaseModel):
     reason: str = Field(min_length=1)
     knowledge_rule: str | None = None

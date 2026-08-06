@@ -215,6 +215,12 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
             event.credibility_status = "unverified"
 
 
+def refresh_event_metrics(db: Session, event: Event) -> None:
+    """Refresh public event projections after an explicit membership change."""
+    _refresh_publish_range(db, event)
+    _refresh_editorial_metrics(db, event)
+
+
 def _calibrate_resolved_sources(
     db: Session,
     *,

@@ -130,6 +130,11 @@ def update_knowledge_rule(
     rule = db.get(KnowledgeRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="knowledge rule not found")
+    if rule.knowledge_type == "relevance":
+        raise HTTPException(
+            status_code=409,
+            detail="historical relevance rules are read-only",
+        )
     updates = payload.model_dump(exclude_unset=True)
     target_lifecycle = updates.get("lifecycle_status")
     evaluation_summary = updates.get(

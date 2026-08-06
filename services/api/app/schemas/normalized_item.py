@@ -93,4 +93,13 @@ class PublishedItemRead(BaseModel):
     translated_content_blocks: list[dict[str, Any]]
     translation_status: str
     media_extractions: list[PublishedMediaExtractionRead]
+    fact_claims: list[dict[str, Any]]
+    event_memberships: list[dict[str, Any]]
     created_at: datetime
+
+
+class PublishedItemPageRead(BaseModel):
+    items: list[PublishedItemRead]
+    total: int
+    topic_options: list[str]
+    content_type_options: list[str]

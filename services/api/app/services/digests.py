@@ -43,7 +43,11 @@ def generate_digest(
             EventRevision.created_at > window_start,
             EventRevision.created_at <= normalized_cutoff,
         )
-        .order_by(Event.importance_score.desc(), EventRevision.created_at.desc())
+        .order_by(
+            Event.importance_score.desc(),
+            Event.last_published_at.desc().nullslast(),
+            EventRevision.created_at.desc(),
+        )
         .limit(100)
     ).all()
     latest: dict[int, tuple[Event, EventRevision]] = {}

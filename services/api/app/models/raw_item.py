@@ -21,7 +21,7 @@ class RawItem(Base):
     language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     content_blocks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    content_hash_version: Mapped[int] = mapped_column(Integer, default=2)
+    content_hash_version: Mapped[int] = mapped_column(Integer, default=3)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     supersedes_raw_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("raw_items.id", ondelete="SET NULL"), nullable=True, index=True
@@ -59,25 +59,26 @@ class RawItem(Base):
 
     @property
     def processing_status(self) -> str:
-        if self.normalized_item:
-            return (
-                "analyzed"
-                if self.normalized_item.publication_status == "published"
-                else "withdrawn"
-            )
-        if not self.processing_runs:
-            return "pending"
-        latest = max(self.processing_runs, key=lambda run: run.id)
-        return latest.status
+        if self.processing_runs:
+            latest = max(self.processing_runs, key=lambda run: run.id)
+            if latest.status in {"running", "awaiting_review", "failed"}:
+                return latest.status
+        if (
+            self.normalized_item
+            and self.normalized_item.publication_status == "published"
+        ):
+            return "analyzed"
+        return "pending"
 
     __table_args__ = (
         Index(
-            "uq_raw_items_source_external_hash",
+            "uq_raw_items_source_external_revision",
             "source_id",
             "external_id",
-            "content_hash",
+            "revision",
             unique=True,
             postgresql_where=text("external_id IS NOT NULL"),
+            sqlite_where=text("external_id IS NOT NULL"),
         ),
         Index(
             "uq_raw_items_source_hash_without_external",
@@ -85,6 +86,7 @@ class RawItem(Base):
             "content_hash",
             unique=True,
             postgresql_where=text("external_id IS NULL"),
+            sqlite_where=text("external_id IS NULL"),
         ),
     )
 

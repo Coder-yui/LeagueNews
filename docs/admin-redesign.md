@@ -125,8 +125,6 @@ rel → ocr → trans → cls → cred → imp → claim → event
 │   relevance    ✓  lol_esports  0.95                        │
 │   translation  ✓  已翻译 (ZH→ZH)                           │
 │   classify     ✓  insider_rumor / roster                   │
-│   credibility  ✓  0.62                                     │
-│                   来源 0.75 × 措辞 0.80 × 类型 0.65 × 1.0  │
 │   importance   ✓  0.45  (scope:3 mag:2 act:2 dur:1 nov:3) │
 │   claim_gen    ✓  2 条断言: considered_for(WBG:jungle)      │
 │   event        ✗  IntegrityError: membership conflict       │
@@ -155,14 +153,14 @@ rel → ocr → trans → cls → cred → imp → claim → event
 ### 4.1 列表视图（默认）
 
 ```
-筛选: [topic ▾] [content_type ▾] [可信度 0-1] [lifecycle ▾] [搜索]
+筛选: [topic ▾] [content_type ▾] [重要性 0-1] [lifecycle ▾] [搜索]
 
 ┌──┬──────────────────────┬─────────────┬──────┬──────┬─────┐
-│  │ 标题                  │ content_type │ 可信度│ 重要性│ 事件 │
+│  │ 标题                  │ content_type │ 重要性│ 状态  │ 事件 │
 ├──┼──────────────────────┼─────────────┼──────┼──────┼─────┤
-│  │ 2026LPL W2D1...      │ match_result │ 1.00 │ 0.55 │  2  │
-│  │ 传闻:WBG打野考虑...   │ insider_rumor│ 0.62 │ 0.45 │  1  │
-│  │ 格温花仙子皮肤展示     │ official_fact│ 1.00 │ 0.72 │  1  │
+│  │ 2026LPL W2D1...      │ match_result │ 0.55 │ 已发布 │  2  │
+│  │ 传闻:WBG打野考虑...   │ insider_rumor│ 0.45 │ 已发布 │  1  │
+│  │ 格温花仙子皮肤展示     │ official_fact│ 0.72 │ 已发布 │  1  │
 └──┴──────────────────────┴─────────────┴──────┴──────┴─────┘
 ```
 
@@ -179,10 +177,10 @@ rel → ocr → trans → cls → cred → imp → claim → event
 │                      │                          │
 │ [来源 badge]          │ content_type: insider_rumor│
 │ 召唤师Park            │ topic: roster             │
-│ 2026-08-01 13:00     │ credibility: 0.62         │
-│                      │   来源:   0.75            │
-│ "关于WBG人员变动，    │   措辞:   0.80            │
-│ 昨天没一个人猜对..."  │   类型:   0.65            │
+│ 2026-08-01 13:00     │ product_scope: lol_esports│
+│                      │ entities: WBG(core)       │
+│ "关于WBG人员变动，    │ claims: considered_for   │
+│ 昨天没一个人猜对..."  │                           │
 │                      │ importance: 0.45          │
 │                      │ 归属事件: transfer_saga    │
 │                      │                          │
@@ -196,8 +194,7 @@ rel → ocr → trans → cls → cred → imp → claim → event
 - 原文内容块（文字 + 图片 + 嵌入）
 - 翻译结果
 - 双轴分类（content_type + topic）
-- 可信度四因子展开
-- 重要性五维展开
+- 重要性编辑特征展开
 - Claim 列表（fact_claims + attribution）
 - 归属事件列表（含 membership_role）
 - 处理历史（ProcessingCheckpoint 时序）
@@ -277,7 +274,7 @@ supports（➕）/ contradicts（➖）/ context（○）。
 - 顶部：event_type badge + lifecycle badge + credibility badge
 - 摘要与最新动态
 - 时间线（同 5.2 但单事件）
-- 成员消息列表（含 membership_role / evidence_stance / credibility_components）
+- 成员消息列表（含 membership_role / evidence_stance / source_reliability_snapshot）
 - 修订历史（EventRevision 列表）
 - 可信度分解卡：positive（支持信源）/ negative（反驳信源）/ 合并结果
 - 操作：修改 lifecycle / 更新摘要 / 添加消息 / 触发重新聚合
@@ -300,7 +297,6 @@ supports（➕）/ contradicts（➖）/ context（○）。
 │                                                          │
 │ 原文 ────────────────  分析结果 ───────────────────────── │
 │ "昨天没一个人猜对..."  classify: insider_rumor / roster   │
-│                       credibility: 0.62                  │
 │                       importance: 0.45                   │
 │                       claims: considered_for(WBG:jungle) │
 │                                                          │
@@ -308,7 +304,7 @@ supports（➕）/ contradicts（➖）/ context（○）。
 └──────────────────────────────────────────────────────────┘
 ```
 
-修正后批准展开内联编辑表单（可修改 content_type / credibility / importance）。
+修正后批准展开内联编辑表单（可修改 content_type / importance）。
 
 ### 队列二：事件归属待审
 
@@ -372,7 +368,7 @@ Pipeline 队列:
 
 失败任务:
   Job #342  raw_item:489  event_decision  [重试]  [查看错误]
-  Job #301  raw_item:441  credibility     [重试]  [查看错误]
+  Job #301  raw_item:441  importance      [重试]  [查看错误]
 ```
 
 ### 8.2 Pipeline Corrections
@@ -467,8 +463,7 @@ Pipeline 队列:
 | `StageTooltip.tsx` | 节点 hover 详情 |
 | `ExpandableRow.tsx` | 表格行展开/收起容器 |
 | `ItemDetailCard.tsx` | 单条消息阶段详情卡（用于展开行和详情页） |
-| `CredibilityBreakdown.tsx` | 四因子可信度可视化 |
-| `ImportanceDimensions.tsx` | 五维重要性雷达/条形图 |
+| `ImportanceDimensions.tsx` | 编辑重要性特征可视化 |
 | `EventTimeline.tsx` | 时间线型事件纵向节点列表 |
 | `MultiMembershipView.tsx` | 多归属消息对照表 |
 | `ReviewCard.tsx` | 审核队列单条卡片（支持三种队列） |

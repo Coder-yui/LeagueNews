@@ -6,7 +6,6 @@ import { useCallback, useEffect, useState } from "react";
 import { adminApi } from "@/lib/api";
 import type { PublishedItemPage } from "@/lib/types";
 import { ContentBlocks } from "@/components/admin/ContentBlocks";
-import { CredibilityBreakdown } from "@/components/admin/CredibilityBreakdown";
 import { ImportanceDimensions } from "@/components/admin/ImportanceDimensions";
 import { PaginationControls } from "@/components/admin/PaginationControls";
 import { relativeTime, score } from "@/components/admin/admin-utils";
@@ -25,9 +24,6 @@ export default function MessagesPage() {
   const [view, setView] = useState<"list" | "review">("list");
   const [topic, setTopic] = useState("all");
   const [type, setType] = useState("all");
-  const [credibilitySort, setCredibilitySort] = useState<
-    "none" | "asc" | "desc"
-  >("none");
   const [importanceSort, setImportanceSort] = useState<"none" | "asc" | "desc">(
     "none",
   );
@@ -49,18 +45,8 @@ export default function MessagesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const sortBy =
-      credibilitySort !== "none"
-        ? "credibility"
-        : importanceSort !== "none"
-          ? "importance"
-          : "time";
-    const direction =
-      credibilitySort !== "none"
-        ? credibilitySort
-        : importanceSort !== "none"
-          ? importanceSort
-          : sort;
+    const sortBy = importanceSort !== "none" ? "importance" : "time";
+    const direction = importanceSort !== "none" ? importanceSort : sort;
     const params = new URLSearchParams({
       limit: String(pageSize),
       offset: String((page - 1) * pageSize),
@@ -82,7 +68,6 @@ export default function MessagesPage() {
       setLoading(false);
     }
   }, [
-    credibilitySort,
     importanceSort,
     page,
     pageSize,
@@ -107,7 +92,7 @@ export default function MessagesPage() {
       await adminApi(`/pipeline/normalized-items/${current.id}/corrections`, {
         method: "POST",
         body: JSON.stringify({
-          restart_from_stage: "classify",
+          restart_from_stage: "fact_classify",
           resume_mode: "manual",
           reason: "审阅视图标记分析结果有问题",
         }),
@@ -172,29 +157,12 @@ export default function MessagesPage() {
           </select>
         </label>
         <label>
-          可信度排序
-          <select
-            value={credibilitySort}
-            onChange={(event) => {
-              const value = event.target.value as "none" | "asc" | "desc";
-              setCredibilitySort(value);
-              if (value !== "none") setImportanceSort("none");
-              setPage(1);
-            }}
-          >
-            <option value="none">不排序</option>
-            <option value="asc">正序（低到高）</option>
-            <option value="desc">倒序（高到低）</option>
-          </select>
-        </label>
-        <label>
           重要性排序
           <select
             value={importanceSort}
             onChange={(event) => {
               const value = event.target.value as "none" | "asc" | "desc";
               setImportanceSort(value);
-              if (value !== "none") setCredibilitySort("none");
               setPage(1);
             }}
           >
@@ -207,14 +175,11 @@ export default function MessagesPage() {
           时间排序
           <select
             value={
-              credibilitySort === "none" && importanceSort === "none"
-                ? sort
-                : "none"
+              importanceSort === "none" ? sort : "none"
             }
             onChange={(event) => {
               const value = event.target.value as "asc" | "desc";
               setSort(value);
-              setCredibilitySort("none");
               setImportanceSort("none");
               setPage(1);
             }}
@@ -256,7 +221,6 @@ export default function MessagesPage() {
                   <th>标题</th>
                   <th>内容类型</th>
                   <th>Topic</th>
-                  <th>可信度</th>
                   <th>重要性</th>
                   <th>事件</th>
                   <th>发布时间</th>
@@ -280,18 +244,6 @@ export default function MessagesPage() {
                     <td>
                       <span className="admin-badge subtle">
                         {item.primary_topic}
-                      </span>
-                    </td>
-                    <td>
-                      <span
-                        className="admin-score"
-                        style={
-                          {
-                            "--score": item.credibility_score,
-                          } as React.CSSProperties
-                        }
-                      >
-                        {score(item.credibility_score)}
                       </span>
                     </td>
                     <td>
@@ -371,10 +323,6 @@ export default function MessagesPage() {
               <h2>{current.title}</h2>
               <p>{current.summary}</p>
               <div className="admin-detail-breakdowns">
-                <CredibilityBreakdown
-                  scoreValue={current.credibility_score}
-                  components={current.credibility_components}
-                />
                 <ImportanceDimensions
                   scoreValue={current.importance_score}
                   dimensions={current.importance_dimensions}

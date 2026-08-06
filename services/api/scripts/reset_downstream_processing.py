@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 from app.core.database import engine
-from app.models.credibility import SourceReliabilityHistory
 from app.models.event import Event, EventAggregationRun
 from app.models.intelligence import Claim, Digest
 from app.models.media_extraction import MediaExtraction
@@ -30,7 +29,6 @@ def _counts(db: Session) -> dict[str, int]:
         Claim,
         Digest,
         KnowledgeRule,
-        SourceReliabilityHistory,
     )
     return {
         model.__tablename__: int(db.scalar(select(func.count()).select_from(model)) or 0)
@@ -123,7 +121,6 @@ def main() -> None:
                     events,
                     normalized_item_media_extractions,
                     normalized_item_revisions,
-                    source_reliability_history,
                     pipeline_jobs,
                     processing_checkpoints,
                     pipeline_corrections,

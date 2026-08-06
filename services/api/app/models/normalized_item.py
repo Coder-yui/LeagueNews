@@ -27,16 +27,9 @@ class NormalizedItem(Base):
     importance_score: Mapped[float] = mapped_column(Float, index=True)
     importance_dimensions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     importance_policy_version: Mapped[str] = mapped_column(
-        String(80), default="importance-v2-five-dimensions"
+        String(80), default="importance-v3-editorial-baselines"
     )
     importance_calculation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    credibility: Mapped[str] = mapped_column(String(30), index=True)
-    credibility_score: Mapped[float] = mapped_column(Float, index=True)
-    credibility_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
-    credibility_components: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    credibility_policy_version: Mapped[str] = mapped_column(
-        String(80), default="credibility-v2-four-factor-beta"
-    )
     language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     source_language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     target_language: Mapped[str] = mapped_column(String(30), default="zh-CN")
@@ -82,7 +75,7 @@ class NormalizedItem(Base):
             name="ck_normalized_items_current_revision_positive",
         ),
         CheckConstraint(
-            "publication_status IN ('published', 'withdrawn')",
+            "publication_status IN ('published', 'withdrawn', 'superseded')",
             name="ck_normalized_items_publication_status",
         ),
     )

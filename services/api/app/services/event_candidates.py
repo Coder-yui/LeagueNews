@@ -53,6 +53,11 @@ class EventCandidate:
 
 
 def aggregation_routes(item: NormalizedItem) -> list[EventRoute]:
+    policy = event_aggregation_policy(item)
+    if policy is not None:
+        if not policy["event_eligible"]:
+            return []
+        return [EventRoute("shop_rotation", str(policy["aggregation_key"]))]
     return route_event_types(
         content_type=item.content_type,
         topic=item.primary_topic,
@@ -214,14 +219,16 @@ def event_aggregation_policy(item: NormalizedItem) -> dict[str, object] | None:
         "cadence": cadence,
         "aggregation_period": f"{iso_year}-W{iso_week:02d}",
         "stable_event_key": (
-            f"mythic-shop:cn:{iso_year}-w{iso_week:02d}"
+            f"mythic_shop:cn:{iso_year}-W{iso_week:02d}"
             if is_cn
             else None
         ),
-        "importance_range": [0.3, 0.45],
+        "importance_range": (
+            [0.45, 0.70] if is_cn else [0.25, 0.50]
+        ),
         "required_event_type": "shop_rotation",
         "aggregation_key": (
-            f"mythic_shop:week:{iso_week}"
+            f"mythic_shop:cn:{iso_year}-W{iso_week:02d}"
             if is_cn
             else None
         ),
@@ -418,12 +425,20 @@ def find_event_candidates(
     item_entities = _entity_names(item)
     superseded_item_ids = set(superseded_normalized_item_ids(db, item))
     included_ids = include_event_ids or set()
+    revision_event_ids = set(
+        db.scalars(
+            select(EventMessage.event_id).where(
+                EventMessage.normalized_item_id.in_(superseded_item_ids)
+            )
+        )
+    ) if superseded_item_ids else set()
+    recalled_event_ids = included_ids | revision_event_ids
     reference_at = item.raw_item.published_at or datetime.now(UTC)
     if reference_at.tzinfo is not None:
         reference_at = reference_at.astimezone(UTC).replace(tzinfo=None)
     indexed_cutoff = reference_at - timedelta(days=180)
     recall_filters = [
-        Event.id.in_(included_ids),
+        Event.id.in_(recalled_event_ids),
         Event.category == item.category,
         Event.last_published_at >= indexed_cutoff,
     ]
@@ -442,7 +457,7 @@ def find_event_candidates(
             or_(*recall_filters),
             or_(
                 Event.status == "active",
-                Event.id.in_(included_ids),
+                Event.id.in_(recalled_event_ids),
             )
         )
         .order_by(Event.last_published_at.desc().nullslast(), Event.id.desc())
@@ -457,14 +472,7 @@ def find_event_candidates(
         if forced_candidate:
             score += 500
             reasons.append("该事件是本次撤回前的原事件，保留为纠正候选")
-        supersedes_member = bool(
-            superseded_item_ids
-            & {
-                message.normalized_item_id
-                for message in event.messages
-                if message.membership_status == "active"
-            }
-        )
+        supersedes_member = event.id in revision_event_ids
         if supersedes_member:
             score += 200
             reasons.append("当前消息是该事件成员的更新版本")

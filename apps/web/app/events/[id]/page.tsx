@@ -75,7 +75,7 @@ export default async function EventPage({
               <div>
                 <span>
                   {message.source_name}
-                  {message.is_official_confirmation && " · 官方直接确认"}
+                  {message.is_official_evidence && " · 官方直接证据"}
                   {message.evidence_stance === "contradicts" && " · 反证"}
                   {!message.is_significant_update && " · 补充证据"}
                 </span>

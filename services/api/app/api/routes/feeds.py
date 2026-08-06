@@ -41,7 +41,10 @@ def event_feed(
     events = db.scalars(
         select(Event)
         .where(Event.status == "active")
-        .order_by(func.coalesce(Event.last_published_at, Event.created_at).desc())
+        .order_by(
+            Event.importance_score.desc(),
+            func.coalesce(Event.last_published_at, Event.created_at).desc(),
+        )
         .limit(limit)
     )
     return _rss(

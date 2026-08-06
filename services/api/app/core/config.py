@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     pipeline_worker_poll_seconds: float = 2.0
     pipeline_worker_lease_seconds: int = 300
     pipeline_worker_heartbeat_seconds: int = 30
+    rumor_expiry_days: int = 14
     collection_scheduler_poll_seconds: float = 5.0
     collection_scheduler_lease_minutes: int = 30
     collection_scheduler_heartbeat_seconds: int = 60
@@ -52,6 +53,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "pipeline_worker_heartbeat_seconds must be greater than 0"
             )
+        if self.rumor_expiry_days <= 0:
+            raise ValueError("rumor_expiry_days must be greater than 0")
         if (
             self.pipeline_worker_heartbeat_seconds
             >= self.pipeline_worker_lease_seconds

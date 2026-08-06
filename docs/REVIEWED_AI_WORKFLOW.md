@@ -73,7 +73,7 @@ AI 知识库；正确结果通过具体修订保存。
 - 中文标准标题和摘要；
 - 分类和实体；
 - `importance_score`；
-- `credibility`、`credibility_score` 和 `credibility_evidence`。
+- 消息层不保存综合可信度；事件可信度由 Source 配置和事件成员关系确定性计算。
 
 分析阶段加载 `analysis` 类型知识规则，但不再加载术语表，也不再承担翻译。人工批准
 分析与摘要后才写入正式 `NormalizedItem`；分析驳回只产生 `analysis` 知识规则。

@@ -54,6 +54,8 @@ DEFAULT_SOURCES = (
         "external_key": "riotphroxzon",
         "base_url": "https://x.com/RiotPhroxzon",
         "connector_config": {},
+        "is_official": True,
+        "reliability_score": 1.0,
     },
     {
         "name": "LoL Esports (@lolesports)",
@@ -103,6 +105,7 @@ DEFAULT_SOURCES = (
         "external_key": "2266865584",
         "base_url": "https://weibo.com/u/2266865584",
         "connector_config": {"include_reposts": True},
+        "reliability_score": 0.6,
     },
     {
         "name": "召唤师Park",
@@ -110,6 +113,7 @@ DEFAULT_SOURCES = (
         "external_key": "2522098777",
         "base_url": "https://weibo.com/u/2522098777",
         "connector_config": {"include_reposts": True},
+        "reliability_score": 0.6,
     },
     {
         "name": "_尧阿尧y_",
@@ -117,6 +121,7 @@ DEFAULT_SOURCES = (
         "external_key": "2600241232",
         "base_url": "https://weibo.com/u/2600241232",
         "connector_config": {"include_reposts": True},
+        "reliability_score": 0.6,
     },
     {
         "name": "lol半价吧 · 小老鼠小伟",
@@ -131,6 +136,7 @@ DEFAULT_SOURCES = (
             "max_thread_pages": 5,
             "max_post_pages": 100,
         },
+        "reliability_score": 0.7,
     },
     {
         "name": "lol半价吧 · 凤舞天_惊鸿恋",
@@ -145,6 +151,7 @@ DEFAULT_SOURCES = (
             "max_thread_pages": 5,
             "max_post_pages": 100,
         },
+        "reliability_score": 0.7,
     },
 )
 

@@ -20,6 +20,7 @@ class PipelineCorrection(Base):
     event_id: Mapped[int | None] = mapped_column(
         ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    original_event_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     source_processing_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True
     )
@@ -57,8 +58,8 @@ class PipelineCorrection(Base):
     __table_args__ = (
         CheckConstraint(
             "restart_from_stage IN "
-            "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', "
-            "'credibility', 'importance', 'claim_gen', 'item_analysis', "
+            "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', 'fact_classify', "
+            "'importance', 'claim_gen', 'item_analysis', "
             "'event_decision')",
             name="ck_pipeline_corrections_restart_stage",
         ),
@@ -118,8 +119,8 @@ class ProcessingCheckpoint(Base):
     __table_args__ = (
         CheckConstraint(
             "stage IN "
-            "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', "
-            "'credibility', 'importance', 'claim_gen', 'item_analysis', "
+            "('relevance', 'image_ocr', 'translation', 'fact_extract', 'classify', 'fact_classify', "
+            "'importance', 'claim_gen', 'item_analysis', "
             "'event_decision')",
             name="ck_processing_checkpoints_stage",
         ),

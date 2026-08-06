@@ -21,7 +21,12 @@ from app.services.pipeline_execution import (
     PipelineLeaseLost,
     assert_execution_owned,
 )
-from app.services.raw_item_versions import is_latest_normalized_item
+from app.services.raw_item_versions import (
+    is_latest_normalized_item,
+    is_latest_raw_item,
+    latest_raw_item_condition,
+)
+from app.services.maintenance import run_daily_maintenance
 from app.workflows.event_aggregation import (
     approve_event_review,
     start_event_aggregation,
@@ -79,6 +84,7 @@ def enqueue_pending_raw_items(db: Session) -> list[PipelineJob]:
             .outerjoin(NormalizedItem, NormalizedItem.raw_item_id == RawItem.id)
             .outerjoin(ProcessingRun, ProcessingRun.raw_item_id == RawItem.id)
             .where(
+                latest_raw_item_condition(),
                 NormalizedItem.id.is_(None),
                 ProcessingRun.id.is_(None),
             )
@@ -157,6 +163,11 @@ async def execute_pipeline_job(
     raw_item = db.get(RawItem, job.raw_item_id)
     if raw_item is None:
         raise ValueError(f"raw item {job.raw_item_id} no longer exists")
+    if not is_latest_raw_item(db, raw_item):
+        job.status = "cancelled"
+        job.error_message = "raw item has been superseded by a newer revision"
+        job.completed_at = datetime.now(UTC)
+        return
 
     item_run = _active_item_run(db, raw_item.id)
     if item_run is None and (
@@ -367,6 +378,12 @@ async def process_next_job() -> bool:
                 job,
                 execution_guard=execution_guard,
             )
+            if job.status == "cancelled":
+                job.lease_token = None
+                job.lease_expires_at = None
+                job.worker_id = None
+                db.commit()
+                return True
             assert_execution_owned(db, execution_guard)
             job = db.get(PipelineJob, job.id)
             job.status = "completed"
@@ -416,6 +433,7 @@ async def process_next_job() -> bool:
 
 async def worker_loop() -> None:
     while True:
+        run_daily_maintenance()
         processed = await process_next_job()
         if not processed:
             await asyncio.sleep(settings.pipeline_worker_poll_seconds)

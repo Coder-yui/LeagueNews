@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,8 @@ class EventSummaryRead(BaseModel):
     importance_evidence: list[str]
     latest_development: str
     independent_source_count: int
+    supporting_source_count: int
+    contradicting_source_count: int
     official_source_count: int
     first_published_at: datetime | None
     last_published_at: datetime | None
@@ -34,7 +36,10 @@ class EventMessageRead(BaseModel):
     relation_type: str
     membership_role: str
     evidence_stance: str
-    is_official_confirmation: bool
+    is_official_evidence: bool
+    source_reliability_snapshot: float
+    timeline_note: str
+    update_kind: str
     is_significant_update: bool
     source_published_at: datetime | None
     added_at: datetime
@@ -42,8 +47,6 @@ class EventMessageRead(BaseModel):
     summary: str
     source_name: str
     source_url: str | None
-    credibility_score: float
-    credibility_components: dict[str, Any]
 
 
 class EventRevisionRead(BaseModel):
@@ -77,3 +80,11 @@ class EventMembershipAdminCreate(BaseModel):
     membership_role: str = Field(default="primary", pattern="^(primary|component|cross_ref)$")
     evidence_stance: str = Field(default="supports", pattern="^(supports|contradicts|context)$")
     timeline_note: str = Field(default="管理台手动归属", min_length=1)
+    update_kind: Literal[
+        "new_fact",
+        "confirmation",
+        "refutation",
+        "correction",
+        "context",
+        "duplicate_evidence",
+    ] = "new_fact"

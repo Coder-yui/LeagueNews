@@ -290,6 +290,20 @@ def withdraw_active_claims(
         claim.status = "withdrawn"
 
 
+def supersede_active_claims(
+    db: Session,
+    *,
+    normalized_item_id: int,
+) -> None:
+    for claim in db.scalars(
+        select(Claim).where(
+            Claim.normalized_item_id == normalized_item_id,
+            Claim.status == "active",
+        )
+    ):
+        claim.status = "superseded"
+
+
 def backfill_published_claims(
     db: Session,
     *,

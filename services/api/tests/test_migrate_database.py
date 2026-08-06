@@ -37,6 +37,21 @@ def test_fresh_database_sources_match_current_connector_baseline() -> None:
             if source.external_key is not None
         }
     ) == 14
+    by_external_key = {
+        source.external_key: source
+        for source in sources
+        if source.external_key is not None
+    }
+    assert by_external_key["riotphroxzon"].is_official is True
+    assert by_external_key["riotphroxzon"].reliability_score == 1.0
+    assert {
+        by_external_key[key].reliability_score
+        for key in ("2266865584", "2522098777", "2600241232")
+    } == {0.6}
+    assert {
+        by_external_key[key].reliability_score
+        for key in ("86124184", "770437943")
+    } == {0.7}
 
 
 def test_migration_ledger_is_contiguous_and_self_records_version(
@@ -46,4 +61,4 @@ def test_migration_ledger_is_contiguous_and_self_records_version(
     monkeypatch.setenv("MIGRATIONS_DIR", str(migrations))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "040_add_timeline_claims_and_claim_stage.sql"
+    assert files[-1].name == "047_add_event_evidence_projection.sql"

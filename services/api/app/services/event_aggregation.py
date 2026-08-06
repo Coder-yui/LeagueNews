@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from math import prod
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -7,15 +6,15 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.domain.importance import TOPIC_RANGES
-from app.domain.ontology import TIMELINE_EVENT_TYPES, topic_from_category
+from app.content_blocks import has_quoted_post
+from app.core.config import settings
+from app.domain.ontology import TIMELINE_EVENT_TYPES
 from app.models.event import Event, EventMessage, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.services.claims import (
     link_item_claims_to_event,
-    unlink_item_claims_from_event,
+    supersede_active_claims,
 )
-from app.services.credibility import record_source_outcome
 from app.services.raw_item_versions import superseded_normalized_item_ids
 
 _MATCH_LIFECYCLE_RANK = {
@@ -23,8 +22,6 @@ _MATCH_LIFECYCLE_RANK = {
     "live": 1,
     "completed": 2,
 }
-RUMOR_EXPIRY_DAYS = 14
-RUMOR_DECAY_HALF_LIFE_DAYS = 14
 
 
 class EventAggregationError(RuntimeError):
@@ -86,7 +83,6 @@ def _superseded_memberships(
             select(EventMessage).where(
                 EventMessage.normalized_item_id.in_(normalized_item_ids),
                 EventMessage.event_id == event_id,
-                EventMessage.membership_status == "active",
             )
         )
     )
@@ -106,18 +102,21 @@ def _refresh_publish_range(db: Session, event: Event) -> None:
     event.last_published_at = last_published_at
 
 
-def _default_independence_key(item: NormalizedItem) -> str:
+def _default_independence_key(item: NormalizedItem) -> str | None:
     for block in item.raw_item.content_blocks:
         if block.get("embed_kind") != "quoted_post" or not block.get("source_url"):
             continue
         parsed = urlsplit(str(block["source_url"]))
         if parsed.hostname:
-            return f"upstream:{parsed.hostname.casefold()}{parsed.path.rstrip('/')}"
+            host = parsed.hostname.casefold().removeprefix("www.")
+            path = parsed.path.rstrip("/") or "/"
+            return f"upstream:{host}{path}"
+    if has_quoted_post(item.raw_item.content_blocks):
+        return None
     return f"source:{item.raw_item.source_id}"
 
 
 def _refresh_editorial_metrics(db: Session, event: Event) -> None:
-    previous_credibility_status = event.credibility_status
     memberships = list(
         db.scalars(
             select(EventMessage)
@@ -131,6 +130,8 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
         event.credibility_status = "unverified"
         event.credibility_score = 0
         event.independent_source_count = 0
+        event.supporting_source_count = 0
+        event.contradicting_source_count = 0
         event.official_source_count = 0
         return
 
@@ -148,21 +149,21 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
     contradicting: dict[str, float] = {}
     official_support = set()
     official_contradiction = set()
-    all_sources = set()
 
     for membership in memberships:
         item = items[membership.normalized_item_id]
-        key = membership.independence_key or _default_independence_key(item)
-        all_sources.add(key)
-        if membership.evidence_stance == "context":
+        if item.publication_status != "published":
             continue
-        if membership.is_official_confirmation:
+        key = membership.independence_key or _default_independence_key(item)
+        if membership.evidence_stance == "context" or key is None:
+            continue
+        if membership.is_official_evidence:
             if membership.evidence_stance == "contradicts":
                 official_contradiction.add(key)
             else:
                 official_support.add(key)
             continue
-        strength = max(0.0, min(1.0, item.credibility_score))
+        strength = max(0.0, min(1.0, membership.source_reliability_snapshot))
         target = (
             contradicting
             if membership.evidence_stance == "contradicts"
@@ -170,83 +171,57 @@ def _refresh_editorial_metrics(db: Session, event: Event) -> None:
         )
         target[key] = max(target.get(key, 0), strength)
 
-    event.independent_source_count = len(all_sources)
+    event.supporting_source_count = len(set(supporting) | official_support)
+    event.contradicting_source_count = len(
+        set(contradicting) | official_contradiction
+    )
+    event.independent_source_count = len(
+        set(supporting)
+        | set(contradicting)
+        | official_support
+        | official_contradiction
+    )
     event.official_source_count = len(official_support | official_contradiction)
 
-    positive = 1 - prod(1 - strength for strength in supporting.values())
-    negative = 1 - prod(1 - strength for strength in contradicting.values())
     if official_contradiction and official_support:
         event.credibility_status = "disputed"
         event.credibility_score = 0.5
         event.lifecycle_status = "disputed"
     elif official_contradiction:
-        if previous_credibility_status != "officially_refuted":
-            _calibrate_resolved_sources(
-                db,
-                memberships=memberships,
-                items=items,
-                official_supports=False,
-            )
         event.credibility_status = "officially_refuted"
         event.credibility_score = 0
         event.lifecycle_status = "officially_refuted"
     elif official_support:
-        if previous_credibility_status != "official_confirmed":
-            _calibrate_resolved_sources(
-                db,
-                memberships=memberships,
-                items=items,
-                official_supports=True,
-            )
         event.credibility_status = "official_confirmed"
         event.credibility_score = 1
-        if event.lifecycle_status in {"developing", "unconfirmed", "disputed"}:
+        if event.lifecycle_status in {
+            "developing",
+            "unconfirmed",
+            "disputed",
+            "expired_unconfirmed",
+        }:
             event.lifecycle_status = "confirmed"
     else:
-        event.credibility_score = round(positive * (1 - negative), 6)
-        if positive and negative >= 0.25:
+        if supporting and contradicting:
             event.credibility_status = "disputed"
+            event.credibility_score = 0.5
             event.lifecycle_status = "disputed"
-        elif len(supporting) >= 2:
-            event.credibility_status = "multi_source_confirmed"
-        elif len(supporting) == 1:
-            event.credibility_status = "single_source"
         else:
-            event.credibility_status = "unverified"
+            base = max(supporting.values(), default=0)
+            boost = 0.1 * min(max(len(supporting) - 1, 0), 3)
+            event.credibility_score = round(min(0.9, base + boost), 6)
+            if len(supporting) >= 2:
+                event.credibility_status = "multi_source_supported"
+            elif len(supporting) == 1:
+                event.credibility_status = "single_source"
+            else:
+                event.credibility_status = "unverified"
 
 
 def refresh_event_metrics(db: Session, event: Event) -> None:
     """Refresh public event projections after an explicit membership change."""
     _refresh_publish_range(db, event)
     _refresh_editorial_metrics(db, event)
-
-
-def _calibrate_resolved_sources(
-    db: Session,
-    *,
-    memberships: list[EventMessage],
-    items: dict[int, NormalizedItem],
-    official_supports: bool,
-) -> None:
-    outcomes_by_source: dict[int, bool] = {}
-    sources = {}
-    for membership in memberships:
-        if (
-            membership.is_official_confirmation
-            or membership.evidence_stance == "context"
-        ):
-            continue
-        item = items[membership.normalized_item_id]
-        source = item.raw_item.source
-        sources[source.id] = source
-        supports = membership.evidence_stance != "contradicts"
-        outcomes_by_source[source.id] = supports == official_supports
-    for source_id, was_confirmed in outcomes_by_source.items():
-        record_source_outcome(
-            db,
-            source=sources[source_id],
-            was_confirmed=was_confirmed,
-        )
 
 
 def _refresh_event_importance(db: Session, event: Event) -> None:
@@ -273,50 +248,30 @@ def _refresh_event_importance(db: Session, event: Event) -> None:
             )
         )
     }
-    if event.event_type in TIMELINE_EVENT_TYPES:
-        significant = [
-            membership
-            for membership in memberships
-            if membership.is_significant_update
-        ] or memberships
-        latest = max(
-            significant,
-            key=lambda membership: (
-                membership.source_published_at or membership.added_at,
-                membership.normalized_item_id,
-            ),
-        )
-        base_item = items[latest.normalized_item_id]
-        base = base_item.importance_score
-    else:
-        base_item = max(
-            items.values(),
-            key=lambda item: (item.importance_score, item.id),
-        )
-        base = base_item.importance_score
-    confirmation_boost = 1.3 if event.official_source_count else 1.0
-    corroboration_boost = 1 + 0.05 * min(
-        max(event.independent_source_count - 1, 0),
-        4,
-    )
-    topic = base_item.primary_topic or topic_from_category(event.category)
-    topic_cap = (
-        0.8
-        if topic == "roster"
-        else TOPIC_RANGES.get(topic, TOPIC_RANGES["other"])[1]
-    )
-    event.importance_score = round(
-        min(
-            topic_cap,
-            base * confirmation_boost * corroboration_boost,
+    eligible = [
+        membership
+        for membership in memberships
+        if items[membership.normalized_item_id].publication_status == "published"
+        if membership.evidence_stance != "context"
+        and membership.update_kind not in {"context", "duplicate_evidence"}
+    ]
+    significant = [membership for membership in eligible if membership.is_significant_update]
+    considered = significant or eligible
+    if not considered:
+        event.importance_score = 0
+        event.importance_evidence = []
+        return
+    best = max(
+        considered,
+        key=lambda membership: (
+            items[membership.normalized_item_id].importance_score,
+            membership.normalized_item_id,
         ),
-        6,
     )
+    base_item = items[best.normalized_item_id]
+    event.importance_score = round(base_item.importance_score, 6)
     event.importance_evidence = [
-        f"base={base:.3f}（成员消息 {base_item.id}）",
-        f"confirmation_boost={confirmation_boost:.2f}",
-        f"corroboration_boost={corroboration_boost:.2f}",
-        f"topic_cap={topic_cap:.2f}",
+        f"成员消息 {base_item.id} 的编辑重要性最高值={base_item.importance_score:.3f}",
     ]
 
 
@@ -324,15 +279,13 @@ def expire_stale_unconfirmed_events(
     db: Session,
     *,
     as_of: datetime | None = None,
-    expiry_days: int = RUMOR_EXPIRY_DAYS,
-    half_life_days: int = RUMOR_DECAY_HALF_LIFE_DAYS,
+    expiry_days: int | None = None,
     commit: bool = True,
 ) -> list[int]:
-    """Expire unconfirmed timelines and deterministically decay credibility."""
+    """Idempotently expire stale unconfirmed timeline events."""
+    expiry_days = expiry_days or settings.rumor_expiry_days
     if expiry_days < 1:
         raise ValueError("expiry_days must be positive")
-    if half_life_days < 1:
-        raise ValueError("half_life_days must be positive")
     reference = as_of or datetime.now(UTC)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
@@ -349,7 +302,7 @@ def expire_stale_unconfirmed_events(
                     ["unconfirmed", "expired_unconfirmed"]
                 ),
                 Event.official_source_count == 0,
-            )
+            ).with_for_update(skip_locked=True)
         )
     )
     for event in events:
@@ -369,11 +322,6 @@ def expire_stale_unconfirmed_events(
         _refresh_editorial_metrics(db, event)
         if event.official_source_count:
             continue
-        decay_factor = 0.5 ** (overdue_days / half_life_days)
-        event.credibility_score = round(
-            event.credibility_score * decay_factor,
-            6,
-        )
         event.credibility_status = "expired_unconfirmed"
         event.lifecycle_status = "expired_unconfirmed"
         event.latest_development = (
@@ -393,8 +341,6 @@ def expire_stale_unconfirmed_events(
                         "as_of": reference.isoformat(),
                         "age_days": round(age_days, 4),
                         "expiry_days": expiry_days,
-                        "half_life_days": half_life_days,
-                        "decay_factor": round(decay_factor, 6),
                     },
                 )
             )
@@ -435,7 +381,8 @@ def create_event(
     membership_role: str = "primary",
     evidence_stance: str = "supports",
     independence_key: str | None = None,
-    is_official_confirmation: bool | None = None,
+    timeline_note: str = "",
+    update_kind: str = "new_fact",
     importance_score: float | None = None,
     importance_evidence: list[str] | None = None,
     latest_development: str | None = None,
@@ -446,10 +393,11 @@ def create_event(
     item = _get_normalized_item(db, normalized_item_id)
 
     try:
-        official_confirmation = (
-            item.credibility == "official"
-            if is_official_confirmation is None
-            else is_official_confirmation
+        official_evidence = (
+            item.raw_item.source.is_official
+            and not has_quoted_post(item.raw_item.content_blocks)
+            and evidence_stance in {"supports", "contradicts"}
+            and update_kind != "context"
         )
         event = Event(
             event_key=event_key,
@@ -481,8 +429,14 @@ def create_event(
                 membership_role=membership_role,
                 evidence_stance=evidence_stance,
                 independence_key=independence_key or _default_independence_key(item),
-                is_official_confirmation=official_confirmation,
-                is_significant_update=True,
+                is_official_evidence=official_evidence,
+                source_reliability_snapshot=item.raw_item.source.reliability_score,
+                timeline_note=timeline_note or latest_development or change_note,
+                update_kind=update_kind,
+                is_significant_update=(
+                    evidence_stance != "context"
+                    and update_kind not in {"context", "duplicate_evidence"}
+                ),
                 source_published_at=item.raw_item.published_at,
             )
         )
@@ -533,7 +487,8 @@ def add_message_to_event(
     membership_role: str = "primary",
     evidence_stance: str = "supports",
     independence_key: str | None = None,
-    is_official_confirmation: bool | None = None,
+    timeline_note: str = "",
+    update_kind: str = "new_fact",
     is_significant_update: bool = True,
     importance_score: float | None = None,
     importance_evidence: list[str] | None = None,
@@ -542,6 +497,11 @@ def add_message_to_event(
     evidence: dict[str, Any] | None = None,
     commit: bool = True,
 ) -> tuple[Event, bool]:
+    is_significant_update = (
+        is_significant_update
+        and evidence_stance != "context"
+        and update_kind not in {"context", "duplicate_evidence"}
+    )
     membership = _existing_membership(db, normalized_item_id, event_id)
     if membership is not None:
         event = db.get(Event, event_id)
@@ -581,18 +541,21 @@ def add_message_to_event(
             for predecessor in replaced_memberships
         ]
         for predecessor in replaced_memberships:
-            unlink_item_claims_from_event(
+            if predecessor.membership_status == "active":
+                predecessor.membership_status = "withdrawn"
+                predecessor.withdrawn_at = datetime.now(UTC)
+                predecessor.withdrawal_reason = (
+                    f"replaced by raw revision {item.raw_item_id}"
+                )
+            supersede_active_claims(
                 db,
                 normalized_item_id=predecessor.normalized_item_id,
-                event_id=predecessor.event_id,
             )
-            db.delete(predecessor)
-        if replaced_memberships:
-            db.flush()
-        official_confirmation = (
-            item.credibility == "official"
-            if is_official_confirmation is None
-            else is_official_confirmation
+        official_evidence = (
+            item.raw_item.source.is_official
+            and not has_quoted_post(item.raw_item.content_blocks)
+            and evidence_stance in {"supports", "contradicts"}
+            and update_kind != "context"
         )
         historical_membership = db.scalar(
             select(EventMessage).where(
@@ -605,7 +568,10 @@ def add_message_to_event(
             "membership_role": membership_role,
             "evidence_stance": evidence_stance,
             "independence_key": independence_key or _default_independence_key(item),
-            "is_official_confirmation": official_confirmation,
+            "is_official_evidence": official_evidence,
+            "source_reliability_snapshot": item.raw_item.source.reliability_score,
+            "timeline_note": timeline_note or latest_development or change_note,
+            "update_kind": update_kind,
             "is_significant_update": is_significant_update,
             "source_published_at": item.raw_item.published_at,
             "membership_status": "active",

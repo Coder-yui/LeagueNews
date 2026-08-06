@@ -15,7 +15,9 @@ from app.schemas.event_workflow import (
     EventDecisionDraft,
     EventMembershipDraft,
     EventReviewRejection,
+    EventReviewCorrectionApproval,
 )
+from app.api.routes.event_workflows import correct_and_approve_event_review
 from app.services.event_aggregation import create_event
 from app.services.llm import LLMClient
 from app.workflows.event_aggregation import (
@@ -52,9 +54,6 @@ def _item(db: Session, source: Source, index: int, title: str) -> NormalizedItem
         category="版本更新",
         entities=[{"name": "26.13", "type": "patch"}],
         importance_score=0.8,
-        credibility="official",
-        credibility_score=1,
-        credibility_evidence=[],
         target_language="zh-CN",
         translated_title=title,
         translated_content_blocks=[],
@@ -99,7 +98,6 @@ async def test_create_draft_does_not_write_event_until_approved(
                         aggregation_key="patch:26.13",
                         timeline_note="版本预览发布",
                         lifecycle_status="developing",
-                        is_official_confirmation=True,
                     )
                 ]
             )
@@ -203,6 +201,30 @@ async def test_not_event_approval_leaves_formal_events_unchanged(
 
 
 @pytest.mark.anyio
+async def test_correct_and_approve_executes_validated_human_membership_changes(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Source(name="Human correction", reliability_score=0.7)
+    db.add(source)
+    db.commit()
+    first = _item(db, source, 10, "26.13 版本预览")
+    event = create_event(db, normalized_item_id=first.id, aggregation_key="patch:26.13", title="26.13", summary="预览", category="版本更新", event_type="patch_cycle")
+    update = _item(db, source, 11, "26.13 数值争议")
+    _mock_decisions(monkeypatch, [EventDecisionDraft(memberships=[])])
+    run = await start_event_aggregation(db, update)
+    review = db.scalar(select(EventReviewTask).where(EventReviewTask.event_aggregation_run_id == run.id))
+    corrected = EventMembershipDraft(target=f"existing:{event.id}", event_type="patch_cycle", aggregation_key="patch:26.13", membership_role="component", evidence_stance="contradicts", update_kind="correction", timeline_note="人工修正为反对证据")
+    correct_and_approve_event_review(review.id, EventReviewCorrectionApproval(decision_draft={"memberships": [corrected.model_dump(mode="json")], "candidate_rejections": []}), db)
+    membership = db.get(EventMessage, (event.id, update.id))
+    assert run.decision_draft["memberships"][0]["target"] == f"existing:{event.id}"
+    assert review.proposal["decision"]["memberships"][0]["membership_role"] == "component"
+    assert membership.membership_role == "component"
+    assert membership.evidence_stance == "contradicts"
+    assert membership.timeline_note == "人工修正为反对证据"
+
+
+@pytest.mark.anyio
 async def test_one_message_can_create_primary_and_component_memberships(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -222,7 +244,6 @@ async def test_one_message_can_create_primary_and_component_memberships(
                         aggregation_key="patch:26.13",
                         membership_role="primary",
                         timeline_note="26.13 更新公告发布",
-                        is_official_confirmation=True,
                     ),
                     EventMembershipDraft(
                         target="new",
@@ -230,7 +251,6 @@ async def test_one_message_can_create_primary_and_component_memberships(
                         aggregation_key="gameplay:经典模式",
                         membership_role="component",
                         timeline_note="经典模式随版本更新上线",
-                        is_official_confirmation=True,
                     ),
                 ]
             )

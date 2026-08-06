@@ -11,7 +11,7 @@ import { PaginationControls } from "@/components/admin/PaginationControls";
 import { score } from "@/components/admin/admin-utils";
 
 type View = "list" | "timeline" | "multi";
-const timelineTypes = new Set(["transfer_saga", "patch_cycle", "release_saga"]);
+const timelineTypes = new Set(["transfer_saga", "patch_cycle", "release_saga", "dev_preview", "incident", "qualification_saga"]);
 
 export default function EventsPage() {
   const [data, setData] = useState<EventPage>({ items: [], total: 0 });

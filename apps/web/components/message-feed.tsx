@@ -7,9 +7,7 @@ import {
   ArrowUpRight,
   ChevronLeft,
   ChevronRight,
-  BadgeCheck,
   ImageIcon,
-  ShieldQuestion,
 } from "lucide-react";
 import { importanceLevel } from "@/lib/event-labels";
 import type { PublishedItem } from "@/lib/types";
@@ -44,16 +42,6 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
         </Link>
         <p>{item.summary}</p>
         <div className="message-card-footer">
-          <span className={`cred ${item.credibility}`}>
-            {item.credibility === "official" ? (
-              <BadgeCheck size={14} />
-            ) : (
-              <ShieldQuestion size={14} />
-            )}
-            {item.credibility === "official"
-              ? "官方确认"
-              : `可信度 ${Math.round(item.credibility_score * 100)}`}
-          </span>
           <span
             className={`importance-badge ${importanceLevel(item.importance_score)}`}
             title={`AI 评估的重要性得分：${importance}/100`}

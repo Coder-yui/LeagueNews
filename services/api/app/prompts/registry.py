@@ -37,7 +37,7 @@ class PromptRegistry:
         CLAIM_GENERATION_OPERATION: ("claim-generation", "v2-timeline"),
         IMPORTANCE_SCORING_OPERATION: (
             "importance-scoring",
-            "v3-five-dimensions",
+            "v4-editorial-baselines",
         ),
         RELEVANCE_OPERATION: ("relevance", "v2-product-scope"),
         TRANSLATION_OPERATION: ("translation", "v2-contextual-chunks"),

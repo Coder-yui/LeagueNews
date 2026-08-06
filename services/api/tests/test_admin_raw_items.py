@@ -49,6 +49,66 @@ def test_raw_item_list_exposes_admin_pipeline_projection() -> None:
     assert payload["processing_runs"] == []
 
 
+def test_raw_item_admin_queries_exclude_superseded_revisions() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Versioned Source", connector_type="manual")
+        db.add(source)
+        db.flush()
+        old = RawItem(
+            source_id=source.id,
+            external_id="same-item",
+            native_title="Old revision",
+            content_blocks=[{"type": "paragraph", "text": "Old"}],
+            revision=1,
+        )
+        db.add(old)
+        db.flush()
+        latest = RawItem(
+            source_id=source.id,
+            external_id="same-item",
+            native_title="Latest revision",
+            content_blocks=[{"type": "paragraph", "text": "Latest"}],
+            revision=2,
+            supersedes_raw_item_id=old.id,
+        )
+        db.add(latest)
+        db.commit()
+        old_id = old.id
+        latest_id = latest.id
+
+    def override_get_db():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        client = TestClient(app)
+        simple = client.get("/api/v1/raw-items")
+        admin = client.get(
+            "/api/v1/raw-items/admin-page?process_status=all"
+        )
+        process_old = client.post(f"/api/v1/raw-items/{old_id}/process")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert simple.status_code == 200
+    assert [item["id"] for item in simple.json()] == [latest_id]
+    assert admin.status_code == 200
+    assert [item["id"] for item in admin.json()["items"]] == [latest_id]
+    assert admin.json()["total"] == 1
+    assert admin.json()["total_items"] == 1
+    assert process_old.status_code == 409
+    assert process_old.json()["detail"] == (
+        "raw item has been superseded by a newer revision"
+    )
+
+
 def test_raw_item_admin_page_reports_total_and_paginates_beyond_100() -> None:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",

@@ -58,7 +58,6 @@ class RawItemRead(BaseModel):
     normalized_item_id: int | None = None
     content_type: str | None = None
     summary: str | None = None
-    credibility_score: float | None = None
     importance_score: float | None = None
     current_pipeline_stage: str | None = None
     current_pipeline_job_id: int | None = None

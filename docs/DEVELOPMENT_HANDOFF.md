@@ -186,7 +186,7 @@ API 分组：
 
 ## 8. 数据库和迁移
 
-当前最新迁移：`031_add_source_collection_schedules.sql`。
+当前最新迁移：`047_add_event_evidence_projection.sql`。
 
 关键阶段：
 
@@ -195,6 +195,9 @@ API 分组：
 - `026`–`028`：事件聚合 v2、事件审核和编辑指标。
 - `029`–`030`：revision、checkpoint、撤回、自动任务。
 - `031`：Source 周期采集调度。
+- `032`–`040`：租约、知识治理、来源可靠性、Claim 时间线与编辑指标。
+- `041`–`044`：RawItem 修订链、合并事实分类审核阶段与生产 OCR 基线修复。
+- `045`–`047`：显式来源可靠性、编辑基准重要性与事件证据投影。
 
 本地 `scripts/start.ps1` 和生产 `migrate` 容器现在统一调用
 `services/api/scripts/migrate_database.py`。全新数据库通过当前 SQLAlchemy 模型建表、登记历史

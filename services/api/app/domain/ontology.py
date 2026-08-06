@@ -244,8 +244,9 @@ def route_event_types(
     if topic == "activity" and (
         "神话商城" in text or "mythic shop" in lowered
     ):
-        week = local_date.isocalendar().week if local_date is not None else 0
-        return [EventRoute("shop_rotation", f"mythic_shop:week:{week}")]
+        iso_year, week, _ = local_date.isocalendar() if local_date is not None else (year, 0, 1)
+        region = str(facets.get("region") or "cn").casefold()
+        return [EventRoute("shop_rotation", f"mythic_shop:{region}:{iso_year}-W{week:02d}")]
 
     if topic == "activity":
         activities = _entity_names(entities, types={"activity"})
@@ -291,5 +292,7 @@ def normalize_entities(values: list[dict[str, object]]) -> list[dict[str, object
             entity.get("canonical_name") or entity["display_name"]
         )
         entity["canonical_id"] = entity.get("canonical_id")
+        role = str(entity.get("role") or "context").casefold()
+        entity["role"] = role if role in {"core", "context", "affected"} else "context"
         normalized.append(entity)
     return normalized

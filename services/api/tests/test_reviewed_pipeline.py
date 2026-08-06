@@ -7,16 +7,21 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 import app.workflows.reviewed_pipeline as reviewed_pipeline
+from app.api.routes.workflows import _corrected_review_proposal
 from app.core.database import Base
-from app.models.credibility import SourceReliabilityHistory
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem
+from app.models.ocr_lab import OCRProfile
 from app.models.pipeline import ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
-from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
+from app.schemas.workflow import (
+    OCRReviewCorrection,
+    ReviewCorrectionApproval,
+    ReviewRejection,
+)
 from app.services.llm import RelevanceResult
 from app.services.media_ocr import OCRResult
 from app.services.patch_table import PatchTableResult
@@ -37,6 +42,37 @@ def _session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     return Session(engine, expire_on_commit=False)
+
+
+def test_manual_importance_override_keeps_calculation_auditable() -> None:
+    review = ReviewTask(
+        processing_run_id=1,
+        stage="importance",
+        proposal={
+            "importance_score": 0.67,
+            "importance_calculation": {
+                "policy_version": "importance-v3-editorial-baselines",
+                "final_score": 0.67,
+            },
+        },
+    )
+
+    proposal = _corrected_review_proposal(
+        review,
+        ReviewCorrectionApproval(
+            importance_score=0.91,
+            note="完整版本预览应为高重要性",
+        ),
+    )
+
+    assert proposal["importance_score"] == 0.91
+    calculation = proposal["importance_calculation"]
+    assert calculation["computed_score"] == 0.67
+    assert calculation["final_score"] == 0.91
+    assert calculation["manual_override"] == {
+        "score": 0.91,
+        "reason": "完整版本预览应为高重要性",
+    }
 
 
 def _raw_item(
@@ -152,6 +188,104 @@ def test_low_confidence_patch_table_is_saved_for_manual_ocr_review(monkeypatch) 
         assert extraction.schema_version == "v2-ocr-review"
         assert extraction.structured_data == {}
         assert extraction.processing_config["structure_confidence"] == 0.1375
+
+
+def test_patch_ocr_reprocesses_when_active_profile_parameters_change(
+    monkeypatch,
+) -> None:
+    observed_parameters: list[dict[str, object]] = []
+    ocr = OCRResult(
+        raw_text="Poppy\n50/80/110/140/170 -> 75/105/135/165/195",
+        lines=[],
+        confidence=0.99,
+        sha256="updated",
+        width=1000,
+        height=800,
+        processed_width=2000,
+        processed_height=1600,
+        engine="test",
+    )
+    table = PatchTableResult(
+        preview_kind="full_preview",
+        divider_x=None,
+        structure_confidence=1.0,
+        sections=[
+            {
+                "section_type": "champion_buff",
+                "label": "CHAMPION BUFFS",
+                "records": [
+                    {
+                        "target": "Poppy",
+                        "raw_changes": [
+                            "50/80/110/140/170 -> 75/105/135/165/195"
+                        ],
+                        "bbox": [0, 0, 100, 30],
+                        "ocr_confidence": 0.99,
+                    }
+                ],
+            }
+        ],
+        warnings=[],
+        boundaries=[],
+    )
+
+    def fake_ocr(_path: str, parameters: dict[str, object]) -> OCRResult:
+        observed_parameters.append(parameters)
+        return ocr
+
+    monkeypatch.setattr("app.workflows.understand_media.run_ocr", fake_ocr)
+    monkeypatch.setattr(
+        "app.workflows.understand_media.parse_patch_table",
+        lambda *_args, **_kwargs: table,
+    )
+
+    with _session() as db:
+        raw = _raw_item(db)
+        asset = MediaAsset(
+            raw_item_id=raw.id,
+            block_index=1,
+            mime_type="image/png",
+            storage_path="test.png",
+        )
+        profile = OCRProfile(
+            name="production-2026-07-25",
+            parameters={"scale": 2},
+            is_active=True,
+        )
+        db.add_all([asset, profile])
+        db.flush()
+        stale = MediaExtraction(
+            media_asset_id=asset.id,
+            task_type="patch_preview",
+            provider="patch-table+rapidocr",
+            ocr_engine="test",
+            structuring_model="",
+            schema_version="v2-ocr-review",
+            status="processed",
+            raw_ocr_text="stale",
+            ocr_lines=[],
+            structured_data={},
+            processing_config={"parameters": {}},
+            confidence=0.8,
+        )
+        db.add(stale)
+        db.commit()
+
+        extraction = asyncio.run(
+            extract_patch_preview(
+                db,
+                raw_item=raw,
+                media_asset=asset,
+                structure=False,
+                enforce_confidence=False,
+            )
+        )
+
+        assert extraction.id != stale.id
+        assert extraction.processing_config["parameters"] == {"scale": 2}
+        assert extraction.processing_config["ocr_profile_name"] == profile.name
+        assert observed_parameters == [{"scale": 2}]
+        assert stale.status == "superseded"
 
 
 def test_patch_preview_structure_is_deterministic_for_six_supported_sections() -> None:
@@ -343,7 +477,7 @@ def test_approving_translation_moves_to_fact_review(monkeypatch) -> None:
     }
 
     async def fake_generate_fact_review(db, run):
-        assert run.current_stage == "fact_extract"
+        assert run.current_stage == "fact_classify"
         assert run.context["approved_translation_proposal"] == translation_proposal
         run.status = "awaiting_review"
         db.commit()
@@ -376,7 +510,7 @@ def test_approving_translation_moves_to_fact_review(monkeypatch) -> None:
         result = asyncio.run(approve_review(db, review, note="翻译通过"))
 
         assert review.status == "approved"
-        assert result.current_stage == "fact_extract"
+        assert result.current_stage == "fact_classify"
         assert result.status == "awaiting_review"
         assert raw.normalized_item is None
 
@@ -433,8 +567,14 @@ def test_approving_fact_checkpoint_moves_to_classification(monkeypatch) -> None:
         assert checkpoint.output_snapshot["title"] == "WBG打野传闻"
 
 
-def test_approving_classification_moves_to_credibility(monkeypatch) -> None:
-    classification_proposal = {
+def test_approving_combined_fact_classification_moves_to_importance(
+    monkeypatch,
+) -> None:
+    combined_proposal = {
+        "title": "WBG打野传闻",
+        "summary": "WBG正在考虑新打野。",
+        "category": "转会",
+        "entities": [{"name": "WBG", "type": "team"}],
         "content_type": "insider_rumor",
         "topic": "roster",
         "secondary_topics": [],
@@ -446,19 +586,17 @@ def test_approving_classification_moves_to_credibility(monkeypatch) -> None:
         },
     }
 
-    async def fake_generate_credibility_review(db, run):
-        assert run.current_stage == "credibility"
-        assert (
-            run.context["approved_classification_proposal"]
-            == classification_proposal
-        )
+    async def fake_generate_importance_review(db, run):
+        assert run.current_stage == "importance"
+        assert run.context["approved_fact_proposal"] == combined_proposal
+        assert run.context["approved_classification_proposal"] == combined_proposal
         run.status = "awaiting_review"
         db.commit()
 
     monkeypatch.setattr(
         reviewed_pipeline,
-        "_generate_credibility_review",
-        fake_generate_credibility_review,
+        "_generate_importance_review",
+        fake_generate_importance_review,
     )
     with _session() as db:
         raw = _raw_item(db)
@@ -466,7 +604,7 @@ def test_approving_classification_moves_to_credibility(monkeypatch) -> None:
             raw_item_id=raw.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="classify",
+            current_stage="fact_classify",
             context={
                 "approved_translation_proposal": {},
                 "approved_fact_proposal": {},
@@ -476,72 +614,23 @@ def test_approving_classification_moves_to_credibility(monkeypatch) -> None:
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="classify",
+            stage="fact_classify",
             status="pending",
-            proposal=classification_proposal,
+            proposal=combined_proposal,
         )
         db.add(review)
         db.commit()
 
         result = asyncio.run(approve_review(db, review, note=None))
 
-        assert result.current_stage == "credibility"
+        assert result.current_stage == "importance"
         checkpoint = db.scalar(
             select(ProcessingCheckpoint).where(
                 ProcessingCheckpoint.processing_run_id == run.id,
-                ProcessingCheckpoint.stage == "classify",
+                ProcessingCheckpoint.stage == "fact_classify",
             )
         )
         assert checkpoint is not None
-
-
-def test_credibility_stage_persists_beta_prior_and_four_factors() -> None:
-    with _session() as db:
-        raw = _raw_item(db)
-        raw.source.name = "召唤师Park"
-        run = ProcessingRun(
-            raw_item_id=raw.id,
-            workflow_type="item",
-            status="running",
-            current_stage="credibility",
-            context={
-                "approved_classification_proposal": {
-                    "content_type": "insider_confirmed",
-                    "topic": "roster",
-                    "temporal": {
-                        "is_recurring": False,
-                        "recurrence_window": None,
-                        "certainty": "likely",
-                    },
-                }
-            },
-        )
-        db.add(run)
-        db.commit()
-
-        asyncio.run(reviewed_pipeline._generate_credibility_review(db, run))
-
-        review = db.scalar(
-            select(ReviewTask).where(
-                ReviewTask.processing_run_id == run.id,
-                ReviewTask.stage == "credibility",
-            )
-        )
-        history = db.scalar(
-            select(SourceReliabilityHistory).where(
-                SourceReliabilityHistory.source_id == raw.source_id
-            )
-        )
-        assert review is not None
-        assert history is not None
-        assert (history.alpha, history.beta) == (7.5, 2.5)
-        assert review.proposal["credibility_score"] == pytest.approx(0.48)
-        assert {
-            "source_reliability",
-            "statement_certainty",
-            "content_type_prior",
-            "staleness",
-        } <= review.proposal["credibility_components"].keys()
 
 
 def test_analysis_assembles_only_approved_stage_outputs() -> None:
@@ -598,42 +687,24 @@ def test_analysis_assembles_only_approved_stage_outputs() -> None:
                         "certainty": "confirmed",
                     },
                 },
-                credibility_proposal={
-                    "credibility": "unverified",
-                    "credibility_score": 0.52,
-                    "credibility_evidence": ["四因子乘积"],
-                    "credibility_components": {
-                        "source_reliability": {"value": 0.75},
-                        "statement_certainty": {"value": 0.8},
-                        "content_type_prior": {"value": 0.95},
-                        "staleness": {"penalty": 0.0},
-                    },
-                    "credibility_policy_version": (
-                        "credibility-v2-four-factor-beta"
-                    ),
-                },
                 importance_proposal={
                     "importance_score": 0.8,
                     "importance_evidence": [
                         "影响所有玩家。",
                         "包含平衡调整。",
-                        "持续一个版本周期。",
-                        "玩家需要调整策略。",
                         "属于新版本预览。",
                     ],
                     "importance_dimensions": {
-                        name: {"score": 3, "evidence": f"{name} evidence"}
-                        for name in (
-                            "impact_scope",
-                            "magnitude",
-                            "duration",
-                            "actionability",
-                            "novelty",
-                        )
+                        "editorial_subtype": {
+                            "value": "patch_preview",
+                            "evidence": "属于新版本预览。",
+                        },
+                        "scale": {
+                            "value": "standard",
+                            "evidence": "包含平衡调整。",
+                        },
                     },
-                    "importance_policy_version": (
-                        "importance-v2-five-dimensions"
-                    ),
+                    "importance_policy_version": "importance-v3-editorial-baselines",
                     "importance_calculation": {"final_score": 0.8},
                 },
                 claim_proposal={
@@ -653,17 +724,78 @@ def test_analysis_assembles_only_approved_stage_outputs() -> None:
                         "scope": "版本预览",
                     },
                 },
+                relevance_proposal={"product_scope": "lol_esports"},
             )
         )
 
     assert proposal["summary"] == "厄斐琉斯将在新版本中获得增强。"
     assert proposal["normalized_text"] == "Aphelios receives buffs."
     assert proposal["importance_score"] == 0.8
-    assert proposal["credibility"] == "unverified"
-    assert proposal["credibility_score"] == 0.52
     assert proposal["content_type"] == "official_notice"
     assert proposal["primary_topic"] == "patch"
     assert proposal["fact_claims"][0]["predicate"] == "buffs"
+    assert proposal["entities"][0]["role"] == "core"
+    assert proposal["entities"][1]["role"] == "context"
+    assert proposal["facets"]["product_scope"] == "lol_esports"
+    assert "entity_roles" not in proposal["facets"]
+
+
+def test_patch_preview_claims_are_grouped_by_ocr_section() -> None:
+    original = [
+        {
+            "subject": {"name": name, "type": "英雄"},
+            "predicate": "buffs",
+            "object": {"patch": "26.13"},
+            "temporal_role": "prediction",
+            "supersedes_hint": None,
+        }
+        for name in ("厄斐琉斯", "德莱文", "卡莎")
+    ] + [
+        {
+            "subject": {"name": "洛克", "type": "英雄"},
+            "predicate": "releases",
+            "object": {"patch": "26.13"},
+            "temporal_role": "prediction",
+            "supersedes_hint": None,
+        }
+    ]
+
+    compacted = reviewed_pipeline._compact_patch_preview_claims(
+        original,
+        classification={"topic": "patch"},
+        translation={
+            "translated_media_extractions": [
+                {
+                    "translated_data": {
+                        "patch": "26.13",
+                        "sections": [
+                            {
+                                "section_type": "champion_buff",
+                                "entries": [
+                                    {"target": "厄斐琉斯"},
+                                    {"target": "德莱文"},
+                                    {"target": "卡莎"},
+                                ],
+                            },
+                            {
+                                "section_type": "system_nerf",
+                                "entries": [{"target": "多兰之盔"}],
+                            },
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+
+    assert len(compacted) == 3
+    assert compacted[0]["predicate"] == "releases"
+    assert compacted[1]["object"] == {
+        "scope": "champion",
+        "targets": ["厄斐琉斯", "德莱文", "卡莎"],
+        "patch": "26.13",
+    }
+    assert compacted[2]["object"]["targets"] == ["多兰之盔"]
 
 
 def test_source_authority_uses_sixty_for_tieba_and_one_hundred_for_official() -> None:
@@ -674,6 +806,7 @@ def test_source_authority_uses_sixty_for_tieba_and_one_hundred_for_official() ->
 
         raw.source.connector_type = "x_twitter"
         raw.source.external_key = "LeagueOfLegends"
+        raw.source.is_official = True
         assert reviewed_pipeline._source_authority(raw) == 100
 
 
@@ -711,7 +844,7 @@ def test_chinese_item_skips_translation_review(monkeypatch) -> None:
         asyncio.run(reviewed_pipeline._generate_translation_review(db, run))
 
         db.refresh(run)
-        assert run.current_stage == "fact_extract"
+        assert run.current_stage == "fact_classify"
         assert run.status == "awaiting_review"
         assert generated_fact_reviews == [run.id]
         assert run.context["approved_translation_proposal"]["translation_status"] == "not_required"
@@ -845,7 +978,6 @@ def test_ocr_rejection_does_not_grow_knowledge_or_glossary() -> None:
             review,
             payload=ReviewRejection(
                 feedback_type="ocr_error",
-                reason="图片里的 125 被识别成了 12S",
                 knowledge_rule="不应被写入",
                 glossary_updates=[
                     {
@@ -858,6 +990,7 @@ def test_ocr_rejection_does_not_grow_knowledge_or_glossary() -> None:
 
         assert result.status == "rejected"
         assert review.feedback["feedback_type"] == "ocr_error"
+        assert review.feedback["reason"] is None
         assert db.scalar(select(KnowledgeRule)) is None
         assert db.scalar(select(GlossaryTerm)) is None
 
@@ -1124,7 +1257,26 @@ def test_restart_continues_from_rejected_stage(monkeypatch, stage: str) -> None:
         assert generated_stages == [stage]
 
 
-def test_approved_item_persists_translated_patch_data_as_relational_link() -> None:
+def test_approved_item_persists_data_and_starts_event_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_starts: list[tuple[int, str, int | None]] = []
+
+    async def fake_start_event_aggregation(
+        _db: Session,
+        item: NormalizedItem,
+        *,
+        execution_mode: str,
+        correction_id: int | None,
+        **_kwargs: object,
+    ) -> object:
+        event_starts.append((item.id, execution_mode, correction_id))
+        return object()
+
+    monkeypatch.setattr(
+        "app.workflows.event_aggregation.start_event_aggregation",
+        fake_start_event_aggregation,
+    )
     with _session() as db:
         raw = _raw_item(db)
         asset = MediaAsset(
@@ -1170,9 +1322,6 @@ def test_approved_item_persists_translated_patch_data_as_relational_link() -> No
                 "category": "版本更新",
                 "entities": [{"英雄": "暗裔剑魔"}],
                 "importance_score": 0.8,
-                "credibility": "official",
-                "credibility_score": 0.98,
-                "credibility_evidence": ["设计师官方账号"],
                 "language": "en",
                 "source_language": "en",
                 "target_language": "zh-CN",
@@ -1202,10 +1351,105 @@ def test_approved_item_persists_translated_patch_data_as_relational_link() -> No
         item = db.scalar(select(NormalizedItem))
         assert result.status == "completed"
         assert result.outcome == "approved"
-        assert item.entities == [{"name": "暗裔剑魔", "type": "champion"}]
+        assert item.entities == [{"name": "暗裔剑魔", "type": "champion", "role": "context"}]
         assert item.approved_media_extraction_ids == [extraction.id]
         assert item.translated_media_extractions[0]["translated_data"]["sections"][0][
             "entries"
         ][0]["target"] == "暗裔剑魔"
+        assert event_starts == [(item.id, "manual", None)]
         db.expire(raw, ["normalized_item"])
         assert raw.processing_status == "analyzed"
+
+
+def test_claim_approval_publishes_without_item_analysis_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_starts: list[int] = []
+
+    async def fake_start_event_aggregation(
+        _db: Session,
+        item: NormalizedItem,
+        **_kwargs: object,
+    ) -> object:
+        event_starts.append(item.id)
+        return object()
+
+    monkeypatch.setattr(
+        "app.workflows.event_aggregation.start_event_aggregation",
+        fake_start_event_aggregation,
+    )
+    with _session() as db:
+        raw = _raw_item(db)
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="awaiting_review",
+            current_stage="claim_gen",
+            context={
+                "relevance_decision": {"product_scope": "lol_pc"},
+                "approved_translation_proposal": {
+                    "normalized_text": "Patch preview",
+                    "source_language": "en",
+                    "target_language": "zh-CN",
+                    "translated_title": "26.15版本预览",
+                    "translated_text": "版本预览",
+                    "translated_content_blocks": [],
+                    "translation_status": "translated",
+                    "translation_model": "test",
+                    "approved_media_extraction_ids": [],
+                    "translated_media_extractions": [],
+                },
+                "approved_fact_proposal": {
+                    "title": "26.15版本预览",
+                    "summary": "设计师发布版本预览。",
+                    "category": "版本更新",
+                    "entities": [],
+                },
+                "approved_classification_proposal": {
+                    "content_type": "official_notice",
+                    "topic": "patch",
+                    "secondary_topics": [],
+                    "entity_roles": [],
+                    "temporal": {
+                        "is_recurring": False,
+                        "recurrence_window": None,
+                        "certainty": "confirmed",
+                    },
+                },
+                "approved_importance_proposal": {
+                    "importance_score": 0.8,
+                    "importance_evidence": ["版本预览"],
+                    "importance_dimensions": {},
+                    "importance_policy_version": "test",
+                    "importance_calculation": {},
+                },
+            },
+        )
+        db.add(run)
+        db.flush()
+        review = ReviewTask(
+            processing_run_id=run.id,
+            stage="claim_gen",
+            status="pending",
+            proposal={
+                "fact_claims": [],
+                "attribution": {},
+                "analysis_model": "test",
+            },
+        )
+        db.add(review)
+        db.commit()
+
+        result = asyncio.run(approve_review(db, review, note="确认断言"))
+
+        item = db.scalar(select(NormalizedItem))
+        item_reviews = list(
+            db.scalars(
+                select(ReviewTask).where(ReviewTask.stage == "item_analysis")
+            )
+        )
+        assert result.status == "completed"
+        assert result.outcome == "approved"
+        assert item is not None
+        assert item_reviews == []
+        assert event_starts == [item.id]

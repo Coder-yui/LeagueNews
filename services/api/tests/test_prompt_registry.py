@@ -16,7 +16,7 @@ def test_prompt_registry_versions_known_tasks() -> None:
         schema_version="ImportanceResult:v1",
     )
     assert prompt.name == "importance-scoring"
-    assert prompt.version == "v3-five-dimensions"
+    assert prompt.version == "v4-editorial-baselines"
     assert prompt.content == "contract"
 
 

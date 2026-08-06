@@ -4,10 +4,8 @@ import Image from "next/image";
 import { useState } from "react";
 import {
   ArrowUp,
-  BadgeCheck,
   ExternalLink,
   Languages,
-  ShieldQuestion,
 } from "lucide-react";
 import type {
   ContentBlock,
@@ -180,16 +178,6 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
         <div className="message-detail-kicker">
           <span>{item.category}</span>
           <span>重要性 {Math.round(item.importance_score * 100)}</span>
-          <span className={`cred ${item.credibility}`}>
-            {item.credibility === "official" ? (
-              <BadgeCheck size={14} />
-            ) : (
-              <ShieldQuestion size={14} />
-            )}
-            {item.credibility === "official"
-              ? "官方确认"
-              : `可信度 ${Math.round(item.credibility_score * 100)}`}
-          </span>
         </div>
         <h1>{title}</h1>
         <p>{item.summary}</p>

@@ -21,6 +21,8 @@ class SourceCreate(BaseModel):
     base_url: HttpUrl | None = None
     connector_config: dict[str, Any] = Field(default_factory=dict)
     is_active: bool = True
+    is_official: bool = False
+    reliability_score: float = Field(default=0.5, ge=0, le=1)
 
     @field_validator("external_key")
     @classmethod
@@ -51,4 +53,11 @@ class SourceRead(BaseModel):
     base_url: str | None
     connector_config: dict[str, Any]
     is_active: bool
+    is_official: bool
+    reliability_score: float
     created_at: datetime
+
+
+class SourceReliabilityUpdate(BaseModel):
+    is_official: bool
+    reliability_score: float = Field(ge=0, le=1)

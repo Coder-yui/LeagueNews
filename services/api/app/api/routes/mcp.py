@@ -11,7 +11,6 @@ from app.core.database import get_db
 from app.core.config import settings
 from app.models.event import Event
 from app.models.intelligence import Claim, Digest, EventClaim
-from app.models.normalized_item import NormalizedItem
 
 router = APIRouter()
 PROTOCOL_VERSION = "2025-11-25"
@@ -56,7 +55,7 @@ def _call_tool(db: Session, name: str, arguments: dict[str, Any]) -> object:
         events = db.scalars(
             _event_statement()
             .where(Event.status == "active")
-            .order_by(Event.updated_at.desc())
+            .order_by(Event.importance_score.desc(), Event.last_published_at.desc())
             .limit(limit)
         )
         return {"events": [_summary_payload(event) for event in events]}
@@ -74,15 +73,7 @@ def _call_tool(db: Session, name: str, arguments: dict[str, Any]) -> object:
             claims = db.execute(
                 select(Claim, EventClaim.relation)
                 .join(EventClaim, EventClaim.claim_id == Claim.id)
-                .join(
-                    NormalizedItem,
-                    NormalizedItem.id == Claim.normalized_item_id,
-                )
-                .where(
-                    EventClaim.event_id == event_id,
-                    Claim.status == "active",
-                    NormalizedItem.publication_status == "published",
-                )
+                .where(EventClaim.event_id == event_id)
                 .order_by(Claim.effective_at, Claim.id)
             ).all()
             payload["claims"] = [
@@ -92,6 +83,11 @@ def _call_tool(db: Session, name: str, arguments: dict[str, Any]) -> object:
                     "predicate": claim.predicate,
                     "object": claim.object_value,
                     "stance": claim.stance,
+                    "status": claim.status,
+                    "supersedes_claim_id": claim.supersedes_claim_id,
+                    "temporal_role": claim.temporal_role,
+                    "attribution": claim.attribution,
+                    "effective_at": claim.effective_at,
                     "evidence": claim.evidence,
                     "normalized_item_id": claim.normalized_item_id,
                     "provenance": claim.provenance,
@@ -110,7 +106,7 @@ def _call_tool(db: Session, name: str, arguments: dict[str, Any]) -> object:
                 Event.status == "active",
                 or_(Event.title.ilike(f"%{query}%"), Event.summary.ilike(f"%{query}%")),
             )
-            .order_by(Event.updated_at.desc())
+            .order_by(Event.importance_score.desc(), Event.last_published_at.desc())
             .limit(20)
         )
         return {"events": [_summary_payload(event) for event in events]}

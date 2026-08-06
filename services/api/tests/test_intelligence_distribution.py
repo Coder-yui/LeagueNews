@@ -1,6 +1,4 @@
-import json
 from datetime import UTC, datetime
-from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
@@ -14,7 +12,7 @@ from app.api.routes.feeds import digest_feed, event_feed
 from app.api.routes.mcp import _call_tool, _tool_definitions
 from app.core.database import Base
 from app.core.database import get_db
-from app.domain.importance import DIMENSIONS, calculate_importance
+from app.domain.importance import calculate_importance
 from app.domain.ontology import normalize_entities, topic_from_category
 from app.models.event import Event, EventRevision
 from app.models.intelligence import Claim, EventClaim
@@ -67,9 +65,6 @@ def _item(db: Session) -> NormalizedItem:
         entities=[{"name": "26.16", "type": "patch"}],
         primary_topic="patch",
         importance_score=0.8,
-        credibility="official",
-        credibility_score=1,
-        credibility_evidence=[],
         analysis_model="fixture",
     )
     db.add(item)
@@ -77,78 +72,187 @@ def _item(db: Session) -> NormalizedItem:
     return item
 
 
+def _importance_analysis(
+    editorial_subtype: str,
+    *,
+    scale: str = "standard",
+    audience_region: str = "global",
+    competition_region: str = "none",
+    prominence: str = "normal",
+    skin_tier: str = "none",
+    is_bulk_update: bool = False,
+    is_first_concrete_disclosure: bool = False,
+    is_duplicate_or_reminder: bool = False,
+) -> dict[str, object]:
+    return {
+        "editorial_subtype": editorial_subtype,
+        "scale": scale,
+        "audience_region": audience_region,
+        "competition_region": competition_region,
+        "prominence": prominence,
+        "skin_tier": skin_tier,
+        "is_bulk_update": is_bulk_update,
+        "is_first_concrete_disclosure": is_first_concrete_disclosure,
+        "is_duplicate_or_reminder": is_duplicate_or_reminder,
+        "evidence": ["测试锚点"],
+    }
+
+
 def test_ontology_and_importance_are_controlled_and_deterministic() -> None:
     assert topic_from_category("LPL 赛事赛果") == "esports"
     assert normalize_entities([{"name": "某对象", "type": "invented"}])[0]["type"] == "other"
-    dimensions = {
-        name: {"score": 3, "evidence": f"{name} evidence"} for name in DIMENSIONS
-    }
     patch_score, calculation = calculate_importance(
-        dimensions, primary_topic="patch"
+        _importance_analysis("patch_official_notes"),
+        primary_topic="patch",
     )
     community_score, _ = calculate_importance(
-        dimensions, primary_topic="community"
+        _importance_analysis("community"),
+        primary_topic="community",
     )
-    assert patch_score == 0.75
-    assert community_score == 0.5
+    assert patch_score == 0.92
+    assert community_score == 0.4
     assert calculation["final_score"] == patch_score
 
 
-def test_roster_cap_and_redemption_code_actionability_are_deterministic() -> None:
-    maximum = {
-        name: {"score": 4, "evidence": f"{name} evidence"} for name in DIMENSIONS
-    }
+def test_editorial_policy_calibrates_transfer_and_shop_rotation() -> None:
     roster_score, roster_calculation = calculate_importance(
-        maximum,
+        _importance_analysis("roster_transfer", prominence="star"),
         primary_topic="roster",
     )
-    assert roster_score == 0.6
-    assert roster_calculation["topic_cap"] == 0.6
-
-    minimum = {
-        name: {"score": 0, "evidence": f"{name} evidence"} for name in DIMENSIONS
-    }
-    _, redemption_calculation = calculate_importance(
-        minimum,
+    shop_score, shop_calculation = calculate_importance(
+        _importance_analysis("shop_daily_standard"),
         primary_topic="activity",
-        content="输入兑换码 CC-CLASS-ANNIE-T0123 可免费领取图标。",
+        content="8月6日国服神话商城每日轮换。",
     )
-    assert redemption_calculation["scores"]["actionability"] == 4
+    assert roster_score == 0.67
+    assert roster_calculation["score_band"]["cap"] == 0.72
+    assert shop_score == 0.5
+    assert shop_calculation["editorial_subtype"] == "shop_daily_standard"
 
 
-def test_real_data_importance_anchor_set_stays_calibrated() -> None:
-    fixture = (
-        Path(__file__).parent
-        / "fixtures"
-        / "importance_anchors.json"
+@pytest.mark.parametrize(
+    ("subtype", "kwargs", "expected"),
+    [
+        ("shop_daily_standard", {}, 0.50),
+        ("shop_cosmetic_rotation", {}, 0.60),
+        ("shop_rare_cosmetic", {}, 0.66),
+        ("shop_bulk_refresh", {}, 0.66),
+        ("patch_preview", {}, 0.87),
+        ("patch_full_preview", {}, 0.90),
+        ("patch_official_notes", {}, 0.92),
+        ("patch_hotfix", {"scale": "minor"}, 0.70),
+        ("patch_hotfix", {"scale": "major"}, 0.85),
+        ("new_champion", {}, 0.93),
+        ("new_game_mode", {}, 0.92),
+        ("activity_paid", {}, 0.75),
+        ("activity_standard", {}, 0.78),
+        ("activity_free_skin", {}, 0.90),
+        ("riot_corporate", {}, 0.65),
+        ("lol_universe", {}, 0.65),
+        (
+            "esports_regular",
+            {"competition_region": "lpl"},
+            0.63,
+        ),
+        (
+            "esports_regular",
+            {"competition_region": "lck"},
+            0.60,
+        ),
+        (
+            "esports_regular",
+            {"competition_region": "other"},
+            0.57,
+        ),
+        ("esports_playoffs", {}, 0.70),
+        ("esports_final", {}, 0.73),
+        ("worlds_regular", {}, 0.66),
+        ("worlds_key", {}, 0.75),
+        ("roster_transfer", {}, 0.60),
+        ("roster_transfer", {"prominence": "star"}, 0.67),
+        ("skin_release", {"skin_tier": "standard"}, 0.70),
+        ("skin_release", {"skin_tier": "legendary"}, 0.74),
+        ("skin_release", {"skin_tier": "prestige_or_mythic"}, 0.76),
+        ("skin_release", {"skin_tier": "ultimate"}, 0.80),
+    ],
+)
+def test_editorial_importance_anchor_set(
+    subtype: str,
+    kwargs: dict[str, object],
+    expected: float,
+) -> None:
+    score, _ = calculate_importance(
+        _importance_analysis(subtype, **kwargs),
+        primary_topic="other",
     )
-    anchors = json.loads(fixture.read_text(encoding="utf-8"))
-    assert len(anchors) == 20
+    assert score == expected
 
-    # P3 baseline: labels are the reasonable event importance values currently
-    # stored for these rows in the 609-item local corpus. They are placeholders
-    # for a later editorial relabeling pass, but still catch scoring drift now.
-    errors = []
-    for anchor in anchors:
-        dimensions = {
-            name: {
-                "score": score,
-                "evidence": f"golden anchor raw_item={anchor['raw_item_id']}",
-            }
-            for name, score in zip(
-                DIMENSIONS,
-                anchor["dimension_scores"],
-                strict=True,
-            )
-        }
-        score, _ = calculate_importance(
-            dimensions,
-            primary_topic=anchor["topic"],
-        )
-        errors.append(abs(score - anchor["labeled_importance"]))
 
-    assert max(errors) <= 0.06
-    assert sum(errors) / len(errors) <= 0.025
+def test_content_guardrails_distinguish_full_preview_and_hotfix() -> None:
+    full_preview, full_calculation = calculate_importance(
+        _importance_analysis(
+            "patch_preview",
+            scale="major",
+            is_bulk_update=True,
+            is_first_concrete_disclosure=True,
+        ),
+        primary_topic="patch",
+        content="Patch 26.13 Full Preview! 包含完整英雄和系统改动。",
+    )
+    hotfix, hotfix_calculation = calculate_importance(
+        _importance_analysis("patch_official_notes", scale="minor"),
+        primary_topic="patch",
+        content="单英雄不停机更新公告。",
+    )
+
+    assert full_preview == 0.93
+    assert full_calculation["editorial_subtype"] == "patch_full_preview"
+    assert hotfix == 0.70
+    assert hotfix_calculation["editorial_subtype"] == "patch_hotfix"
+
+
+def test_duplicate_penalty_is_explicit_and_does_not_change_base_policy() -> None:
+    score, calculation = calculate_importance(
+        _importance_analysis(
+            "esports_regular",
+            competition_region="lpl",
+            is_duplicate_or_reminder=True,
+        ),
+        primary_topic="esports",
+    )
+
+    assert score == 0.51
+    assert calculation["band_score"] == 0.63
+    assert calculation["duplicate_penalty"] == 0.12
+
+
+@pytest.mark.parametrize(
+    ("subtype", "cn_score", "international_score", "penalty"),
+    [
+        ("shop_daily_standard", 0.50, 0.30, 0.20),
+        ("shop_cosmetic_rotation", 0.60, 0.40, 0.20),
+        ("activity_standard", 0.78, 0.63, 0.15),
+        ("patch_official_notes", 0.92, 0.77, 0.15),
+    ],
+)
+def test_international_only_content_is_discounted_when_cn_is_unaffected(
+    subtype: str,
+    cn_score: float,
+    international_score: float,
+    penalty: float,
+) -> None:
+    cn, _ = calculate_importance(
+        _importance_analysis(subtype, audience_region="cn"),
+        primary_topic="other",
+    )
+    international, calculation = calculate_importance(
+        _importance_analysis(subtype, audience_region="international_only"),
+        primary_topic="other",
+    )
+
+    assert cn == cn_score
+    assert international == international_score
+    assert calculation["region_penalty"] == penalty
 
 
 def test_claim_traces_to_raw_block_and_can_feed_multiple_events(db: Session) -> None:
@@ -243,9 +347,6 @@ def test_atomic_transfer_claims_form_a_supersession_timeline(
         content_type="official_fact",
         primary_topic="roster",
         importance_score=0.6,
-        credibility="official",
-        credibility_score=1,
-        credibility_evidence=[],
         analysis_model="fixture",
     )
     db.add(official)
@@ -273,7 +374,6 @@ def test_atomic_transfer_claims_form_a_supersession_timeline(
         event_id=event.id,
         normalized_item_id=official.id,
         lifecycle_status="confirmed",
-        is_official_confirmation=True,
     )
     db.commit()
 
@@ -392,9 +492,11 @@ def test_mcp_surface_is_read_only_and_returns_structured_provenance(db: Session)
 
     item.publication_status = "withdrawn"
     db.commit()
-    assert _call_tool(
+    historical_claims = _call_tool(
         db, "get_event_timeline", {"event_id": event.id}
-    )["claims"] == []
+    )["claims"]
+    assert historical_claims[0]["id"] == claim.id
+    assert historical_claims[0]["status"] == "active"
     item.publication_status = "published"
     db.commit()
 

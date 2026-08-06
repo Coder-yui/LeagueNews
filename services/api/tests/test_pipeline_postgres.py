@@ -202,9 +202,6 @@ def test_reclaimed_worker_fences_stale_business_writes() -> None:
                     "category": "news",
                     "entities": [],
                     "importance_score": 0.5,
-                    "credibility": "official",
-                    "credibility_score": 1,
-                    "credibility_evidence": [],
                     "analysis_model": "postgres-fencing-test",
                 },
             )
@@ -242,7 +239,6 @@ def test_reclaimed_worker_fences_stale_business_writes() -> None:
                             "update_kind": "new_fact",
                             "lifecycle_status": "developing",
                             "timeline_note": "Only worker B may create this event.",
-                            "is_official_confirmation": False,
                         }
                     ],
                     "candidate_rejections": [],

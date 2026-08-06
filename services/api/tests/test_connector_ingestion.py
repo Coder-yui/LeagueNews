@@ -108,7 +108,110 @@ def test_all_connectors_share_idempotent_ingestion() -> None:
         assert len(revised.revised) == 1
         assert revised.created[0].revision == 2
         assert revised.created[0].supersedes_raw_item_id == first.created[0].id
+        reverted = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[item],
+                media_storage=PassThroughMediaStorage(),
+            )
+        )
+        assert len(reverted.revised) == 1
+        assert reverted.revised[0].revision == 3
+        assert (
+            reverted.revised[0].supersedes_raw_item_id
+            == revised.created[0].id
+        )
+        assert reverted.revised[0].content_hash_version == 3
 
         first.created[0].native_title = "Mutated title"
         with pytest.raises(ValueError, match="RawItem content is immutable"):
             db.commit()
+
+
+def test_ingestion_ignores_semantically_volatile_tieba_media_urls() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Tieba fixture", connector_type="test_web")
+        db.add(source)
+        db.commit()
+        first_candidate = RawItemCandidate(
+            external_id="tieba-thread-1",
+            native_title="Thread",
+            canonical_url="https://tieba.baidu.com/p/1",
+            content_kind="thread",
+            author_name="Author",
+            language="zh-CN",
+            published_at=None,
+            content_blocks=[
+                {"type": "paragraph", "text": "第一行  \n第二行 "},
+                {
+                    "type": "image",
+                    "source_url": (
+                        "https://tiebapic.baidu.com/forum/pic/item/image.jpg"
+                        "?tbpicau=old-token"
+                    ),
+                },
+            ],
+            provenance={"agree": 1},
+        )
+        first = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[first_candidate],
+                media_storage=PassThroughMediaStorage(),
+            )
+        )
+        volatile_only = first_candidate.model_copy(
+            update={
+                "content_blocks": [
+                    {"type": "paragraph", "text": "第一行\n第二行"},
+                    {
+                        "type": "image",
+                        "source_url": (
+                            "https://tiebapic.baidu.com/forum/pic/item/image.jpg"
+                            "?tbpicau=new-token"
+                        ),
+                    },
+                ],
+                "provenance": {"agree": 99},
+            }
+        )
+        skipped = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[volatile_only],
+                media_storage=PassThroughMediaStorage(),
+            )
+        )
+        actual_edit = volatile_only.model_copy(
+            update={
+                "content_blocks": [
+                    {"type": "paragraph", "text": "实际新增正文"},
+                    {
+                        "type": "image",
+                        "source_url": (
+                            "https://tiebapic.baidu.com/forum/pic/item/new-image.jpg"
+                            "?tbpicau=another-token"
+                        ),
+                    },
+                ],
+            }
+        )
+        revised = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[actual_edit],
+                media_storage=PassThroughMediaStorage(),
+            )
+        )
+
+        assert len(first.created) == 1
+        assert skipped.created == []
+        assert skipped.skipped[0].id == first.created[0].id
+        assert len(revised.revised) == 1
+        assert revised.revised[0].revision == 2

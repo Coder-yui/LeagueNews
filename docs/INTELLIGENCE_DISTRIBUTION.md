@@ -5,7 +5,7 @@ additive:
 
 ```text
 RawItem immutable blocks
-  -> NormalizedItem (legacy category/entities/importance/credibility retained)
+  -> NormalizedItem (facts, classification, entities, provenance, importance)
   -> Claim (raw block evidence, revision, provenance)
   -> EventClaim (a Claim may support multiple Events)
   -> EventRevision
@@ -21,10 +21,12 @@ review, `--apply` creates one evidence-linked Claim for each published item that
 also restores missing EventClaim links for active EventMessage memberships. The command reports Claim and
 EventClaim counts separately and is idempotent. Withdrawn items and memberships are never re-linked.
 
-Importance model output contains five discrete dimensions: impact scope, magnitude, duration,
-actionability, and novelty. `importance-v1-five-dimensions` computes the final compatible score with
-versioned weights and topic floor/cap. Source authority is only a credibility prior and never increases
-importance. Event corroboration deduplicates reposts by upstream URL when present.
+Importance analysis extracts an editorial subtype, scale, competition region, subject prominence,
+information value, and duplicate/reminder status. `importance-v3-editorial-baselines` computes the final
+score from versioned editorial baselines, bounded modifiers, and subtype score bands. Urgency is not part
+of importance. Content explicitly limited to non-CN servers receives a type-specific audience penalty;
+global content does not. Source reliability never increases importance. Event credibility is a separate
+deterministic projection and deduplicates reposts by upstream URL when present.
 
 Daily and weekly digests validate an IANA timezone, interpret naive cutoffs as local wall time, calculate
 one or seven local days (including DST transitions), and then persist/query the UTC window. Titles use the
@@ -33,8 +35,8 @@ DigestRevision. Feeds expose published events and digests only. MCP is a read-on
 JSON-RPC endpoint at `/api/v1/mcp`, implementing the
 current stable protocol revision `2025-11-25`; Caddy keeps this POST endpoint behind administrator
 authentication. It exposes `list_events`, `get_event`, `get_event_timeline`, `search_events`,
-`list_digests`, and `get_digest`. Event timelines include the EventClaim relation and only expose active
-Claims whose NormalizedItem is still published and whose EventClaim still exists.
+`list_digests`, and `get_digest`. Event Claim timelines preserve active, superseded, and withdrawn Claims,
+including their replacement links, attribution, evidence, and EventClaim relation.
 
 Remaining operational validation: schedule digest generation at the desired local cutoffs, run the Claim
 backfill only after backup, validate feed discovery in production, and test the MCP client through the
@@ -47,8 +49,8 @@ forced into it. A future small LeagueNews skill should connect to the MCP endpoi
 
 - use event search/list for current topics, event detail/timeline for claims and source provenance, and
   digests only for window summaries;
-- describe importance as a deterministic prioritization policy, credibility as source/evidence/event
-  corroboration components, and never present either as certainty;
+- describe importance as a deterministic prioritization policy and event credibility as deterministic
+  source/evidence corroboration, and never present either as certainty;
 - cite the returned original source URLs and distinguish a Claim from an Event editorial summary;
 - never expose or request mutation, deletion, review, or production administration tools.
 

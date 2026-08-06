@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import (
     BaseModel,
@@ -199,7 +199,7 @@ def content_hash(blocks: list[dict[str, Any]]) -> str:
     semantic_blocks = []
     for block in normalize_content_blocks(blocks):
         semantic = {
-            key: value
+            key: _semantic_value(key, value)
             for key, value in block.items()
             if key not in {"storage_path", "mime_type"}
         }
@@ -208,6 +208,23 @@ def content_hash(blocks: list[dict[str, Any]]) -> str:
         semantic_blocks, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _semantic_value(key: str, value: Any) -> Any:
+    if key in {"text", "author", "alt_text", "caption"} and isinstance(value, str):
+        return "\n".join(line.rstrip() for line in value.splitlines()).strip()
+    if key == "items" and isinstance(value, list):
+        return [
+            "\n".join(line.rstrip() for line in str(item).splitlines()).strip()
+            for item in value
+        ]
+    if key == "source_url" and isinstance(value, str):
+        parsed = urlsplit(value)
+        if (parsed.hostname or "").casefold() == "tiebapic.baidu.com":
+            return urlunsplit(
+                (parsed.scheme, parsed.netloc.casefold(), parsed.path, "", "")
+            )
+    return value
 
 
 def has_quoted_post(blocks: list[dict[str, Any]]) -> bool:

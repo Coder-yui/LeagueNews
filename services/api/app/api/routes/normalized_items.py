@@ -90,11 +90,6 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         "importance_score": item.importance_score,
         "importance_dimensions": item.importance_dimensions,
         "importance_policy_version": item.importance_policy_version,
-        "credibility": item.credibility,
-        "credibility_score": item.credibility_score,
-        "credibility_evidence": item.credibility_evidence,
-        "credibility_components": item.credibility_components,
-        "credibility_policy_version": item.credibility_policy_version,
         "source_id": source.id,
         "source_name": source.name,
         "source_base_url": source.base_url,
@@ -178,9 +173,8 @@ def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 def list_published_items_page(
     primary_topic: str | None = None,
     content_type: str | None = None,
-    minimum_credibility: float = Query(default=0, ge=0, le=1),
     search: str | None = None,
-    sort_by: str = Query(default="time", pattern="^(time|credibility|importance)$"),
+    sort_by: str = Query(default="time", pattern="^(time|importance)$"),
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -189,7 +183,6 @@ def list_published_items_page(
     conditions = [
         latest_normalized_item_condition(),
         NormalizedItem.publication_status == "published",
-        NormalizedItem.credibility_score >= minimum_credibility,
     ]
     if primary_topic:
         conditions.append(NormalizedItem.primary_topic == primary_topic)
@@ -220,7 +213,6 @@ def list_published_items_page(
     total = db.scalar(count_statement) or 0
     sort_column = {
         "time": func.coalesce(RawItem.published_at, RawItem.ingested_at),
-        "credibility": NormalizedItem.credibility_score,
         "importance": NormalizedItem.importance_score,
     }[sort_by]
     ordering = (
@@ -282,6 +274,7 @@ def get_published_item(
     item = db.scalar(
         _published_statement().where(
             NormalizedItem.id == item_id,
+            latest_normalized_item_condition(),
             NormalizedItem.publication_status == "published",
         )
     )

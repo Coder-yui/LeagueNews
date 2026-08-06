@@ -26,7 +26,7 @@ PostgreSQL 持久化队列等原架构边界。
   需要评测摘要；术语按文本命中，规则按上下文筛选，冲突可检测和导出。
 - `lol-news-v1` 增加 primary topic、secondary topics、facets 和受控 entity types，旧
   category/entities 保留。模型只输出五个 0–4 维度，程序按
-  `importance-v1-five-dimensions` 计算兼容的 importance_score。可信度拆为 source prior、
+  `importance-v3-editorial-baselines` 按编辑子类型和有界修正项计算 importance_score。可信度拆为 source prior、
   来源角色、转载、证据、OCR/翻译组成；转载优先按 upstream URL 去重。
 - Claim 保存 subject/predicate/object、before/after、time、stance/type、raw block evidence、
   model/schema/confidence/revision/provenance；EventClaim 支持一个 Claim 关联多个 Event，
@@ -42,7 +42,7 @@ PostgreSQL 持久化队列等原架构边界。
 
 ```text
 Connector -> RawItemCandidate -> ingestion -> immutable RawItem
-  -> NormalizedItem + revision + ontology/score/credibility
+  -> NormalizedItem + revision + ontology/importance
   -> Claim(raw block evidence) <-> EventClaim <-> Event + EventRevision
   -> Digest + DigestRevision -> public pages/API + RSS
   -> read-only MCP: events/timeline/search/digests

@@ -1,5 +1,4 @@
 from app.models.connector_run import ConnectorRun
-from app.models.credibility import SourceReliabilityHistory
 from app.models.collection_schedule import SourceCollectionSchedule
 from app.models.event import (
     Event,
@@ -25,7 +24,6 @@ from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, Revi
 
 __all__ = [
     "ConnectorRun",
-    "SourceReliabilityHistory",
     "SourceCollectionSchedule",
     "Event",
     "EventAggregationRun",

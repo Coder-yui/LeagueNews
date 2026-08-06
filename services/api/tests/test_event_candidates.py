@@ -51,9 +51,6 @@ def _add_item(
         category=category,
         entities=entities or [],
         importance_score=0.5,
-        credibility="official",
-        credibility_score=1.0,
-        credibility_evidence=[],
         target_language="zh-CN",
         translated_title=title,
         translated_content_blocks=[],
@@ -437,6 +434,10 @@ def test_superseded_event_member_is_an_exact_candidate(db: Session) -> None:
         revision=2,
         supersedes_raw_item_id=old.raw_item_id,
     )
+    old.publication_status = "superseded"
+    event.messages[0].membership_status = "withdrawn"
+    event.status = "withdrawn"
+    db.commit()
 
     candidates = find_event_candidates(db, normalized_item_id=new.id)
 
@@ -596,9 +597,10 @@ def test_cn_mythic_shop_rotations_share_weekly_event_identity(db: Session) -> No
         primary_topic="activity",
     )
 
-    assert stable_event_key(weekly) == "mythic_shop:week:30"
-    assert stable_event_key(daily) == "mythic_shop:week:30"
+    assert stable_event_key(weekly) == "mythic_shop:cn:2026-W30"
+    assert stable_event_key(daily) == "mythic_shop:cn:2026-W30"
     assert event_aggregation_policy(daily)["cadence"] == "daily"
+    assert event_aggregation_policy(daily)["importance_range"] == [0.45, 0.70]
 
     event = create_event(
         db,
@@ -616,6 +618,36 @@ def test_cn_mythic_shop_rotations_share_weekly_event_identity(db: Session) -> No
     assert candidates[0].event_id == event.id
     assert candidates[0].match_level == "strong"
     assert any("聚合键精确匹配" in reason for reason in candidates[0].reasons)
+
+
+def test_cn_mythic_shop_key_includes_iso_year(db: Session) -> None:
+    source = Source(name="国服商城跨年观察", connector_type="baidu_tieba")
+    db.add(source)
+    db.commit()
+    first_year = _add_item(
+        db,
+        source_id=source.id,
+        index=505,
+        title="神话商城每周轮换",
+        published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        category="国服活动",
+        content_type="aggregation",
+        primary_topic="activity",
+    )
+    next_year = _add_item(
+        db,
+        source_id=source.id,
+        index=506,
+        title="神话商城每周轮换",
+        published_at=datetime(2027, 1, 7, tzinfo=UTC),
+        category="国服活动",
+        content_type="aggregation",
+        primary_topic="activity",
+    )
+
+    assert stable_event_key(first_year) == "mythic_shop:cn:2026-W01"
+    assert stable_event_key(next_year) == "mythic_shop:cn:2027-W01"
+    assert stable_event_key(first_year) != stable_event_key(next_year)
 
 
 def test_x_mythic_shop_rotation_is_not_a_cn_event(db: Session) -> None:
@@ -646,4 +678,5 @@ def test_x_mythic_shop_rotation_is_not_a_cn_event(db: Session) -> None:
 
     assert policy["region"] == "international"
     assert policy["event_eligible"] is False
+    assert policy["importance_range"] == [0.25, 0.50]
     assert stable_event_key(item) is None

@@ -9,7 +9,6 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401
 from app.core.database import Base, get_db
 from app.main import app
-from app.models.credibility import SourceReliabilityHistory
 from app.models.event import EventMessage, EventRevision
 from app.models.intelligence import EventClaim
 from app.models.normalized_item import NormalizedItem
@@ -38,18 +37,20 @@ def _add_normalized_item(
     external_id: str,
     title: str,
     published_at: datetime | None,
-    credibility: str = "official",
-    credibility_score: float = 1.0,
     revision: int = 1,
     supersedes_raw_item_id: int | None = None,
+    quoted_url: str | None = None,
 ) -> NormalizedItem:
+    blocks = [{"id": "b0001", "type": "paragraph", "text": title}]
+    if quoted_url:
+        blocks.append({"id": "b0002", "type": "embed", "embed_kind": "quoted_post", "source_url": quoted_url})
     raw_item = RawItem(
         source_id=source.id,
         external_id=external_id,
         native_title=title,
         canonical_url=f"https://example.com/{external_id}",
         language="en",
-        content_blocks=[{"id": "b0001", "type": "paragraph", "text": title}],
+        content_blocks=blocks,
         published_at=published_at,
         revision=revision,
         supersedes_raw_item_id=supersedes_raw_item_id,
@@ -64,9 +65,6 @@ def _add_normalized_item(
         category="版本更新",
         entities=[{"name": "26.13", "type": "patch"}],
         importance_score=0.9,
-        credibility=credibility,
-        credibility_score=credibility_score,
-        credibility_evidence=["官方设计师"],
         language="zh-CN",
         source_language="en",
         target_language="zh-CN",
@@ -231,13 +229,16 @@ def test_new_raw_revision_replaces_membership_and_event_claim_atomically() -> No
         )
 
         assert added is True
-        assert db.get(EventClaim, (event.id, previous_claim.id)) is None
+        assert db.get(EventClaim, (event.id, previous_claim.id)) is not None
         assert db.get(EventClaim, (event.id, replacement_claim.id)) is not None
-        assert db.scalar(
+        previous_membership = db.scalar(
             select(EventMessage).where(
                 EventMessage.normalized_item_id == previous.id
             )
-        ) is None
+        )
+        assert previous_membership is not None
+        assert previous_membership.membership_status == "withdrawn"
+        assert previous_claim.status == "superseded"
         assert db.scalar(
             select(EventMessage).where(
                 EventMessage.normalized_item_id == replacement.id,
@@ -315,7 +316,7 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="API Source", connector_type="manual")
+        source = Source(name="API Source", connector_type="manual", is_official=True)
         db.add(source)
         db.commit()
         item = _add_normalized_item(
@@ -417,15 +418,17 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
     assert [row["event_key"] for row in filtered.json()] == ["test:api"]
     assert detail.status_code == 200
     assert detail.json()["revisions"][0]["revision"] == 1
+    assert detail.json()["messages"][0]["timeline_note"]
+    assert detail.json()["messages"][0]["update_kind"] == "new_fact"
     assert [message["title"] for message in detail.json()["messages"]] == [
-        "API Item Newer",
         "API Item",
+        "API Item Newer",
         "API Item Without Publish Time",
     ]
     assert messages.status_code == 200
     assert [message["title"] for message in messages.json()] == [
-        "API Item Newer",
         "API Item",
+        "API Item Newer",
         "API Item Without Publish Time",
     ]
     assert updated.status_code == 200
@@ -459,8 +462,8 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
-        first_source = Source(name="Reporter One", connector_type="x_twitter")
-        second_source = Source(name="Reporter Two", connector_type="weibo")
+        first_source = Source(name="Reporter One", connector_type="x_twitter", reliability_score=0.6)
+        second_source = Source(name="Reporter Two", connector_type="weibo", reliability_score=0.6)
         db.add_all([first_source, second_source])
         db.commit()
         first = _add_normalized_item(
@@ -469,8 +472,6 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
             external_id="rumor-1",
             title="传闻：选手加入战队",
             published_at=datetime(2026, 7, 1, tzinfo=UTC),
-            credibility="unverified",
-            credibility_score=0.6,
         )
         same_source = _add_normalized_item(
             db,
@@ -478,8 +479,6 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
             external_id="rumor-2",
             title="同一记者补充转会消息",
             published_at=datetime(2026, 7, 2, tzinfo=UTC),
-            credibility="unverified",
-            credibility_score=0.6,
         )
         independent = _add_normalized_item(
             db,
@@ -487,8 +486,6 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
             external_id="rumor-3",
             title="第二名记者独立印证",
             published_at=datetime(2026, 7, 3, tzinfo=UTC),
-            credibility="unverified",
-            credibility_score=0.6,
         )
 
         event = create_event(
@@ -499,7 +496,6 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
             category="转会",
             event_type="transfer",
             lifecycle_status="unconfirmed",
-            is_official_confirmation=False,
         )
         assert event.credibility_status == "single_source"
         assert event.credibility_score == pytest.approx(0.6)
@@ -508,7 +504,6 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
             db,
             event_id=event.id,
             normalized_item_id=same_source.id,
-            is_official_confirmation=False,
             is_significant_update=False,
         )
         assert event.independent_source_count == 1
@@ -519,20 +514,19 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
             db,
             event_id=event.id,
             normalized_item_id=independent.id,
-            is_official_confirmation=False,
             is_significant_update=False,
         )
         assert event.independent_source_count == 2
-        assert event.credibility_status == "multi_source_confirmed"
-        assert event.credibility_score == pytest.approx(0.84)
+        assert event.credibility_status == "multi_source_supported"
+        assert event.credibility_score == pytest.approx(0.7)
         assert event.current_revision == 1
 
 
-def test_event_credibility_uses_full_item_strength_without_legacy_cap() -> None:
+def test_event_credibility_caps_nonofficial_source_at_ninety_percent() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Reliable insider", connector_type="x_twitter")
+        source = Source(name="Reliable insider", connector_type="x_twitter", reliability_score=0.95)
         db.add(source)
         db.commit()
         item = _add_normalized_item(
@@ -541,8 +535,6 @@ def test_event_credibility_uses_full_item_strength_without_legacy_cap() -> None:
             external_id="high-confidence",
             title="高确定性爆料",
             published_at=datetime(2026, 7, 1, tzinfo=UTC),
-            credibility="unverified",
-            credibility_score=0.95,
         )
 
         event = create_event(
@@ -553,18 +545,17 @@ def test_event_credibility_uses_full_item_strength_without_legacy_cap() -> None:
             category="转会",
             event_type="transfer",
             lifecycle_status="unconfirmed",
-            is_official_confirmation=False,
         )
 
-        assert event.credibility_score == pytest.approx(0.95)
+        assert event.credibility_score == pytest.approx(0.9)
 
 
 def test_official_confirmation_overrides_event_credibility() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
-        reporter = Source(name="Reporter", connector_type="x_twitter")
-        team = Source(name="Team Official", connector_type="weibo")
+        reporter = Source(name="Reporter", connector_type="x_twitter", reliability_score=0.5)
+        team = Source(name="Team Official", connector_type="weibo", is_official=True, reliability_score=1)
         db.add_all([reporter, team])
         db.commit()
         rumor = _add_normalized_item(
@@ -573,8 +564,6 @@ def test_official_confirmation_overrides_event_credibility() -> None:
             external_id="rumor",
             title="传闻：选手加入战队",
             published_at=datetime(2026, 7, 1, tzinfo=UTC),
-            credibility="unverified",
-            credibility_score=0.5,
         )
         announcement = _add_normalized_item(
             db,
@@ -591,7 +580,6 @@ def test_official_confirmation_overrides_event_credibility() -> None:
             category="转会",
             event_type="transfer",
             lifecycle_status="unconfirmed",
-            is_official_confirmation=False,
         )
         event, _ = add_message_to_event(
             db,
@@ -599,7 +587,6 @@ def test_official_confirmation_overrides_event_credibility() -> None:
             normalized_item_id=announcement.id,
             title="战队官宣选手加入",
             lifecycle_status="confirmed",
-            is_official_confirmation=True,
             change_note="战队正式官宣",
         )
 
@@ -607,14 +594,61 @@ def test_official_confirmation_overrides_event_credibility() -> None:
         assert event.credibility_score == 1
         assert event.lifecycle_status == "confirmed"
         assert event.official_source_count == 1
-        history = db.scalar(
-            select(SourceReliabilityHistory).where(
-                SourceReliabilityHistory.source_id == reporter.id
-            )
-        )
-        assert history is not None
-        assert history.confirmed_count == 1
-        assert history.refuted_count == 0
+
+
+def test_official_refutation_and_official_conflict_have_priority() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        official = Source(name="Official", is_official=True, reliability_score=1)
+        db.add(official)
+        db.commit()
+        denial = _add_normalized_item(db, source=official, external_id="denial", title="官方否认", published_at=datetime(2026, 7, 1, tzinfo=UTC))
+        support = _add_normalized_item(db, source=official, external_id="support", title="官方支持", published_at=datetime(2026, 7, 2, tzinfo=UTC))
+        event = create_event(db, normalized_item_id=denial.id, title="争议事件", summary="官方否认", category="转会", lifecycle_status="unconfirmed", evidence_stance="contradicts", update_kind="refutation")
+        assert event.credibility_status == "officially_refuted"
+        assert event.credibility_score == 0
+        event, _ = add_message_to_event(db, event_id=event.id, normalized_item_id=support.id, evidence_stance="supports", update_kind="confirmation")
+        assert event.credibility_status == "disputed"
+        assert event.credibility_score == 0.5
+
+
+def test_official_repost_is_not_official_evidence_and_shared_upstream_is_one_source() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        first_source = Source(name="Official repost", is_official=True, reliability_score=1)
+        second_source = Source(name="Another repost", reliability_score=0.8)
+        db.add_all([first_source, second_source])
+        db.commit()
+        upstream = "https://x.com/original/status/123?ref=share"
+        first = _add_normalized_item(db, source=first_source, external_id="repost-1", title="转载原帖", published_at=datetime(2026, 7, 1, tzinfo=UTC), quoted_url=upstream)
+        second = _add_normalized_item(db, source=second_source, external_id="repost-2", title="再次转载", published_at=datetime(2026, 7, 2, tzinfo=UTC), quoted_url="https://www.x.com/original/status/123")
+        event = create_event(db, normalized_item_id=first.id, title="转载事件", summary="两次转载", category="转会", lifecycle_status="unconfirmed")
+        event, _ = add_message_to_event(db, event_id=event.id, normalized_item_id=second.id)
+        assert event.official_source_count == 0
+        assert event.independent_source_count == 1
+        assert event.credibility_status == "single_source"
+        assert event.credibility_score == 0.9
+
+
+def test_three_independent_sources_add_two_tenths_and_conflict_is_disputed() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        sources = [Source(name=f"Source {index}", reliability_score=0.55) for index in range(4)]
+        db.add_all(sources)
+        db.commit()
+        items = [_add_normalized_item(db, source=source, external_id=f"s-{index}", title=f"证据 {index}", published_at=datetime(2026, 7, index + 1, tzinfo=UTC)) for index, source in enumerate(sources)]
+        event = create_event(db, normalized_item_id=items[0].id, title="多源事件", summary="多源支持", category="转会", lifecycle_status="unconfirmed")
+        for item in items[1:3]:
+            event, _ = add_message_to_event(db, event_id=event.id, normalized_item_id=item.id)
+        assert event.supporting_source_count == 3
+        assert event.credibility_score == pytest.approx(0.75)
+        event, _ = add_message_to_event(db, event_id=event.id, normalized_item_id=items[3].id, evidence_stance="contradicts")
+        assert event.contradicting_source_count == 1
+        assert event.credibility_status == "disputed"
+        assert event.credibility_score == 0.5
 
 
 def test_late_schedule_cannot_regress_completed_match_event() -> None:
@@ -707,13 +741,17 @@ def test_new_raw_revision_replaces_event_member_without_duplicate_revision() -> 
 
         assert added is True
         assert event.current_revision == 1
-        assert list(
+        memberships = list(
             db.scalars(
-                select(EventMessage.normalized_item_id).where(
+                select(EventMessage).where(
                     EventMessage.event_id == event.id
-                )
+                ).order_by(EventMessage.normalized_item_id)
             )
-        ) == [new.id]
+        )
+        assert [
+            (membership.normalized_item_id, membership.membership_status)
+            for membership in memberships
+        ] == [(old.id, "withdrawn"), (new.id, "active")]
         assert db.scalar(
             select(func.count(EventRevision.id)).where(
                 EventRevision.event_id == event.id
@@ -721,7 +759,7 @@ def test_new_raw_revision_replaces_event_member_without_duplicate_revision() -> 
         ) == 1
 
 
-def test_event_importance_uses_member_base_and_event_type_cap() -> None:
+def test_event_importance_uses_highest_significant_member_without_credibility_boost() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
@@ -761,15 +799,15 @@ def test_event_importance_uses_member_base_and_event_type_cap() -> None:
 
         assert weekly.importance_score == 0.9
         assert daily.importance_score == 0.9
-        assert event.importance_score == 0.75
+        assert event.importance_score == 0.9
         assert event.current_revision == 1
 
 
-def test_unconfirmed_timeline_expires_and_decays_idempotently() -> None:
+def test_unconfirmed_timeline_expires_idempotently_without_decay() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Rumor Source", connector_type="weibo")
+        source = Source(name="Rumor Source", connector_type="weibo", reliability_score=0.6)
         db.add(source)
         db.commit()
         rumor = _add_normalized_item(
@@ -778,8 +816,6 @@ def test_unconfirmed_timeline_expires_and_decays_idempotently() -> None:
             external_id="stale-rumor",
             title="传闻：WBG 正在考虑新的打野候选",
             published_at=datetime(2026, 7, 1, tzinfo=UTC),
-            credibility="unverified",
-            credibility_score=0.6,
         )
         event = create_event(
             db,
@@ -790,7 +826,6 @@ def test_unconfirmed_timeline_expires_and_decays_idempotently() -> None:
             category="转会",
             event_type="transfer_saga",
             lifecycle_status="unconfirmed",
-            is_official_confirmation=False,
         )
 
         assert expire_stale_unconfirmed_events(
@@ -804,14 +839,39 @@ def test_unconfirmed_timeline_expires_and_decays_idempotently() -> None:
         assert affected == [event.id]
         assert event.lifecycle_status == "expired_unconfirmed"
         assert event.credibility_status == "expired_unconfirmed"
-        assert event.credibility_score == pytest.approx(0.3)
+        assert event.credibility_score == pytest.approx(0.6)
         assert event.current_revision == 2
-        assert event.revisions[-1].evidence_snapshot["decay_factor"] == 0.5
 
         repeated = expire_stale_unconfirmed_events(
             db,
             as_of=datetime(2026, 7, 29, tzinfo=UTC),
         )
         assert repeated == [event.id]
-        assert event.credibility_score == pytest.approx(0.3)
+        assert event.credibility_score == pytest.approx(0.6)
         assert event.current_revision == 2
+
+        official_source = Source(
+            name="Riot official",
+            connector_type="riot_official",
+            is_official=True,
+            reliability_score=1,
+        )
+        db.add(official_source)
+        db.commit()
+        confirmation = _add_normalized_item(
+            db,
+            source=official_source,
+            external_id="official-confirmation-after-expiry",
+            title="WBG 官宣新打野",
+            published_at=datetime(2026, 7, 30, tzinfo=UTC),
+        )
+        add_message_to_event(
+            db,
+            event_id=event.id,
+            normalized_item_id=confirmation.id,
+            update_kind="confirmation",
+        )
+
+        assert event.lifecycle_status == "confirmed"
+        assert event.credibility_status == "official_confirmed"
+        assert event.credibility_score == 1

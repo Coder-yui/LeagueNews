@@ -43,7 +43,10 @@ def _message_payload(message: EventMessage) -> dict[str, Any]:
         "relation_type": message.relation_type,
         "membership_role": message.membership_role,
         "evidence_stance": message.evidence_stance,
-        "is_official_confirmation": message.is_official_confirmation,
+        "is_official_evidence": message.is_official_evidence,
+        "source_reliability_snapshot": message.source_reliability_snapshot,
+        "timeline_note": message.timeline_note,
+        "update_kind": message.update_kind,
         "is_significant_update": message.is_significant_update,
         "source_published_at": message.source_published_at,
         "added_at": message.added_at,
@@ -51,8 +54,6 @@ def _message_payload(message: EventMessage) -> dict[str, Any]:
         "summary": item.summary,
         "source_name": raw_item.source.name,
         "source_url": raw_item.canonical_url,
-        "credibility_score": item.credibility_score,
-        "credibility_components": item.credibility_components,
     }
 
 
@@ -79,6 +80,8 @@ def _summary_payload(event: Event) -> dict[str, Any]:
         "importance_evidence": event.importance_evidence,
         "latest_development": event.latest_development,
         "independent_source_count": event.independent_source_count,
+        "supporting_source_count": event.supporting_source_count,
+        "contradicting_source_count": event.contradicting_source_count,
         "official_source_count": event.official_source_count,
         "first_published_at": event.first_published_at,
         "last_published_at": event.last_published_at,
@@ -98,11 +101,11 @@ def _detail_payload(event: Event) -> dict[str, Any]:
             and message.normalized_item.publication_status == "published"
         ),
         key=lambda message: (
-            message.source_published_at is not None,
+            message.source_published_at is None,
             message.source_published_at or message.added_at,
             message.normalized_item_id,
         ),
-        reverse=True,
+        reverse=False,
     )
     return {
         **_summary_payload(event),
@@ -148,6 +151,7 @@ def list_events(
     if lifecycle_status:
         statement = statement.where(Event.lifecycle_status == lifecycle_status)
     statement = statement.order_by(
+        Event.importance_score.desc(),
         func.coalesce(Event.last_published_at, Event.created_at).desc(),
         Event.id.desc(),
     ).offset(offset).limit(limit)
@@ -182,11 +186,7 @@ def list_events_page(
             )
     total = db.scalar(select(func.count(Event.id)).where(*conditions)) or 0
     time_column = func.coalesce(Event.last_published_at, Event.created_at)
-    ordering = (
-        (time_column.asc(), Event.id.asc())
-        if sort == "asc"
-        else (time_column.desc(), Event.id.desc())
-    )
+    ordering = ((Event.importance_score.asc(), time_column.asc(), Event.id.asc()) if sort == "asc" else (Event.importance_score.desc(), time_column.desc(), Event.id.desc()))
     statement = (
         _event_statement()
         .where(*conditions)
@@ -258,6 +258,8 @@ def add_event_message(
             normalized_item_id=item_id,
             membership_role=payload.membership_role,
             evidence_stance=payload.evidence_stance,
+            timeline_note=payload.timeline_note,
+            update_kind=payload.update_kind,
             latest_development=payload.timeline_note,
             change_note=payload.timeline_note,
             evidence={"source": "admin"},

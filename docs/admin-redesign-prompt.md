@@ -48,8 +48,7 @@ app/admin/
 | `StageTooltip.tsx` | 节点 hover tooltip |
 | `ExpandableRow.tsx` | 表格行展开容器 |
 | `ItemDetailCard.tsx` | 消息阶段详情卡 |
-| `CredibilityBreakdown.tsx` | 四因子可信度展示 |
-| `ImportanceDimensions.tsx` | 五维重要性展示 |
+| `ImportanceDimensions.tsx` | 编辑重要性特征展示 |
 | `EventTimeline.tsx` | 时间线型事件节点列表 |
 | `MultiMembershipView.tsx` | 多归属消息对照表 |
 | `ReviewCard.tsx` | 审核队列单条卡片 |
@@ -120,8 +119,8 @@ app/admin/
 
 **PipelineStageBar 组件规格：**
 
-管线 8 个阶段（按此顺序）：
-`relevance → ocr → translation → classify → credibility → importance → claim_gen → event_decision`
+管线 8 个阶段（按此顺序；OCR 为可选阶段）：
+`relevance → image_ocr → translation → fact_classify → importance → claim_gen → event_decision`
 
 每个阶段一个 16px 圆形节点，节点间 2px 线条，整体宽度自适应。
 节点 props：`status: 'pending' | 'running' | 'done' | 'failed' | 'review' | 'skipped'`
@@ -154,9 +153,9 @@ app/admin/
 - 原文摘要 + 来源 + 发布时间
 - 各阶段详情列表（阶段名 + 状态图标 + 关键输出）：
   - relevance: `product_scope` + confidence
-  - classify: `content_type / topic`
-  - credibility: 分值 + 四因子（`来源 × 措辞 × 类型 × 时效`，从 `credibility_components` 取）
-  - importance: 分值 + 五维（scope/mag/act/dur/nov，从 `importance_dimensions` 取）
+  - fact_classify: `content_type / topic / facts / entities`
+  - 消息层不展示综合可信度；重要性展示编辑类型、规模、适用范围、赛区、知名度和信息增量
+  - importance: 分值 + 编辑特征（从 `importance_dimensions` 取）
   - claim_gen: claim 数量 + 主谓摘要
   - event_decision: 归属事件名（link）或失败原因
 - 归属事件列表（若有），每条显示 event_type badge + title + link
@@ -175,7 +174,7 @@ app/admin/
 
 **审阅视图：**
 - 左右两栏，左侧原文（`original_content_blocks` 渲染），右侧 normalized 结果
-- 右侧显示：content_type / topic / CredibilityBreakdown / ImportanceDimensions
+- 右侧显示：content_type / topic / ImportanceDimensions
 - 底部：`[下一条]` `[标记有问题（触发 correction）]`
 
 ### 4.4 messages/[id]/page.tsx —— 单条消息详情
@@ -184,8 +183,7 @@ server component fetch `GET /normalized-items/{id}/published`，页面分区展�
 1. 标题区：badges（content_type / topic / lifecycle）+ 基本元数据
 2. 原文内容块（文字段落 + 图片 + 嵌入）
 3. 翻译结果（若有）
-4. CredibilityBreakdown 组件展开四因子
-5. ImportanceDimensions 组件展开五维
+4. ImportanceDimensions 组件展开编辑特征
 6. Claim 列表（fact_claims 谓词 + attribution）
 7. 归属事件列表（含 membership_role badge）
 8. 操作区（重跑阶段 / 手动归属事件弹窗）
@@ -199,8 +197,8 @@ server component fetch `GET /normalized-items/{id}/published`，页面分区展�
 **列表视图：** 按 event_type 分组折叠，每组 header 显示类型名 + 数量，每行显示 lifecycle badge + credibility badge + 消息数 + 独立信源数 + link
 
 **时间线视图（EventTimeline 组件）：**
-- 顶部筛选：只显示 `transfer_saga / patch_cycle / release_saga`（时间线型）
-- 纵向时间轴，每条消息一个节点，节点显示：时间 | content_type badge | 来源 | 摘要 | credibility 分
+- 顶部筛选覆盖后端全部时间线类型：`transfer_saga / patch_cycle / release_saga / dev_preview / incident / qualification_saga`
+- 纵向时间轴，每条消息一个节点，节点显示：时间 | update_kind badge | 来源 | timeline_note；原消息作为证据展开
 - 节点图标按 `evidence_stance`：supports（绿 +）/ contradicts（红 -）/ context（灰 ○）
 - 轴末尾若 lifecycle=unconfirmed 且 last_published 距今 >3 天，显示"等待确认 · X 天"+ `[标记过期]` 按钮
 - 轴底显示事件综合状态行
@@ -217,7 +215,7 @@ server component fetch `GET /events/{event_id}`，展示：
 1. 顶部：event_type + lifecycle + credibility 三个 badge + 标题 + aggregation_key
 2. 摘要 + latest_development
 3. EventTimeline（复用组件，单事件模式）
-4. 成员消息列表（含 membership_role / evidence_stance / credibility_components）
+4. 成员消息列表（含 membership_role / evidence_stance / source_reliability_snapshot）
 5. 修订历史（EventRevision 列表，折叠显示）
 6. 可信度分解卡：正向信源列表（strength）/ 负向信源列表 / 合并结果公式展示
 7. 操作：修改 lifecycle 下拉 / 更新摘要 textarea / 触发重新聚合按钮
@@ -230,8 +228,8 @@ server component fetch `GET /events/{event_id}`，展示：
 
 **消息分析待审（ReviewCard 组件）：**
 - 按 importance_score 倒序
-- 每张卡片：原文摘要 + classify 结果 + credibility + importance + claims
-- 操作：`[批准]`（`POST /workflows/reviews/{id}/approve`）/ `[修正后批准]`（展开编辑表单，字段：content_type / credibility_score / 备注，提交 `POST /workflows/reviews/{id}/correct-ocr`）/ `[拒绝]`（`POST /workflows/reviews/{id}/reject`）
+- 每张卡片：原文摘要 + classify 结果 + importance + claims
+- 操作：`[批准]`（`POST /workflows/reviews/{id}/approve`）/ `[修正后批准]`（展开编辑表单，字段：content_type / importance_score / 备注）/ `[拒绝]`（`POST /workflows/reviews/{id}/reject`）
 
 **事件归属待审：**
 - 展示 LLM 的 `decision_draft.memberships[]` 归属建议
@@ -298,7 +296,7 @@ server component fetch `GET /events/{event_id}`，展示：
 2. `PipelineStageBar` + `StageTooltip` 组件（含 mock 数据的 storybook 式测试页，可选）
 3. `AdminLayout` + `SideNav` + 路由 skeleton（各页面先用 placeholder）
 4. 流水线监控页完整功能（`ExpandableRow` + `ItemDetailCard`）
-5. 消息管理页列表视图 + 单条详情页（`CredibilityBreakdown` + `ImportanceDimensions`）
+5. 消息管理页列表视图 + 单条详情页（`ImportanceDimensions`）
 6. 事件管理页（`EventTimeline` + `MultiMembershipView`）
 7. 审核中心页（`ReviewCard`）
 8. 数据采集页 + 系统运维页（`SourceStatusRow` + `PipelineJobRow`）

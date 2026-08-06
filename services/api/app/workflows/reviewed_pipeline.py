@@ -8,11 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.content_blocks import has_quoted_post, text_from_content_blocks
 from app.core.config import settings
-from app.domain.credibility import CREDIBILITY_POLICY_VERSION, calculate_item_credibility
 from app.domain.importance import (
-    DIMENSIONS,
     IMPORTANCE_POLICY_VERSION,
-    apply_actionability_signals,
     calculate_importance,
 )
 from app.domain.ontology import ONTOLOGY_VERSION, normalize_entities
@@ -28,12 +25,12 @@ from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, Revi
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
 from app.services.llm import LLMClient, execution_metadata
 from app.services.claims import persist_generated_claims
-from app.services.credibility import source_reliability_history
 from app.services.media_publication import publish_raw_item_media
 from app.services.pipeline_execution import (
     PipelineExecutionGuard,
     assert_execution_owned,
 )
+from app.services.raw_item_versions import is_latest_raw_item
 from app.workflows.translate_item import build_translation
 from app.workflows.understand_media import (
     extraction_context,
@@ -47,20 +44,10 @@ OCR_STAGE = "image_ocr"
 TRANSLATION_STAGE = "translation"
 FACT_STAGE = "fact_extract"
 CLASSIFY_STAGE = "classify"
-CREDIBILITY_STAGE = "credibility"
+FACT_CLASSIFY_STAGE = "fact_classify"
 IMPORTANCE_STAGE = "importance"
 CLAIM_STAGE = "claim_gen"
 ITEM_STAGE = "item_analysis"
-
-OFFICIAL_CONNECTORS = {"riot_official", "tencent_lol"}
-OFFICIAL_ACCOUNTS = {
-    "leagueoflegends",
-    "lolesports",
-    "riotphroxzon",
-    "5756404150",
-    "5720474518",
-}
-
 
 def _guard_kwargs(
     execution_guard: PipelineExecutionGuard | None,
@@ -83,9 +70,11 @@ async def start_item_processing(
     context: dict[str, Any] | None = None,
     execution_guard: PipelineExecutionGuard | None = None,
 ) -> ProcessingRun:
-    if raw_item.normalized_item and not (
-        correction_id is not None
-        and raw_item.normalized_item.publication_status == "withdrawn"
+    if not is_latest_raw_item(db, raw_item):
+        raise ValueError("raw item has been superseded by a newer revision")
+    if (
+        raw_item.normalized_item
+        and raw_item.normalized_item.publication_status != "withdrawn"
     ):
         raise ValueError("raw item already has an approved normalized item")
     if restart_from_stage not in {
@@ -94,7 +83,7 @@ async def start_item_processing(
         TRANSLATION_STAGE,
         FACT_STAGE,
         CLASSIFY_STAGE,
-        CREDIBILITY_STAGE,
+        FACT_CLASSIFY_STAGE,
         IMPORTANCE_STAGE,
         CLAIM_STAGE,
         ITEM_STAGE,
@@ -164,10 +153,8 @@ async def start_item_processing(
         await _generate_classification_review(
             db, run, **_guard_kwargs(execution_guard)
         )
-    elif restart_from_stage == CREDIBILITY_STAGE:
-        await _generate_credibility_review(
-            db, run, **_guard_kwargs(execution_guard)
-        )
+    elif restart_from_stage == FACT_CLASSIFY_STAGE:
+        await _generate_fact_review(db, run, **_guard_kwargs(execution_guard))
     elif restart_from_stage == IMPORTANCE_STAGE:
         await _generate_importance_review(
             db, run, **_guard_kwargs(execution_guard)
@@ -222,8 +209,8 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
         await _generate_fact_review(db, restarted)
     elif restarted.current_stage == CLASSIFY_STAGE:
         await _generate_classification_review(db, restarted)
-    elif restarted.current_stage == CREDIBILITY_STAGE:
-        await _generate_credibility_review(db, restarted)
+    elif restarted.current_stage == FACT_CLASSIFY_STAGE:
+        await _generate_fact_review(db, restarted)
     elif restarted.current_stage == IMPORTANCE_STAGE:
         await _generate_importance_review(db, restarted)
     elif restarted.current_stage == CLAIM_STAGE:
@@ -241,6 +228,8 @@ async def resume_item_processing(
 ) -> ProcessingRun:
     if run.status != "running":
         return run
+    if not is_latest_raw_item(db, run.raw_item):
+        raise ValueError("raw item has been superseded by a newer revision")
     pending = db.scalar(
         select(ReviewTask).where(
             ReviewTask.processing_run_id == run.id,
@@ -277,8 +266,8 @@ async def resume_item_processing(
             await _generate_classification_review(
                 db, run, **_guard_kwargs(execution_guard)
             )
-        elif run.current_stage == CREDIBILITY_STAGE:
-            await _generate_credibility_review(
+        elif run.current_stage == FACT_CLASSIFY_STAGE:
+            await _generate_fact_review(
                 db, run, **_guard_kwargs(execution_guard)
             )
         elif run.current_stage == IMPORTANCE_STAGE:
@@ -316,12 +305,13 @@ async def approve_review(
     execution_guard: PipelineExecutionGuard | None = None,
 ) -> ProcessingRun:
     _require_pending_review(review)
+    run = review.processing_run
+    if not is_latest_raw_item(db, run.raw_item):
+        raise ValueError("raw item has been superseded by a newer revision")
     now = datetime.now(UTC)
     review.status = "approved"
     review.feedback = {"note": note} if note else {}
     review.resolved_at = now
-    run = review.processing_run
-
     if review.stage == RELEVANCE_STAGE:
         _record_checkpoint(db, review)
         if _should_continue_relevance(review.proposal):
@@ -393,23 +383,24 @@ async def approve_review(
         await _generate_classification_review(
             db, run, **_guard_kwargs(execution_guard)
         )
-    elif review.stage == CLASSIFY_STAGE:
+    elif review.stage == FACT_CLASSIFY_STAGE:
         run.context = {
             **run.context,
+            "approved_fact_proposal": review.proposal,
             "approved_classification_proposal": review.proposal,
         }
         _record_checkpoint(db, review)
         run.status = "running"
-        run.current_stage = CREDIBILITY_STAGE
+        run.current_stage = IMPORTANCE_STAGE
         assert_execution_owned(db, execution_guard)
         db.commit()
-        await _generate_credibility_review(
+        await _generate_importance_review(
             db, run, **_guard_kwargs(execution_guard)
         )
-    elif review.stage == CREDIBILITY_STAGE:
+    elif review.stage == CLASSIFY_STAGE:
         run.context = {
             **run.context,
-            "approved_credibility_proposal": review.proposal,
+            "approved_classification_proposal": review.proposal,
         }
         _record_checkpoint(db, review)
         run.status = "running"
@@ -437,13 +428,52 @@ async def approve_review(
             **run.context,
             "approved_claim_proposal": review.proposal,
         }
-        _record_checkpoint(db, review)
-        run.status = "running"
-        run.current_stage = ITEM_STAGE
+        translation_proposal = run.context.get("approved_translation_proposal")
+        fact_proposal = run.context.get("approved_fact_proposal")
+        classification_proposal = run.context.get(
+            "approved_classification_proposal"
+        )
+        importance_proposal = run.context.get("approved_importance_proposal")
+        if not all(
+            isinstance(value, dict)
+            for value in (
+                translation_proposal,
+                fact_proposal,
+                classification_proposal,
+                importance_proposal,
+            )
+        ):
+            raise ValueError("claim approval is missing an approved upstream proposal")
+        item_proposal = await _build_item_proposal(
+            raw_item=run.raw_item,
+            translation_proposal=translation_proposal,
+            fact_proposal=fact_proposal,
+            classification_proposal=classification_proposal,
+            importance_proposal=importance_proposal,
+            claim_proposal=review.proposal,
+            relevance_proposal=run.context.get("relevance_decision"),
+            knowledge_snapshot=list(fact_proposal.get("knowledge_rules") or []),
+        )
+        item = _apply_normalized_item(
+            db,
+            run.raw_item,
+            item_proposal,
+            processing_run_id=run.id,
+        )
+        _record_checkpoint(db, review, normalized_item_id=item.id)
+        run.status = "completed"
+        run.outcome = "approved"
+        run.completed_at = now
         assert_execution_owned(db, execution_guard)
         db.commit()
-        await _generate_item_review(
-            db, run, **_guard_kwargs(execution_guard)
+        from app.workflows.event_aggregation import start_event_aggregation
+
+        await start_event_aggregation(
+            db,
+            item,
+            execution_mode=run.execution_mode,
+            correction_id=run.correction_id,
+            **_guard_kwargs(execution_guard),
         )
     elif review.stage == ITEM_STAGE:
         item = _apply_normalized_item(
@@ -458,16 +488,15 @@ async def approve_review(
         run.completed_at = now
         assert_execution_owned(db, execution_guard)
         db.commit()
-        if run.correction_id:
-            from app.workflows.event_aggregation import start_event_aggregation
+        from app.workflows.event_aggregation import start_event_aggregation
 
-            await start_event_aggregation(
-                db,
-                item,
-                execution_mode=run.execution_mode,
-                correction_id=run.correction_id,
-                **_guard_kwargs(execution_guard),
-            )
+        await start_event_aggregation(
+            db,
+            item,
+            execution_mode=run.execution_mode,
+            correction_id=run.correction_id,
+            **_guard_kwargs(execution_guard),
+        )
     elif review.stage == TRANSLATION_STAGE:
         run.context = {
             **run.context,
@@ -475,7 +504,7 @@ async def approve_review(
         }
         _record_checkpoint(db, review)
         run.status = "running"
-        run.current_stage = FACT_STAGE
+        run.current_stage = FACT_CLASSIFY_STAGE
         assert_execution_owned(db, execution_guard)
         db.commit()
         await _generate_fact_review(
@@ -786,8 +815,25 @@ async def _generate_fact_review(
             },
             "knowledge_rules": knowledge_snapshot,
         }
+        classification = await client.classify(
+            content=_analysis_content(translation_proposal),
+            extracted_facts={
+                key: proposal[key]
+                for key in ("title", "summary", "category", "entities")
+                if key in proposal
+            },
+            source_context=_source_context(run.raw_item),
+        )
+        proposal = {
+            **proposal,
+            **classification.model_dump(mode="json"),
+            "_execution_metadata": {
+                **dict(proposal.get("_execution_metadata") or {}),
+                "classification": execution_metadata(classification),
+            },
+        }
         _replace_pending_review(
-            db, run=run, stage=FACT_STAGE, proposal=proposal
+            db, run=run, stage=FACT_CLASSIFY_STAGE, proposal=proposal
         )
         assert_execution_owned(db, execution_guard)
         db.commit()
@@ -842,90 +888,6 @@ async def _generate_classification_review(
         raise
 
 
-async def _generate_credibility_review(
-    db: Session,
-    run: ProcessingRun,
-    *,
-    execution_guard: PipelineExecutionGuard | None = None,
-) -> None:
-    try:
-        classification = run.context.get("approved_classification_proposal")
-        if not isinstance(classification, dict):
-            raise ValueError(
-                "credibility stage requires an approved classification proposal"
-            )
-        temporal = classification.get("temporal")
-        if not isinstance(temporal, dict):
-            raise ValueError("classification proposal has no temporal evidence")
-        history = source_reliability_history(db, run.raw_item.source)
-        reliability = (
-            history.confirmed_count + history.alpha
-        ) / (
-            history.confirmed_count
-            + history.refuted_count
-            + history.alpha
-            + history.beta
-        )
-        reliability = round(reliability, 6)
-        score, components = calculate_item_credibility(
-            source_reliability=reliability,
-            certainty=str(temporal.get("certainty") or "speculative"),
-            content_type=(
-                str(classification["content_type"])
-                if classification.get("content_type") is not None
-                else None
-            ),
-        )
-        source_component = components["source_reliability"]
-        assert isinstance(source_component, dict)
-        source_component.update(
-            {
-                "history_id": history.id,
-                "confirmed_count": history.confirmed_count,
-                "refuted_count": history.refuted_count,
-                "alpha": history.alpha,
-                "beta": history.beta,
-            }
-        )
-        is_official = (
-            _source_authority(run.raw_item) >= 100
-            and classification.get("content_type")
-            in {"official_fact", "official_notice", "match_result"}
-        )
-        proposal = {
-            "credibility": "official" if is_official else "unverified",
-            "credibility_score": score,
-            "credibility_evidence": [
-                f"source_reliability={reliability:.3f}",
-                "statement_certainty="
-                f"{components['statement_certainty']['value']:.3f}",
-                f"content_type_prior={components['content_type_prior']['value']:.3f}",
-                "staleness_penalty="
-                f"{components['staleness']['penalty']:.3f}",
-            ],
-            "credibility_components": components,
-            "credibility_policy_version": CREDIBILITY_POLICY_VERSION,
-            "analysis_model": settings.model_name,
-            "_execution_metadata": {
-                "credibility": {
-                    "policy_version": CREDIBILITY_POLICY_VERSION,
-                    "decision_source": "deterministic",
-                }
-            },
-        }
-        _replace_pending_review(
-            db,
-            run=run,
-            stage=CREDIBILITY_STAGE,
-            proposal=proposal,
-        )
-        assert_execution_owned(db, execution_guard)
-        db.commit()
-    except Exception as exc:
-        _mark_failed(db, run, exc, execution_guard=execution_guard)
-        raise
-
-
 async def _generate_importance_review(
     db: Session,
     run: ProcessingRun,
@@ -957,24 +919,66 @@ async def _generate_importance_review(
                 for key in ("title", "summary", "category", "entities")
                 if key in facts
             },
-        )
-        dimensions = apply_actionability_signals(
-            {
-                name: getattr(importance, name).model_dump(mode="json")
-                for name in DIMENSIONS
+            classification={
+                key: classification[key]
+                for key in (
+                    "content_type",
+                    "topic",
+                    "secondary_topics",
+                    "temporal",
+                )
+                if key in classification
             },
-            content=content,
+            source_context=_source_context(run.raw_item),
         )
+        editorial_analysis = importance.model_dump(mode="json")
         score, calculation = calculate_importance(
-            dimensions,
+            editorial_analysis,
             primary_topic=str(classification["topic"]),
             content=content,
         )
+        evidence = list(editorial_analysis["evidence"])
+        dimensions = {
+            "editorial_subtype": {
+                "value": calculation["editorial_subtype"],
+                "evidence": evidence[0],
+            },
+            "scale": {
+                "value": editorial_analysis["scale"],
+                "evidence": next(iter(evidence[1:]), evidence[0]),
+            },
+            "audience_region": {
+                "value": editorial_analysis["audience_region"],
+                "evidence": next(iter(evidence[2:]), evidence[-1]),
+            },
+            "competition_region": {
+                "value": editorial_analysis["competition_region"],
+                "evidence": next(iter(evidence[3:]), evidence[-1]),
+            },
+            "prominence": {
+                "value": editorial_analysis["prominence"],
+                "evidence": next(iter(evidence[4:]), evidence[-1]),
+            },
+            "skin_tier": {
+                "value": editorial_analysis["skin_tier"],
+                "evidence": next(iter(evidence[5:]), evidence[-1]),
+            },
+            "information_value": {
+                "value": (
+                    "duplicate_or_reminder"
+                    if editorial_analysis["is_duplicate_or_reminder"]
+                    else (
+                        "first_concrete_disclosure"
+                        if editorial_analysis["is_first_concrete_disclosure"]
+                        else "standard_update"
+                    )
+                ),
+                "evidence": evidence[-1],
+            },
+        }
         proposal = {
             "importance_score": score,
-            "importance_evidence": [
-                str(dimensions[name]["evidence"]) for name in DIMENSIONS
-            ],
+            "importance_evidence": evidence,
             "importance_dimensions": dimensions,
             "importance_policy_version": IMPORTANCE_POLICY_VERSION,
             "importance_calculation": calculation,
@@ -1040,9 +1044,26 @@ async def _generate_claim_review(
             },
             source_context=_source_context(run.raw_item),
         )
+        claim_payload = claims.model_dump(mode="json")
+        original_claims = list(claim_payload.get("fact_claims") or [])
+        compacted_claims = _compact_patch_preview_claims(
+            original_claims,
+            translation=translation,
+            classification=classification,
+        )
         proposal = {
-            **claims.model_dump(mode="json"),
+            **claim_payload,
+            "fact_claims": compacted_claims,
             "analysis_model": settings.model_name,
+            "_claim_compaction": {
+                "original_count": len(original_claims),
+                "review_count": len(compacted_claims),
+                "strategy": (
+                    "patch-section-groups-v1"
+                    if compacted_claims != original_claims
+                    else "none"
+                ),
+            },
             "_execution_metadata": {
                 "claim_generation": execution_metadata(claims),
             },
@@ -1060,6 +1081,93 @@ async def _generate_claim_review(
         raise
 
 
+def _compact_patch_preview_claims(
+    fact_claims: list[dict[str, Any]],
+    *,
+    translation: dict[str, Any],
+    classification: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if str(classification.get("topic") or "") != "patch":
+        return fact_claims
+    grouped: dict[str, dict[str, Any]] = {}
+    grouped_targets: set[str] = set()
+    for extraction in translation.get("translated_media_extractions", []):
+        if not isinstance(extraction, dict):
+            continue
+        structured = extraction.get("translated_data")
+        if not isinstance(structured, dict):
+            continue
+        patch = str(structured.get("patch") or "").strip()
+        for section in structured.get("sections", []):
+            if not isinstance(section, dict):
+                continue
+            section_type = str(section.get("section_type") or "")
+            if section_type not in {
+                "champion_buff",
+                "champion_nerf",
+                "system_buff",
+                "system_nerf",
+            }:
+                continue
+            targets = [
+                str(entry.get("target") or "").strip()
+                for entry in section.get("entries", [])
+                if isinstance(entry, dict)
+                and str(entry.get("target") or "").strip()
+            ]
+            if not targets:
+                continue
+            grouped_targets.update(targets)
+            group = grouped.setdefault(
+                section_type,
+                {
+                    "patch": patch,
+                    "targets": [],
+                },
+            )
+            group["targets"].extend(
+                target for target in targets if target not in group["targets"]
+            )
+    if not grouped:
+        return fact_claims
+
+    kept = []
+    for claim in fact_claims:
+        subject = claim.get("subject")
+        subject_name = (
+            str(subject.get("name") or "").strip()
+            if isinstance(subject, dict)
+            else ""
+        )
+        if (
+            str(claim.get("predicate") or "") in {"buffs", "nerfs"}
+            and subject_name in grouped_targets
+        ):
+            continue
+        kept.append(claim)
+
+    for section_type, group in grouped.items():
+        patch = str(group["patch"] or "").strip()
+        scope, direction = section_type.split("_", 1)
+        kept.append(
+            {
+                "subject": {
+                    "name": f"{patch}版本" if patch else "当前版本",
+                    "type": "patch",
+                },
+                "predicate": "buffs" if direction == "buff" else "nerfs",
+                "object": {
+                    "scope": scope,
+                    "targets": list(group["targets"]),
+                    **({"patch": patch} if patch else {}),
+                },
+                "temporal_role": "prediction",
+                "supersedes_hint": None,
+            }
+        )
+    return kept
+
+
 async def _generate_item_review(
     db: Session,
     run: ProcessingRun,
@@ -1072,7 +1180,6 @@ async def _generate_item_review(
         classification_proposal = run.context.get(
             "approved_classification_proposal"
         )
-        credibility_proposal = run.context.get("approved_credibility_proposal")
         importance_proposal = run.context.get("approved_importance_proposal")
         claim_proposal = run.context.get("approved_claim_proposal")
         if not isinstance(translation_proposal, dict):
@@ -1082,10 +1189,6 @@ async def _generate_item_review(
         if not isinstance(classification_proposal, dict):
             raise ValueError(
                 "analysis stage requires an approved classification proposal"
-            )
-        if not isinstance(credibility_proposal, dict):
-            raise ValueError(
-                "analysis stage requires an approved credibility proposal"
             )
         if not isinstance(importance_proposal, dict):
             raise ValueError(
@@ -1102,9 +1205,9 @@ async def _generate_item_review(
             translation_proposal=translation_proposal,
             fact_proposal=fact_proposal,
             classification_proposal=classification_proposal,
-            credibility_proposal=credibility_proposal,
             importance_proposal=importance_proposal,
             claim_proposal=claim_proposal,
+            relevance_proposal=run.context.get("relevance_decision"),
             knowledge_snapshot=list(fact_proposal.get("knowledge_rules") or []),
         )
         _replace_pending_review(db, run=run, stage=ITEM_STAGE, proposal=proposal)
@@ -1121,9 +1224,9 @@ async def _build_item_proposal(
     translation_proposal: dict[str, Any],
     fact_proposal: dict[str, Any],
     classification_proposal: dict[str, Any],
-    credibility_proposal: dict[str, Any],
     importance_proposal: dict[str, Any],
     claim_proposal: dict[str, Any],
+    relevance_proposal: dict[str, Any] | None = None,
     knowledge_snapshot: list[dict[str, object]] | None = None,
     ocr_corrections: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
@@ -1157,10 +1260,9 @@ async def _build_item_proposal(
         "primary_topic": primary_topic,
         "secondary_topics": list(classification.get("secondary_topics") or []),
         "facets": {
-            "product_scope": "lol_pc",
-            "region": "unknown",
-            "information_stage": "announcement",
-            "entity_roles": list(classification.get("entity_roles") or []),
+            "product_scope": str((relevance_proposal or {}).get("product_scope") or "uncertain"),
+            "region": None,
+            "information_stage": None,
             "temporal": dict(classification.get("temporal") or {}),
         },
         "ontology_version": ONTOLOGY_VERSION,
@@ -1174,16 +1276,6 @@ async def _build_item_proposal(
                 "importance_calculation",
             )
         },
-        **{
-            key: credibility_proposal[key]
-            for key in (
-                "credibility",
-                "credibility_score",
-                "credibility_evidence",
-                "credibility_components",
-                "credibility_policy_version",
-            )
-        },
         "language": raw_item.language,
         "analysis_model": settings.model_name,
         "analysis_version": "pipeline-redesign-p2",
@@ -1192,7 +1284,6 @@ async def _build_item_proposal(
         "_execution_metadata": {
             **dict(facts.get("_execution_metadata") or {}),
             **dict(classification.get("_execution_metadata") or {}),
-            **dict(credibility_proposal.get("_execution_metadata") or {}),
             **dict(importance_proposal.get("_execution_metadata") or {}),
             **dict(claim_proposal.get("_execution_metadata") or {}),
         },
@@ -1256,7 +1347,7 @@ async def _generate_translation_review(
                 "approved_translation_proposal": proposal,
             }
             run.status = "running"
-            run.current_stage = FACT_STAGE
+            run.current_stage = FACT_CLASSIFY_STAGE
             assert_execution_owned(db, execution_guard)
             db.commit()
             await _generate_fact_review(
@@ -1297,11 +1388,6 @@ def _apply_normalized_item(
         "importance_dimensions",
         "importance_policy_version",
         "importance_calculation",
-        "credibility",
-        "credibility_score",
-        "credibility_evidence",
-        "credibility_components",
-        "credibility_policy_version",
         "language",
         "source_language",
         "target_language",
@@ -1490,7 +1576,7 @@ def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
         OCR_STAGE: {"ocr_error"},
         FACT_STAGE: {"analysis_correction"},
         CLASSIFY_STAGE: {"analysis_correction"},
-        CREDIBILITY_STAGE: {"analysis_correction"},
+        FACT_CLASSIFY_STAGE: {"analysis_correction"},
         IMPORTANCE_STAGE: {"analysis_correction"},
         CLAIM_STAGE: {"analysis_correction"},
         ITEM_STAGE: {"analysis_correction"},
@@ -1553,6 +1639,8 @@ def _normalize_entities(values: list[object]) -> list[dict[str, str]]:
         }
         if isinstance(canonical_name, str) and canonical_name.strip():
             record["canonical_name"] = canonical_name.strip()
+        role = str(value.get("role") or "context").casefold()
+        record["role"] = role if role in {"core", "context", "affected"} else "context"
         normalized.append(record)
     return normalized
 
@@ -1640,8 +1728,7 @@ def _source_authority(raw_item: RawItem) -> int:
     configured = raw_item.source.connector_config.get("authority_level")
     if isinstance(configured, int):
         return configured
-    key = (raw_item.source.external_key or "").casefold()
-    if raw_item.source.connector_type in OFFICIAL_CONNECTORS or key in OFFICIAL_ACCOUNTS:
+    if raw_item.source.is_official:
         return 100
     if raw_item.source.connector_type in {"weibo", "x_twitter"}:
         return 60

@@ -59,20 +59,6 @@ async def extract_patch_preview(
     enforce_confidence: bool = True,
 ) -> MediaExtraction:
     schema_version = PATCH_SCHEMA_VERSION if structure else PATCH_OCR_REVIEW_SCHEMA_VERSION
-    if not force:
-        existing = db.scalar(
-            select(MediaExtraction).where(
-                MediaExtraction.media_asset_id == media_asset.id,
-                MediaExtraction.task_type == PATCH_TASK,
-                MediaExtraction.schema_version == schema_version,
-                MediaExtraction.status == "processed",
-            ).order_by(MediaExtraction.created_at.desc()).limit(1)
-        )
-        if existing:
-            return existing
-    if not media_asset.storage_path:
-        raise RuntimeError(f"media asset {media_asset.id} has no local storage_path")
-
     active_profile = db.scalar(
         select(OCRProfile)
         .where(OCRProfile.is_active.is_(True))
@@ -80,6 +66,31 @@ async def extract_patch_preview(
         .limit(1)
     )
     ocr_parameters = dict(active_profile.parameters) if active_profile else {}
+    existing_extractions: list[MediaExtraction] = []
+    if not force:
+        existing_extractions = list(
+            db.scalars(
+            select(MediaExtraction).where(
+                MediaExtraction.media_asset_id == media_asset.id,
+                MediaExtraction.task_type == PATCH_TASK,
+                MediaExtraction.schema_version == schema_version,
+                MediaExtraction.status == "processed",
+            ).order_by(MediaExtraction.created_at.desc())
+            )
+        )
+        matching = next(
+            (
+                extraction
+                for extraction in existing_extractions
+                if extraction.processing_config.get("parameters") == ocr_parameters
+            ),
+            None,
+        )
+        if matching:
+            return matching
+    if not media_asset.storage_path:
+        raise RuntimeError(f"media asset {media_asset.id} has no local storage_path")
+
     ocr = await asyncio.to_thread(run_ocr, media_asset.storage_path, ocr_parameters)
     table = await asyncio.to_thread(
         parse_patch_table,
@@ -129,6 +140,8 @@ async def extract_patch_preview(
     )
     db.add(extraction)
     db.flush()
+    for stale in existing_extractions:
+        stale.status = "superseded"
     return extraction
 
 

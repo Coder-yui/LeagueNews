@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.event_workflow import EventReviewTaskRead
+
 
 class ProcessingRunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -39,13 +41,51 @@ class ReviewTaskRead(BaseModel):
     resolved_at: datetime | None
 
 
+class OCRReviewExtractionRead(BaseModel):
+    id: int
+    media_asset_id: int
+    block_index: int
+    source_url: str | None
+    storage_path: str | None
+    confidence: float | None
+    raw_ocr_text: str
+    table_data: dict[str, Any]
+
+
+class OCRWorkflowReviewRead(BaseModel):
+    review_id: int
+    processing_run_id: int
+    raw_item_id: int
+    raw_title: str | None
+    canonical_url: str | None
+    status: str
+    corrections: list[dict[str, Any]]
+    extractions: list[OCRReviewExtractionRead]
+    created_at: datetime
+
+
+class ReviewQueueItemRead(BaseModel):
+    raw_item_id: int
+    raw_title: str | None
+    canonical_url: str | None
+    source_name: str
+    processing_run_id: int | None
+    normalized_item_id: int | None
+    current_stage: str
+    completed_stages: list[str]
+    review_kind: Literal["message", "ocr", "event"]
+    message_review: ReviewTaskRead | None = None
+    ocr_review: OCRWorkflowReviewRead | None = None
+    event_review: EventReviewTaskRead | None = None
+    created_at: datetime
+
+
 class ReviewApproval(BaseModel):
     note: str | None = None
 
 
 class ReviewCorrectionApproval(BaseModel):
     content_type: str | None = None
-    credibility_score: float | None = Field(default=None, ge=0, le=1)
     importance_score: float | None = Field(default=None, ge=0, le=1)
     note: str | None = None
 
@@ -118,6 +158,8 @@ class ReviewRejection(BaseModel):
     def require_rejection_content(self) -> "ReviewRejection":
         if self.reason is not None:
             self.reason = self.reason.strip() or None
+        if self.feedback_type == "ocr_error":
+            return self
         if self.feedback_type in {"translation_term", "translation_correction"}:
             if not self.reason and not self.glossary_updates:
                 raise ValueError("翻译退回必须填写退回理由或至少一条术语修正")

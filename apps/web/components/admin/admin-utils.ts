@@ -4,8 +4,7 @@ export const PIPELINE_STAGES = [
   "relevance",
   "ocr",
   "translation",
-  "classify",
-  "credibility",
+  "fact_classify",
   "importance",
   "claim_gen",
   "event_decision",
@@ -19,8 +18,7 @@ export const STAGE_LABELS: Record<PipelineStageName, string> = {
   relevance: "相关性",
   ocr: "图片 OCR",
   translation: "翻译",
-  classify: "内容分类",
-  credibility: "可信度",
+  fact_classify: "事实与分类",
   importance: "重要性",
   claim_gen: "断言生成",
   event_decision: "事件归属",
@@ -28,7 +26,12 @@ export const STAGE_LABELS: Record<PipelineStageName, string> = {
 
 export function canonicalStage(stage: string | null | undefined): PipelineStageName {
   if (stage === "image_ocr") return "ocr";
-  if (stage === "fact_extract" || stage === "item_analysis") return "classify";
+  if (
+    stage === "fact_extract" ||
+    stage === "classify" ||
+    stage === "item_analysis"
+  )
+    return "fact_classify";
   return PIPELINE_STAGES.includes(stage as PipelineStageName)
     ? (stage as PipelineStageName)
     : "relevance";
@@ -39,8 +42,11 @@ function summarizeContext(context: Record<string, unknown>, stage: PipelineStage
     relevance: ["approved_relevance_proposal", "relevance"],
     ocr: ["approved_ocr_proposal", "image_ocr", "ocr"],
     translation: ["approved_translation_proposal", "translation"],
-    classify: ["approved_classification_proposal", "approved_fact_proposal", "classify"],
-    credibility: ["approved_credibility_proposal", "credibility"],
+    fact_classify: [
+      "approved_classification_proposal",
+      "approved_fact_proposal",
+      "fact_classify",
+    ],
     importance: ["approved_importance_proposal", "importance"],
     claim_gen: ["approved_claim_proposal", "claim_gen"],
     event_decision: ["event_decision"],

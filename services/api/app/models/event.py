@@ -47,6 +47,8 @@ class Event(Base):
     importance_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
     latest_development: Mapped[str] = mapped_column(Text, default="")
     independent_source_count: Mapped[int] = mapped_column(Integer, default=0)
+    supporting_source_count: Mapped[int] = mapped_column(Integer, default=0)
+    contradicting_source_count: Mapped[int] = mapped_column(Integer, default=0)
     official_source_count: Mapped[int] = mapped_column(Integer, default=0)
     first_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -87,6 +89,8 @@ class Event(Base):
             "official_source_count >= 0",
             name="ck_events_official_source_count",
         ),
+        CheckConstraint("supporting_source_count >= 0", name="ck_events_supporting_source_count"),
+        CheckConstraint("contradicting_source_count >= 0", name="ck_events_contradicting_source_count"),
         CheckConstraint(
             "first_published_at IS NULL OR last_published_at IS NULL "
             "OR first_published_at <= last_published_at",
@@ -109,7 +113,10 @@ class EventMessage(Base):
     membership_role: Mapped[str] = mapped_column(String(20), default="primary")
     evidence_stance: Mapped[str] = mapped_column(String(20), default="supports")
     independence_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    is_official_confirmation: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_official_evidence: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_reliability_snapshot: Mapped[float] = mapped_column(Float, default=0.5)
+    timeline_note: Mapped[str] = mapped_column(Text, default="")
+    update_kind: Mapped[str] = mapped_column(String(30), default="new_fact")
     is_significant_update: Mapped[bool] = mapped_column(Boolean, default=True)
     source_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -146,6 +153,15 @@ class EventMessage(Base):
         CheckConstraint(
             "evidence_stance IN ('supports', 'contradicts', 'context')",
             name="ck_event_messages_evidence_stance",
+        ),
+        CheckConstraint(
+            "source_reliability_snapshot >= 0 AND source_reliability_snapshot <= 1",
+            name="ck_event_messages_source_reliability_snapshot",
+        ),
+        CheckConstraint(
+            "update_kind IN ('new_fact', 'confirmation', 'refutation', 'correction', "
+            "'context', 'duplicate_evidence')",
+            name="ck_event_messages_update_kind",
         ),
     )
 

@@ -13,7 +13,7 @@ const lifecycleLabels: Record<string, string> = {
 
 const credibilityLabels: Record<string, string> = {
   official_confirmed: "官方确认",
-  multi_source_confirmed: "多源印证",
+  multi_source_supported: "多源支持",
   single_source: "单源消息",
   unverified: "未经证实",
   disputed: "证据冲突",

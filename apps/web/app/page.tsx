@@ -43,7 +43,7 @@ export default async function Home() {
       <section className="signal-grid" aria-label="今日概览">
         <div><span>已审消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
         <div><span>高优先级</span><strong>{items.filter((item) => item.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
-        <div><span>官方消息</span><strong>{items.filter((item) => item.credibility === "official").length.toString().padStart(2, "0")}</strong></div>
+        <div><span>已发布消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
         <div className="pulse"><Activity size={18} /><span>持续更新</span></div>
       </section>
 
@@ -54,11 +54,6 @@ export default async function Home() {
           <p>{topItem.summary}</p>
           <div className="tag-row">
             <span>{topItem.category}</span>
-            <span className={`cred ${topItem.credibility}`}>
-              {topItem.credibility === "official"
-                ? "官方确认"
-                : `可信度 ${Math.round(topItem.credibility_score * 100)}`}
-            </span>
           </div>
         </section>
       )}

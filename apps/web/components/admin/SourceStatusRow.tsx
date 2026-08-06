@@ -14,7 +14,7 @@ export function SourceStatusRow({
   return <tr>
     <td className="admin-number">#{source.id}</td>
     <td><strong>{source.name}</strong></td>
-    <td><span className="admin-badge">{source.connector_type}</span></td>
+    <td><span className="admin-badge">{source.connector_type}</span> {source.is_official ? <span className="admin-badge success">官方</span> : <span className="admin-badge subtle">可靠性 {Math.round(source.reliability_score * 100)}</span>}</td>
     <td><span className={`admin-badge ${schedule?.enabled ? "success" : "subtle"}`}>{schedule?.enabled ? "计划已启用" : "计划未启用"}</span></td>
     <td>{schedule?.enabled ? `每 ${schedule.interval_minutes} 分钟` : "—"}</td>
     <td className={stale ? "admin-warning-text" : ""} title={schedule?.last_success_at ? new Date(schedule.last_success_at).toLocaleString("zh-CN") : "从未成功"}>{schedule?.last_success_at ? relativeTime(schedule.last_success_at) : "从未成功"}</td>

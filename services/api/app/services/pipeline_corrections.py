@@ -21,7 +21,7 @@ from app.workflows.event_aggregation import start_event_aggregation
 from app.workflows.reviewed_pipeline import (
     CLASSIFY_STAGE,
     CLAIM_STAGE,
-    CREDIBILITY_STAGE,
+    FACT_CLASSIFY_STAGE,
     FACT_STAGE,
     IMPORTANCE_STAGE,
     ITEM_STAGE,
@@ -66,12 +66,12 @@ def _checkpoint_before(
         OCR_STAGE: RELEVANCE_STAGE,
         TRANSLATION_STAGE: OCR_STAGE,
         FACT_STAGE: TRANSLATION_STAGE,
+        FACT_CLASSIFY_STAGE: TRANSLATION_STAGE,
         CLASSIFY_STAGE: FACT_STAGE,
-        CREDIBILITY_STAGE: CLASSIFY_STAGE,
-        IMPORTANCE_STAGE: CREDIBILITY_STAGE,
+        IMPORTANCE_STAGE: FACT_CLASSIFY_STAGE,
         CLAIM_STAGE: IMPORTANCE_STAGE,
         ITEM_STAGE: CLAIM_STAGE,
-        EVENT_STAGE: ITEM_STAGE,
+        EVENT_STAGE: CLAIM_STAGE,
     }.get(restart_from_stage)
     if predecessor is None:
         return None
@@ -106,19 +106,18 @@ def _resume_context(
         return {"approved_media_extraction_ids": extraction_ids or []}
     scoring_stages = {
         FACT_STAGE,
+        FACT_CLASSIFY_STAGE,
         CLASSIFY_STAGE,
-        CREDIBILITY_STAGE,
         IMPORTANCE_STAGE,
         CLAIM_STAGE,
         ITEM_STAGE,
     }
     if restart_from_stage in scoring_stages:
         translation = context.get("approved_translation_proposal")
-        if (
-            translation is None
-            and restart_from_stage == FACT_STAGE
-            and checkpoint is not None
-        ):
+        if translation is None and restart_from_stage in {
+            FACT_STAGE,
+            FACT_CLASSIFY_STAGE,
+        } and checkpoint is not None:
             translation = checkpoint.output_snapshot
         if translation is None:
             raise ValueError(
@@ -132,7 +131,6 @@ def _resume_context(
         }
         if restart_from_stage in {
             CLASSIFY_STAGE,
-            CREDIBILITY_STAGE,
             IMPORTANCE_STAGE,
             CLAIM_STAGE,
             ITEM_STAGE,
@@ -140,7 +138,7 @@ def _resume_context(
             facts = context.get("approved_fact_proposal")
             if (
                 facts is None
-                and restart_from_stage == CLASSIFY_STAGE
+                and restart_from_stage in {CLASSIFY_STAGE, IMPORTANCE_STAGE}
                 and checkpoint is not None
             ):
                 facts = checkpoint.output_snapshot
@@ -150,7 +148,6 @@ def _resume_context(
                 )
             result["approved_fact_proposal"] = facts
         if restart_from_stage in {
-            CREDIBILITY_STAGE,
             IMPORTANCE_STAGE,
             CLAIM_STAGE,
             ITEM_STAGE,
@@ -158,7 +155,7 @@ def _resume_context(
             classification = context.get("approved_classification_proposal")
             if (
                 classification is None
-                and restart_from_stage == CREDIBILITY_STAGE
+                and restart_from_stage == IMPORTANCE_STAGE
                 and checkpoint is not None
             ):
                 classification = checkpoint.output_snapshot
@@ -168,24 +165,6 @@ def _resume_context(
                     "restart from classify"
                 )
             result["approved_classification_proposal"] = classification
-        if restart_from_stage in {
-            IMPORTANCE_STAGE,
-            CLAIM_STAGE,
-            ITEM_STAGE,
-        }:
-            credibility = context.get("approved_credibility_proposal")
-            if (
-                credibility is None
-                and restart_from_stage == IMPORTANCE_STAGE
-                and checkpoint is not None
-            ):
-                credibility = checkpoint.output_snapshot
-            if credibility is None:
-                raise ValueError(
-                    "no approved credibility checkpoint is available; "
-                    "restart from credibility"
-                )
-            result["approved_credibility_proposal"] = credibility
         if restart_from_stage in {CLAIM_STAGE, ITEM_STAGE}:
             importance = context.get("approved_importance_proposal")
             if (
@@ -249,7 +228,7 @@ def _withdraw_event_membership(
     *,
     item: NormalizedItem,
     correction: PipelineCorrection,
-) -> int | None:
+) -> list[int]:
     memberships = list(
         db.scalars(
             select(EventMessage).where(
@@ -259,7 +238,7 @@ def _withdraw_event_membership(
         )
     )
     if not memberships:
-        return None
+        return []
     now = datetime.now(UTC)
     for membership in memberships:
         event = membership.event
@@ -289,7 +268,7 @@ def _withdraw_event_membership(
                 },
             )
         )
-    return memberships[0].event_id
+    return [membership.event_id for membership in memberships]
 
 
 async def create_and_start_correction(
@@ -338,8 +317,11 @@ async def create_and_start_correction(
     db.add(correction)
     db.flush()
     _supersede_active_work(db, raw_item_id=item.raw_item_id, item_id=item.id)
-    correction.event_id = _withdraw_event_membership(
+    correction.original_event_ids = _withdraw_event_membership(
         db, item=item, correction=correction
+    )
+    correction.event_id = (
+        correction.original_event_ids[0] if correction.original_event_ids else None
     )
     if payload.restart_from_stage != EVENT_STAGE:
         item.publication_status = "withdrawn"

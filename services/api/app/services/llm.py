@@ -11,6 +11,14 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.config import settings
+from app.domain.importance import (
+    AudienceRegion,
+    CompetitionRegion,
+    ImportanceScale,
+    ImportanceSubtype,
+    Prominence,
+    SkinTier,
+)
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLAIM_GENERATION_OPERATION,
@@ -23,6 +31,7 @@ from app.prompts.registry import (
     TRANSLATION_OPERATION,
 )
 from app.schemas.event_workflow import EventDecisionDraft
+from app.services.event_decision import validate_event_decision_business
 
 
 class LLMConfigurationError(RuntimeError):
@@ -142,17 +151,17 @@ class ClaimGenerationResult(BaseModel):
     attribution: ClaimAttributionDraft
 
 
-class ImportanceDimension(BaseModel):
-    score: int = Field(ge=0, le=4)
-    evidence: str = Field(min_length=1)
-
-
 class ImportanceResult(BaseModel):
-    impact_scope: ImportanceDimension
-    magnitude: ImportanceDimension
-    duration: ImportanceDimension
-    actionability: ImportanceDimension
-    novelty: ImportanceDimension
+    editorial_subtype: ImportanceSubtype
+    scale: ImportanceScale
+    audience_region: AudienceRegion
+    competition_region: CompetitionRegion
+    prominence: Prominence
+    skin_tier: SkinTier
+    is_bulk_update: bool
+    is_first_concrete_disclosure: bool
+    is_duplicate_or_reminder: bool
+    evidence: list[str] = Field(min_length=1, max_length=6)
 
 
 class RelevanceResult(BaseModel):
@@ -371,30 +380,59 @@ content_type 枚举与判定规则：
         *,
         content: str,
         extracted_facts: dict[str, object],
+        classification: dict[str, object],
+        source_context: dict[str, object],
     ) -> ImportanceResult:
-        prompt = """你只评估英雄联盟资讯的重要性，不修改事实、分类、实体或可信度。
+        prompt = """你是英雄联盟资讯编辑，只提取重要性规则需要的结构化特征，
+不输出最终分数，不判断可信度，也不评估行动紧迫性。最终分由程序按编辑政策确定性计算。
 
-分别输出 5 个维度对象，每个含 0-4 离散 score 和仅基于当前消息的 evidence：
-- impact_scope: 影响范围。全服系统/全部玩家=4，单区服/单模式=2-3，个别玩家/小众=0-1
-- magnitude: 变化幅度。重做/新增/删除=4，显著调整=3，数值微调=1-2，无实质变化=0
-- actionability: 行动紧迫性。限时兑换码/限时活动=4，需尽快操作=3，
-  一般资讯无需行动=0-1。重复出现的日常内容(如每日商城)最高 2。
-- duration: 影响时长。永久性版本/系统=4，一个版本周期=3，赛季=2，一次性=0-1
-- novelty: 新颖度。首次发生/首个此类=4，常规但值得关注=2，
-  重复提醒/日常流水=0-1
+editorial_subtype 必须从以下语义中选择最精确的一项：
+- shop_daily_standard：国服神话商城普通每日/每周轮换
+- shop_cosmetic_rotation：神话商城皮肤或炫彩轮换
+- shop_rare_cosmetic：明确涉及稀有、限定或神话炫彩轮换
+- shop_bulk_refresh：随版本批量上新大量商城内容
+- patch_preview：设计师或官方版本改动预览，但不是完整内容
+- patch_full_preview：设计师发布完整版本预览或完整改动表
+- patch_official_notes：正式官方完整版本更新公告
+- patch_hotfix：单英雄、小范围热修复或微补丁
+- new_champion / new_game_mode / major_gameplay_change：新英雄、新模式、重大玩法系统
+- activity_paid：主要是付费或氪金活动
+- activity_standard：普通游戏活动或一般免费奖励
+- activity_free_skin：明确可免费获得皮肤的活动；抽奖但不保证获得时不要选此项
+- riot_corporate / lol_universe：拳头公司事务 / 英雄联盟世界观
+- esports_regular / esports_playoffs / esports_final：赛区常规赛 / 季后赛 / 决赛
+- worlds_regular / worlds_key：世界赛普通比赛 / 焦点、晋级、淘汰或关键场次
+- roster_transfer：选手、教练转会或阵容变动
+- skin_release / service_incident / community / other：皮肤发布、服务故障、社区内容、其他
 
-硬性约束：
-- 官方身份本身不加分（官方发的日常商城仍是低分）
-- 重复提醒、重复证据、转载不加分
-- 不要输出最终分数；最终分、topic floor/cap、权重由程序确定性计算
-- evidence 必须引用消息中的具体文本依据，不得编造"""
+其他字段：
+- scale：minor / standard / major，仅表示同一子类型内的影响规模。
+- audience_region：国服内容用 cn；国服与其他服务器都会生效用 global；
+  明确只影响外服、不影响国服用 international_only；信息不足用 unknown。
+  Riot/X 来源不等于只影响外服，必须依据消息实际适用范围判断。
+- competition_region：仅赛事使用 lpl/lck/international/other，非赛事用 none。
+- prominence：涉及普通对象用 normal，知名队伍/选手用 notable，明星选手或顶级焦点队伍用 star。
+- skin_tier：仅新皮肤发布使用 standard / legendary / prestige_or_mythic / ultimate，
+  非新皮肤内容使用 none；必须依据消息明确写出的档次，不得凭空推断。
+- is_bulk_update：是否包含大量对象或批量新增。
+- is_first_concrete_disclosure：是否首次给出具体数值、名单、赛果或确定内容。
+- is_duplicate_or_reminder：是否只是重复提醒、无新增事实的转载或重复发布。
+- evidence：1-6条消息中的具体文本依据，不得编造。
+
+注意：
+- “官方”本身不决定重要性；完整版本内容、新英雄、新模式等内容属性才决定高分。
+- 完整预览与普通预览必须区分；单英雄热修复不能误判为完整版本更新。
+- 常规赛须区分赛区；转会须识别明星对象，但不要因消息未官宣而降低重要性，
+  未官宣只影响可信度。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
                 "content": content,
                 "extracted_facts": extracted_facts,
+                "classification": classification,
+                "source_context": source_context,
             },
-            max_tokens=400,
+            max_tokens=700,
             schema=ImportanceResult,
             operation=IMPORTANCE_SCORING_OPERATION,
         )
@@ -445,7 +483,9 @@ content_type 枚举与判定规则：
    不要升格成 transfers_to。
 4. temporal_role: prediction 用于未发生的预告/传闻，event 用于已发生，
    state 用于持续状态。这决定时间线上的节点样式。
-5. supersedes_hint 帮助下游把"传闻 A 候选 → 官宣 B 入队"串成同一时间线。"""
+5. supersedes_hint 帮助下游把"传闻 A 候选 → 官宣 B 入队"串成同一时间线。
+6. 版本预览图片如果只有增强/削弱名单、没有每个对象的具体数值，不要为每个英雄各写一条。
+   同一分组只生成一条断言，把完整名单放在 object.targets；有具体数值或机制变化时才拆开。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
@@ -482,6 +522,14 @@ content_type 枚举与判定规则：
         }
 
         def validate_candidate(result: EventDecisionDraft) -> str | None:
+            shared_error = validate_event_decision_business(
+                result,
+                item=item,
+                candidates=candidates,
+                allowed_new_keys=allowed_new_keys,
+            )
+            if shared_error:
+                return shared_error
             for membership in result.memberships:
                 existing_event_id = membership.existing_event_id
                 if (
@@ -563,7 +611,7 @@ content_type 枚举与判定规则：
             return None
 
         prompt = """你是英雄联盟事件编辑。给定一条已分析消息（含 fact_claims、content_type、
-topic、entity_roles）和若干候选事件，决定这条消息如何归属。
+topic、entities[].role）和若干候选事件，决定这条消息如何归属。
 
 输入：
 - 当前消息：{title, summary, fact_claims, content_type, topic, entities, published_at}
@@ -581,8 +629,7 @@ topic、entity_roles）和若干候选事件，决定这条消息如何归属。
       "evidence_stance": "supports|contradicts|context",
       "update_kind": "new_fact|confirmation|refutation|correction|context|duplicate_evidence",
       "lifecycle_status": <生命周期状态或null>,
-      "timeline_note": 这条消息在时间线上代表的节点（如"WBG考虑Beichuan等候选"),
-      "is_official_confirmation": bool
+      "timeline_note": 这条消息在时间线上代表的节点（如"WBG考虑Beichuan等候选")
     }
   ],
   "candidate_rejections": [{event_id, reason}]  // 当选择new但存在候选时必填
@@ -607,10 +654,7 @@ topic、entity_roles）和若干候选事件，决定这条消息如何归属。
 4. 单点型（major_match）：LPL/LCK总决赛、世界赛关键场单独成事件，
    即使同一天也不并入 daily_matches
 
-5. is_official_confirmation=true 仅当官方账号在其职权内直接确认；
-   转发/转载不算。
-
-6. certainty=speculative 的爆料只能 supports 一个 unconfirmed 事件，
+5. certainty=speculative 的爆料只能 supports 一个 unconfirmed 事件，
    不能直接把事件推进到 confirmed。"""
         return await self._validated_json_completion(
             prompt=prompt,

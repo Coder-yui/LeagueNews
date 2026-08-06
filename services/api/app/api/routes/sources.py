@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.source import Source
-from app.schemas.source import SourceCreate, SourceRead
+from app.schemas.source import SourceCreate, SourceRead, SourceReliabilityUpdate
 
 router = APIRouter()
 
@@ -30,6 +30,22 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Sourc
         )
     source = Source(**payload.model_dump(mode="json"))
     db.add(source)
+    db.commit()
+    db.refresh(source)
+    return source
+
+
+@router.patch("/{source_id}/reliability", response_model=SourceRead)
+def update_source_reliability(
+    source_id: int,
+    payload: SourceReliabilityUpdate,
+    db: Session = Depends(get_db),
+) -> Source:
+    source = db.get(Source, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    source.is_official = payload.is_official
+    source.reliability_score = payload.reliability_score
     db.commit()
     db.refresh(source)
     return source

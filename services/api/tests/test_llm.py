@@ -26,6 +26,8 @@ def test_missing_api_key_raises_configuration_error(monkeypatch: pytest.MonkeyPa
             client.score_importance(
                 content="测试内容",
                 extracted_facts={"title": "测试"},
+                classification={"topic": "other"},
+                source_context={"source_name": "测试来源"},
             )
         )
 
@@ -254,17 +256,19 @@ def _client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeComple
     return client, completions
 
 
-def test_importance_prompt_uses_five_dimension_contract() -> None:
+def test_importance_prompt_uses_editorial_policy_contract() -> None:
     response = json.dumps(
         {
-            name: {"score": 3, "evidence": f"{name} evidence"}
-            for name in (
-                "impact_scope",
-                "magnitude",
-                "duration",
-                "actionability",
-                "novelty",
-            )
+            "editorial_subtype": "activity_standard",
+            "scale": "standard",
+            "audience_region": "global",
+            "competition_region": "none",
+            "prominence": "normal",
+            "skin_tier": "none",
+            "is_bulk_update": False,
+            "is_first_concrete_disclosure": True,
+            "is_duplicate_or_reminder": False,
+            "evidence": ["消息公布了活动规则。"],
         }
     )
     client, completions = _client_with_responses([response])
@@ -273,16 +277,20 @@ def test_importance_prompt_uses_five_dimension_contract() -> None:
         client.score_importance(
             content="输入含限时兑换码。",
             extracted_facts={"title": "限时活动"},
+            classification={"topic": "activity"},
+            source_context={"source_name": "英雄联盟"},
         )
     )
 
     messages = completions.calls[0]["messages"]
     assert isinstance(messages, list)
     prompt = messages[0]["content"]
-    assert "限时兑换码/限时活动=4" in prompt
-    assert "重复出现的日常内容(如每日商城)最高 2" in prompt
-    assert "不要输出最终分数" in prompt
-    assert "evidence 必须引用消息中的具体文本依据，不得编造" in prompt
+    assert "不评估行动紧迫性" in prompt
+    assert "patch_full_preview" in prompt
+    assert "shop_daily_standard" in prompt
+    assert "international_only" in prompt
+    assert "单英雄热修复不能误判为完整版本更新" in prompt
+    assert "evidence：1-6条消息中的具体文本依据，不得编造" in prompt
 
 
 def test_claim_generation_uses_atomic_timeline_contract() -> None:
@@ -345,7 +353,6 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
                     "update_kind": "new_fact",
                     "lifecycle_status": "developing",
                     "timeline_note": "测试服出现礼包封面",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [],
@@ -363,7 +370,6 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
                     "update_kind": "context",
                     "lifecycle_status": "developing",
                     "timeline_note": "礼包封面提供经典模式旁证",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [],
@@ -419,7 +425,6 @@ def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
                     "update_kind": "new_fact",
                     "lifecycle_status": "scheduled",
                     "timeline_note": "7月26日赛程发布",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [
@@ -439,7 +444,6 @@ def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
                     "update_kind": "new_fact",
                     "lifecycle_status": "scheduled",
                     "timeline_note": "7月26日赛程发布",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [],
@@ -517,13 +521,12 @@ def test_cn_mythic_shop_policy_rejects_empty_membership() -> None:
                 {
                     "target": "new",
                     "event_type": "shop_rotation",
-                    "aggregation_key": "mythic_shop:week:30",
+                    "aggregation_key": "mythic_shop:cn:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
                     "lifecycle_status": "live",
                     "timeline_note": "本周轮换内容公布",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [],
@@ -535,14 +538,14 @@ def test_cn_mythic_shop_policy_rejects_empty_membership() -> None:
         "event_eligible": True,
         "region": "cn",
         "cadence": "weekly",
-        "importance_range": [0.3, 0.45],
+        "importance_range": [0.45, 0.70],
     }
 
     result = asyncio.run(
         client.propose_event(
             item={"title": "神话商城每周轮换", "event_policy": policy},
             candidates=[],
-            stable_event_key="mythic_shop:week:30",
+            stable_event_key="mythic_shop:cn:2026-W30",
             knowledge_rules=[],
         )
     )
@@ -558,13 +561,12 @@ def test_cn_mythic_shop_policy_normalizes_required_event_type() -> None:
                 {
                     "target": "new",
                     "event_type": "other",
-                    "aggregation_key": "mythic_shop:week:30",
+                    "aggregation_key": "mythic_shop:cn:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
                     "lifecycle_status": "live",
                     "timeline_note": "本周轮换内容公布",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [],
@@ -580,11 +582,11 @@ def test_cn_mythic_shop_policy_normalizes_required_event_type() -> None:
                     "policy_type": "mythic_shop_rotation",
                     "event_eligible": True,
                     "required_event_type": "activity",
-                    "importance_range": [0.3, 0.45],
+                    "importance_range": [0.45, 0.70],
                 },
             },
             candidates=[],
-            stable_event_key="mythic_shop:week:30",
+            stable_event_key="mythic_shop:cn:2026-W30",
             knowledge_rules=[],
         )
     )
@@ -600,13 +602,12 @@ def test_international_mythic_shop_policy_requires_not_event() -> None:
                 {
                     "target": "new",
                     "event_type": "shop_rotation",
-                    "aggregation_key": "mythic_shop:week:30",
+                    "aggregation_key": "mythic_shop:cn:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
                     "lifecycle_status": "live",
                     "timeline_note": "国际服轮换",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [],
@@ -629,7 +630,7 @@ def test_international_mythic_shop_policy_requires_not_event() -> None:
                     "event_eligible": False,
                     "region": "international",
                     "cadence": "weekly",
-                    "importance_range": [0.3, 0.45],
+                    "importance_range": [0.25, 0.50],
                 },
             },
             candidates=[],
@@ -649,13 +650,12 @@ def test_cn_daily_mythic_shop_update_must_be_context() -> None:
                 {
                     "target": "existing:12",
                     "event_type": "shop_rotation",
-                    "aggregation_key": "mythic_shop:week:30",
+                    "aggregation_key": "mythic_shop:cn:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
                     "lifecycle_status": "live",
                     "timeline_note": "每日轮换补充",
-                    "is_official_confirmation": False,
                 }
             ],
             "candidate_rejections": [],
@@ -672,17 +672,17 @@ def test_cn_daily_mythic_shop_update_must_be_context() -> None:
                     "event_eligible": True,
                     "region": "cn",
                     "cadence": "daily",
-                    "importance_range": [0.3, 0.45],
+                    "importance_range": [0.45, 0.70],
                 },
             },
             candidates=[
                 {
                     "event_id": 12,
                     "title": "本周国服神话商城轮换",
-                    "aggregation_key": "mythic_shop:week:30",
+                    "aggregation_key": "mythic_shop:cn:2026-W30",
                 }
             ],
-            stable_event_key="mythic_shop:week:30",
+            stable_event_key="mythic_shop:cn:2026-W30",
             knowledge_rules=[],
         )
     )

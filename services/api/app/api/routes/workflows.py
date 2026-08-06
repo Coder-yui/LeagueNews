@@ -1,12 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
+from app.models.event import EventAggregationRun, EventReviewTask
+from app.models.media_extraction import MediaExtraction
+from app.models.pipeline import ProcessingCheckpoint
 from app.models.workflow import ProcessingRun, ReviewTask
 from app.schemas.workflow import (
+    OCRWorkflowReviewRead,
     ProcessingRunRead,
     OCRReviewCorrection,
+    ReviewQueueItemRead,
     ReviewApproval,
     ReviewCorrectionApproval,
     ReviewRejection,
@@ -22,6 +27,78 @@ from app.workflows.reviewed_pipeline import (
 )
 
 router = APIRouter()
+
+
+def _corrected_review_proposal(
+    review: ReviewTask,
+    payload: ReviewCorrectionApproval,
+) -> dict[str, object]:
+    corrections = payload.model_dump(exclude={"note"}, exclude_none=True)
+    proposal = {**review.proposal, **corrections}
+    if review.stage != "importance" or payload.importance_score is None:
+        return proposal
+
+    calculation = dict(review.proposal.get("importance_calculation") or {})
+    computed_score = calculation.get(
+        "computed_score",
+        review.proposal.get("importance_score"),
+    )
+    calculation.update(
+        {
+            "computed_score": computed_score,
+            "manual_override": {
+                "score": payload.importance_score,
+                "reason": payload.note or "管理台修正后批准",
+            },
+            "final_score": payload.importance_score,
+        }
+    )
+    proposal["importance_calculation"] = calculation
+    return proposal
+
+
+def _ocr_review_payload(
+    db: Session,
+    review: ReviewTask,
+) -> dict[str, object]:
+    run = review.processing_run
+    raw_item = run.raw_item
+    extraction_ids = [
+        value
+        for value in review.proposal.get("approved_media_extraction_ids", [])
+        if isinstance(value, int)
+    ]
+    extractions = [
+        extraction
+        for extraction_id in extraction_ids
+        if (extraction := db.get(MediaExtraction, extraction_id)) is not None
+        and extraction.media_asset.raw_item_id == raw_item.id
+    ]
+    return {
+        "review_id": review.id,
+        "processing_run_id": run.id,
+        "raw_item_id": raw_item.id,
+        "raw_title": raw_item.display_title,
+        "canonical_url": raw_item.canonical_url,
+        "status": review.status,
+        "corrections": list(review.proposal.get("ocr_corrections", [])),
+        "extractions": [
+            {
+                "id": extraction.id,
+                "media_asset_id": extraction.media_asset_id,
+                "block_index": extraction.media_asset.block_index,
+                "source_url": extraction.media_asset.source_url,
+                "storage_path": extraction.media_asset.storage_path,
+                "confidence": extraction.confidence,
+                "raw_ocr_text": extraction.raw_ocr_text,
+                "table_data": dict(
+                    extraction.processing_config.get("table_data", {})
+                ),
+            }
+            for extraction in extractions
+        ],
+        "created_at": review.created_at,
+    }
 
 
 @router.get("/runs", response_model=list[ProcessingRunRead])
@@ -72,6 +149,129 @@ def list_reviews(
     return list(db.scalars(statement))
 
 
+@router.get("/ocr-reviews", response_model=list[OCRWorkflowReviewRead])
+def list_ocr_reviews(
+    status_filter: str | None = Query(default="pending", alias="status"),
+    db: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    statement = (
+        select(ReviewTask)
+        .where(ReviewTask.stage == "image_ocr")
+        .order_by(ReviewTask.created_at.desc())
+        .limit(200)
+    )
+    if status_filter:
+        statement = statement.where(ReviewTask.status == status_filter)
+
+    return [_ocr_review_payload(db, review) for review in db.scalars(statement)]
+
+
+@router.get("/review-queue", response_model=list[ReviewQueueItemRead])
+def list_review_queue(db: Session = Depends(get_db)) -> list[dict[str, object]]:
+    message_reviews = list(
+        db.scalars(
+            select(ReviewTask)
+            .options(
+                selectinload(ReviewTask.processing_run)
+                .selectinload(ProcessingRun.raw_item)
+            )
+            .where(
+                ReviewTask.status == "pending",
+                ReviewTask.stage != "relevance",
+            )
+            .order_by(ReviewTask.created_at.desc())
+            .limit(200)
+        )
+    )
+    event_reviews = list(
+        db.scalars(
+            select(EventReviewTask)
+            .options(
+                selectinload(EventReviewTask.run)
+                .selectinload(EventAggregationRun.normalized_item)
+            )
+            .where(EventReviewTask.status == "pending")
+            .order_by(EventReviewTask.created_at.desc())
+            .limit(200)
+        )
+    )
+    raw_item_ids = {
+        review.processing_run.raw_item_id for review in message_reviews
+    } | {
+        review.run.normalized_item.raw_item_id for review in event_reviews
+    }
+    completed_by_raw: dict[int, list[str]] = {
+        raw_item_id: [] for raw_item_id in raw_item_ids
+    }
+    if raw_item_ids:
+        checkpoints = db.scalars(
+            select(ProcessingCheckpoint)
+            .where(
+                ProcessingCheckpoint.raw_item_id.in_(raw_item_ids),
+                ProcessingCheckpoint.invalidated_at.is_(None),
+            )
+            .order_by(ProcessingCheckpoint.id)
+        )
+        for checkpoint in checkpoints:
+            stages = completed_by_raw[checkpoint.raw_item_id]
+            if checkpoint.stage not in stages:
+                stages.append(checkpoint.stage)
+
+    payloads: list[dict[str, object]] = []
+    for review in message_reviews:
+        run = review.processing_run
+        raw_item = run.raw_item
+        is_ocr = review.stage == "image_ocr"
+        payloads.append(
+            {
+                "raw_item_id": raw_item.id,
+                "raw_title": raw_item.display_title,
+                "canonical_url": raw_item.canonical_url,
+                "source_name": raw_item.source.name,
+                "processing_run_id": run.id,
+                "normalized_item_id": (
+                    raw_item.normalized_item.id
+                    if raw_item.normalized_item is not None
+                    else None
+                ),
+                "current_stage": review.stage,
+                "completed_stages": completed_by_raw.get(raw_item.id, []),
+                "review_kind": "ocr" if is_ocr else "message",
+                "message_review": None if is_ocr else review,
+                "ocr_review": (
+                    _ocr_review_payload(db, review) if is_ocr else None
+                ),
+                "event_review": None,
+                "created_at": review.created_at,
+            }
+        )
+    for review in event_reviews:
+        item = review.run.normalized_item
+        raw_item = item.raw_item
+        payloads.append(
+            {
+                "raw_item_id": raw_item.id,
+                "raw_title": raw_item.display_title,
+                "canonical_url": raw_item.canonical_url,
+                "source_name": raw_item.source.name,
+                "processing_run_id": None,
+                "normalized_item_id": item.id,
+                "current_stage": "event_decision",
+                "completed_stages": completed_by_raw.get(raw_item.id, []),
+                "review_kind": "event",
+                "message_review": None,
+                "ocr_review": None,
+                "event_review": review,
+                "created_at": review.created_at,
+            }
+        )
+    return sorted(
+        payloads,
+        key=lambda payload: payload["created_at"],
+        reverse=True,
+    )
+
+
 @router.post("/reviews/{review_id}/approve", response_model=ProcessingRunRead)
 async def approve_review_task(
     review_id: int,
@@ -118,8 +318,7 @@ async def correct_and_approve_review_task(
     review = db.get(ReviewTask, review_id)
     if not review:
         raise HTTPException(status_code=404, detail="review task not found")
-    corrections = payload.model_dump(exclude={"note"}, exclude_none=True)
-    review.proposal = {**review.proposal, **corrections}
+    review.proposal = _corrected_review_proposal(review, payload)
     try:
         return await approve_review(
             db,

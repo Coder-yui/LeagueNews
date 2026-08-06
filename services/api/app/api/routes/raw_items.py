@@ -14,6 +14,10 @@ from app.schemas.raw_item import RawItemAdminPageRead, RawItemRead
 from app.schemas.workflow import ProcessingRunRead
 from app.services.llm import LLMAnalysisError, LLMConfigurationError
 from app.services.media_ocr import OCRProcessingError
+from app.services.raw_item_versions import (
+    is_latest_raw_item,
+    latest_raw_item_condition,
+)
 from app.workflows.reviewed_pipeline import start_item_processing
 
 router = APIRouter()
@@ -41,7 +45,12 @@ def _raw_item_payloads(
 
     payload: list[dict[str, object]] = []
     for item in items:
-        normalized = item.normalized_item
+        normalized = (
+            item.normalized_item
+            if item.normalized_item is not None
+            and item.normalized_item.publication_status == "published"
+            else None
+        )
         job = latest_jobs.get(item.id)
         payload.append(
             {
@@ -67,7 +76,6 @@ def _raw_item_payloads(
                 "normalized_item_id": normalized.id if normalized else None,
                 "content_type": normalized.content_type if normalized else None,
                 "summary": normalized.summary if normalized else None,
-                "credibility_score": normalized.credibility_score if normalized else None,
                 "importance_score": normalized.importance_score if normalized else None,
                 "current_pipeline_stage": job.current_stage if job else None,
                 "current_pipeline_job_id": job.id if job else None,
@@ -89,6 +97,7 @@ def list_raw_items(db: Session = Depends(get_db)) -> list[dict[str, object]]:
             selectinload(RawItem.normalized_item),
             selectinload(RawItem.processing_runs),
         )
+        .where(latest_raw_item_condition())
         .order_by(RawItem.ingested_at.desc())
         .limit(100)
     )
@@ -133,6 +142,7 @@ def list_raw_items_admin_page(
         .outerjoin(latest_job, latest_job.id == latest_job_ids.c.latest_job_id)
         .outerjoin(latest_run_ids, latest_run_ids.c.raw_item_id == RawItem.id)
         .outerjoin(latest_run, latest_run.id == latest_run_ids.c.latest_run_id)
+        .where(latest_raw_item_condition())
     )
     failed = or_(
         func.coalesce(latest_job.status == "failed", False),
@@ -151,7 +161,7 @@ def list_raw_items_admin_page(
         not_(failed),
         not_(processing),
         or_(
-            NormalizedItem.id.is_not(None),
+            NormalizedItem.publication_status == "published",
             func.coalesce(latest_job.status == "completed", False),
             func.coalesce(latest_run.status == "completed", False),
         ),
@@ -179,7 +189,9 @@ def list_raw_items_admin_page(
                 NormalizedItem.summary.ilike(pattern),
             )
         )
-    total_items = db.scalar(select(func.count(RawItem.id))) or 0
+    total_items = db.scalar(
+        select(func.count(RawItem.id)).where(latest_raw_item_condition())
+    ) or 0
     all_count = db.scalar(select(func.count()).select_from(filtered.subquery())) or 0
     status_counts = {
         name: db.scalar(
@@ -217,6 +229,7 @@ def list_raw_items_admin_page(
         for source_id_value, source_name in db.execute(
             select(Source.id, Source.name)
             .join(RawItem, RawItem.source_id == Source.id)
+            .where(latest_raw_item_condition())
             .distinct()
             .order_by(Source.name)
         )
@@ -233,7 +246,7 @@ def list_raw_items_admin_page(
     if db.scalar(
         select(func.count(RawItem.id))
         .outerjoin(NormalizedItem, NormalizedItem.raw_item_id == RawItem.id)
-        .where(NormalizedItem.id.is_(None))
+        .where(latest_raw_item_condition(), NormalizedItem.id.is_(None))
     ):
         content_type_options.append("null")
     return {
@@ -254,7 +267,15 @@ async def process_raw_item(item_id: int, db: Session = Depends(get_db)) -> objec
     raw_item = db.get(RawItem, item_id)
     if not raw_item:
         raise HTTPException(status_code=404, detail="raw item not found")
-    if raw_item.normalized_item:
+    if not is_latest_raw_item(db, raw_item):
+        raise HTTPException(
+            status_code=409,
+            detail="raw item has been superseded by a newer revision",
+        )
+    if (
+        raw_item.normalized_item
+        and raw_item.normalized_item.publication_status == "published"
+    ):
         raise HTTPException(status_code=409, detail="raw item already has approved analysis")
     active = db.scalar(
         select(ProcessingRun).where(

@@ -56,9 +56,6 @@ def _event(db: Session):
         category="news",
         entities=[],
         importance_score=0.5,
-        credibility="official",
-        credibility_score=1,
-        credibility_evidence=[],
         analysis_model="test",
     )
     db.add(item)

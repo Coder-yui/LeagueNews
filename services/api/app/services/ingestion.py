@@ -17,6 +17,9 @@ from app.models.raw_item_source_payload import RawItemSourcePayload
 from app.models.source import Source
 from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_storage import MediaStorage
+from app.services.raw_item_revision_lifecycle import (
+    supersede_previous_raw_revision,
+)
 
 
 @dataclass(slots=True)
@@ -82,7 +85,7 @@ async def ingest_connector_items(
                 language=item.language,
                 content_blocks=stored_blocks,
                 content_hash=content_hash,
-                content_hash_version=2,
+                content_hash_version=3,
                 revision=(latest_revision.revision + 1 if latest_revision else 1),
                 supersedes_raw_item_id=latest_revision.id if latest_revision else None,
                 published_at=item.published_at,
@@ -111,6 +114,12 @@ async def ingest_connector_items(
                         caption=block.get("caption"),
                     )
                 )
+            if latest_revision is not None:
+                supersede_previous_raw_revision(
+                    db,
+                    previous=latest_revision,
+                    successor=raw_item,
+                )
             result.created.append(raw_item)
             if latest_revision:
                 result.revised.append(raw_item)
@@ -134,18 +143,18 @@ def _find_existing(
     content_hash: str,
 ) -> tuple[RawItem | None, RawItem | None]:
     if external_id:
-        revisions = list(
-            db.scalars(
-                select(RawItem).where(
-                    RawItem.source_id == source_id,
-                    RawItem.external_id == external_id,
-                ).order_by(RawItem.revision.desc(), RawItem.id.desc())
-            )
+        latest_revision = db.scalar(
+            select(RawItem).where(
+                RawItem.source_id == source_id,
+                RawItem.external_id == external_id,
+            ).order_by(RawItem.revision.desc(), RawItem.id.desc()).limit(1)
         )
-        for existing in revisions:
-            if hash_content_blocks(existing.content_blocks) == content_hash:
-                return existing, revisions[0]
-        return None, revisions[0] if revisions else None
+        if (
+            latest_revision is not None
+            and hash_content_blocks(latest_revision.content_blocks) == content_hash
+        ):
+            return latest_revision, latest_revision
+        return None, latest_revision
 
     candidates = list(
         db.scalars(

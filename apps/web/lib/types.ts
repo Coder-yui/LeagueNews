@@ -59,19 +59,19 @@ export type PublishedItem = {
     type?: string;
     canonical_name?: string | null;
     canonical_id?: string | null;
+    role?: "core" | "context" | "affected";
   }>;
   primary_topic: string;
   secondary_topics: string[];
   facets: Record<string, unknown>;
   ontology_version: string;
   importance_score: number;
-  importance_dimensions: Record<string, { score?: number; evidence?: string }>;
+  importance_dimensions: Record<string, {
+    score?: number;
+    value?: string;
+    evidence?: string;
+  }>;
   importance_policy_version: string;
-  credibility: "official" | "corroborated" | "unverified" | "rumor" | string;
-  credibility_score: number;
-  credibility_evidence: string[];
-  credibility_components: Record<string, unknown>;
-  credibility_policy_version: string;
   source_id: number;
   source_name: string;
   source_base_url: string | null;
@@ -136,7 +136,6 @@ export type RawAdminItem = {
   normalized_item_id: number | null;
   content_type: string | null;
   summary: string | null;
-  credibility_score: number | null;
   importance_score: number | null;
   current_pipeline_stage: string | null;
   current_pipeline_job_id: number | null;
@@ -200,6 +199,51 @@ export type ReviewTask = {
   created_at: string;
 };
 
+export type OCRTableRecord = {
+  target: string;
+  raw_changes: string[];
+  bbox: number[];
+  ocr_confidence: number;
+};
+
+export type OCRTableSection = {
+  section_type: string;
+  label: string;
+  records: OCRTableRecord[];
+};
+
+export type OCRTableData = {
+  preview_kind: "preview" | "full_preview";
+  divider_x: number | null;
+  structure_confidence: number;
+  sections: OCRTableSection[];
+  warnings: string[];
+  boundaries: number[];
+};
+
+export type OCRReviewExtraction = {
+  id: number;
+  media_asset_id: number;
+  block_index: number;
+  source_url: string | null;
+  storage_path: string | null;
+  confidence: number | null;
+  raw_ocr_text: string;
+  table_data: OCRTableData;
+};
+
+export type OCRWorkflowReview = {
+  review_id: number;
+  processing_run_id: number;
+  raw_item_id: number;
+  raw_title: string | null;
+  canonical_url: string | null;
+  status: string;
+  corrections: Array<Record<string, unknown>>;
+  extractions: OCRReviewExtraction[];
+  created_at: string;
+};
+
 export type EventReviewTask = {
   id: number;
   event_aggregation_run_id: number;
@@ -209,12 +253,30 @@ export type EventReviewTask = {
   created_at: string;
 };
 
+export type ReviewQueueItem = {
+  raw_item_id: number;
+  raw_title: string | null;
+  canonical_url: string | null;
+  source_name: string;
+  processing_run_id: number | null;
+  normalized_item_id: number | null;
+  current_stage: string;
+  completed_stages: string[];
+  review_kind: "message" | "ocr" | "event";
+  message_review: ReviewTask | null;
+  ocr_review: OCRWorkflowReview | null;
+  event_review: EventReviewTask | null;
+  created_at: string;
+};
+
 export type Source = {
   id: number;
   name: string;
   connector_type: string;
   external_key: string | null;
   is_active: boolean;
+  is_official: boolean;
+  reliability_score: number;
   created_at: string;
 };
 
@@ -276,6 +338,8 @@ export type EventSummary = {
   importance_evidence: string[];
   latest_development: string;
   independent_source_count: number;
+  supporting_source_count: number;
+  contradicting_source_count: number;
   official_source_count: number;
   first_published_at: string | null;
   last_published_at: string | null;
@@ -295,7 +359,10 @@ export type EventMessage = {
   relation_type: string;
   membership_role?: string | null;
   evidence_stance: string;
-  is_official_confirmation: boolean;
+  is_official_evidence: boolean;
+  source_reliability_snapshot: number;
+  timeline_note: string;
+  update_kind: string;
   is_significant_update: boolean;
   source_published_at: string | null;
   added_at: string;
@@ -303,8 +370,6 @@ export type EventMessage = {
   summary: string;
   source_name: string;
   source_url: string | null;
-  credibility_score?: number | null;
-  credibility_components?: Record<string, unknown>;
 };
 
 export type EventRevision = {

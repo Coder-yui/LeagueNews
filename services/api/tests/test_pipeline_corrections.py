@@ -9,7 +9,7 @@ import app.models  # noqa: F401
 import app.services.pipeline_corrections as correction_service
 from app.api.routes.mcp import _call_tool
 from app.core.database import Base
-from app.models.event import Event, EventAggregationRun, EventMessage, EventReviewTask
+from app.models.event import EventAggregationRun, EventMessage, EventReviewTask
 from app.models.intelligence import EventClaim
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
@@ -20,6 +20,7 @@ from app.schemas.pipeline import PipelineCorrectionCreate
 from app.services.automatic_pipeline import (
     _claim_next_job,
     _heartbeat_job,
+    enqueue_pending_raw_items,
     enqueue_pipeline_job,
     execute_pipeline_job,
 )
@@ -64,9 +65,6 @@ def _published_item(
         category="news",
         entities=[],
         importance_score=0.5,
-        credibility="official",
-        credibility_score=1,
-        credibility_evidence=[],
         target_language="zh-CN",
         translated_content_blocks=[],
         translation_status="not_required",
@@ -92,21 +90,14 @@ async def test_event_only_correction_withdraws_membership_but_keeps_message_publ
         summary="Existing event summary",
         category="news",
     )
-    other_event = Event(
+    other_event = create_event(
+        db,
+        normalized_item_id=item.id,
         title="Other event",
         summary="The claim is independently relevant here.",
         category="news",
+        membership_role="component",
     )
-    db.add(other_event)
-    db.flush()
-    db.add(
-        EventClaim(
-            event_id=other_event.id,
-            claim_id=claim.id,
-            relation="context",
-        )
-    )
-    db.commit()
     started: dict[str, object] = {}
 
     async def fake_start_event(_db: Session, started_item: NormalizedItem, **kwargs: object):
@@ -126,17 +117,18 @@ async def test_event_only_correction_withdraws_membership_but_keeps_message_publ
         ),
     )
 
-    membership = db.scalar(
+    memberships = list(db.scalars(
         select(EventMessage).where(EventMessage.normalized_item_id == item.id)
-    )
+    ))
     assert item.publication_status == "published"
-    assert membership is not None
-    assert membership.membership_status == "withdrawn"
-    assert membership.source_correction_id == correction.id
+    assert len(memberships) == 2
+    assert all(membership.membership_status == "withdrawn" for membership in memberships)
+    assert all(membership.source_correction_id == correction.id for membership in memberships)
+    assert set(correction.original_event_ids) == {event.id, other_event.id}
     assert event.status == "withdrawn"
     assert claim.status == "active"
     assert db.get(EventClaim, (event.id, claim.id)) is None
-    assert db.get(EventClaim, (other_event.id, claim.id)) is not None
+    assert db.get(EventClaim, (other_event.id, claim.id)) is None
     assert started == {
         "item_id": item.id,
         "supersedes_run_id": None,
@@ -384,10 +376,45 @@ async def test_automatic_job_skips_event_projection_for_superseded_revision(
 
     await execute_pipeline_job(db, job)
 
+    assert job.status == "cancelled"
     assert db.scalar(
         select(EventAggregationRun).where(
             EventAggregationRun.normalized_item_id == item.id
         )
+    ) is None
+
+
+def test_enqueue_pending_raw_items_only_enqueues_latest_revision(
+    db: Session,
+) -> None:
+    source = Source(name="Revision queue source", connector_type="manual")
+    db.add(source)
+    db.flush()
+    old = RawItem(
+        source_id=source.id,
+        external_id="revision-queue-item",
+        native_title="Old revision",
+        content_blocks=[{"type": "paragraph", "text": "Old revision"}],
+        revision=1,
+    )
+    db.add(old)
+    db.flush()
+    successor = RawItem(
+        source_id=source.id,
+        external_id="revision-queue-item",
+        native_title="Latest revision",
+        content_blocks=[{"type": "paragraph", "text": "Latest revision"}],
+        revision=2,
+        supersedes_raw_item_id=old.id,
+    )
+    db.add(successor)
+    db.commit()
+
+    jobs = enqueue_pending_raw_items(db)
+
+    assert [job.raw_item_id for job in jobs] == [successor.id]
+    assert db.scalar(
+        select(PipelineJob).where(PipelineJob.raw_item_id == old.id)
     ) is None
 
 

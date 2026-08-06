@@ -51,7 +51,6 @@ class EventMembershipDraft(BaseModel):
         "officially_refuted",
     ] | None = None
     timeline_note: str = Field(min_length=1)
-    is_official_confirmation: bool = False
 
     @field_validator("target")
     @classmethod

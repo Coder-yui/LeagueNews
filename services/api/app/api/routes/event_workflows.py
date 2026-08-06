@@ -18,6 +18,7 @@ from app.workflows.event_aggregation import (
     reject_event_review,
     retry_event_aggregation,
     start_event_aggregation,
+    validate_event_decision,
 )
 
 router = APIRouter()
@@ -113,8 +114,18 @@ def correct_and_approve_event_review(
     review = db.get(EventReviewTask, review_id)
     if review is None:
         raise HTTPException(status_code=404, detail="event review not found")
-    review.proposal = payload.decision_draft
     try:
+        decision = validate_event_decision(review.run, payload.decision_draft)
+        corrected = {
+            **decision.model_dump(mode="json"),
+            "_execution_metadata": review.run.decision_draft.get("_execution_metadata", {}),
+            "knowledge_rule_ids": review.run.decision_draft.get("knowledge_rule_ids", []),
+        }
+        review.run.decision_draft = corrected
+        review.proposal = {
+            **dict(review.proposal),
+            "decision": corrected,
+        }
         return approve_event_review(
             db,
             review,

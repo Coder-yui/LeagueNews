@@ -1,4 +1,10 @@
-import type { Digest, EventDetail, EventSummary, PublishedItem } from "./types";
+import type {
+  Digest,
+  EventDetail,
+  EventSummary,
+  PublishedItem,
+  PublishedItemPage,
+} from "./types";
 
 export const apiUrl =
   process.env.INTERNAL_API_URL ??
@@ -19,15 +25,28 @@ export async function adminApi<T>(path: string, options?: RequestInit): Promise<
   return response.json() as Promise<T>;
 }
 
-export async function getPublishedItems(): Promise<PublishedItem[]> {
+export async function getPublishedItemsPage(
+  limit: number,
+  offset: number,
+): Promise<PublishedItemPage> {
   try {
-    const response = await fetch(`${apiUrl}/normalized-items/published`, {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    });
+    const response = await fetch(`${apiUrl}/normalized-items/published-page?${params}`, {
       next: { revalidate: 30 },
     });
     if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as PublishedItem[];
+    return (await response.json()) as PublishedItemPage;
   } catch {
-    return [];
+    return {
+      items: [],
+      total: 0,
+      topic_options: [],
+      subtopic_options: [],
+      information_stage_options: [],
+    };
   }
 }
 

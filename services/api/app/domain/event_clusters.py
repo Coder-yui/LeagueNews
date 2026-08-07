@@ -19,12 +19,9 @@ _LATE_STAGE_PATTERN = re.compile(
     r"胜者组决赛|败者组决赛|grand\s+final|semi-?final",
     re.IGNORECASE,
 )
-_FOCUS_PATTERN = re.compile(
-    r"焦点(?:战|对决)|宿敌对决|生死战|关键战|focus(?:ed)?\s+match",
-    re.IGNORECASE,
-)
-_INTERNATIONAL_KNOCKOUT_PATTERN = re.compile(
-    r"淘汰赛|八强|四分之一决赛|quarter-?final|knockout",
+_PLAYOFF_STAGE_PATTERN = re.compile(
+    r"季后赛|淘汰赛|附加赛|冒泡赛|八强|四分之一决赛|"
+    r"胜者组|败者组|playoffs?|knockout|quarter-?final",
     re.IGNORECASE,
 )
 _LPL_STAGE_PATTERN = re.compile(
@@ -45,6 +42,41 @@ _COMPETITION_CODES: Final = (
     "cblol",
 )
 _INTERNATIONAL_CODES: Final = {"worlds", "msi", "ewc"}
+_TEAM_COMPETITIONS: Final = {
+    "lpl": {
+        "al",
+        "blg",
+        "edg",
+        "fpx",
+        "ig",
+        "jdg",
+        "lgd",
+        "lng",
+        "nip",
+        "omg",
+        "rng",
+        "tes",
+        "tt",
+        "up",
+        "we",
+        "wbg",
+    },
+    "lck": {
+        "bfx",
+        "bnkfearx",
+        "bro",
+        "dk",
+        "dnf",
+        "drx",
+        "gen",
+        "geng",
+        "hle",
+        "kt",
+        "ns",
+        "t1",
+    },
+}
+_TEAM_CODE_PATTERN = re.compile(r"[^a-z0-9]+", re.IGNORECASE)
 _CN_MARKERS = re.compile(r"国服|中国服|腾讯|掌盟|cn\s+server", re.IGNORECASE)
 _GLOBAL_MARKERS = re.compile(
     r"外服|国际服|美服|欧服|韩服|global|international|na\s+server|eu\s+server",
@@ -177,33 +209,73 @@ def _competition_code(
     fallback_entities: list[dict[str, object]],
     text: str,
 ) -> str | None:
-    entities = [*evidence.entities, *fallback_entities]
-    for entity in entities:
-        if str(entity.get("type") or "").casefold() not in {"league", "tournament"}:
-            continue
-        value = str(
-            entity.get("canonical_name") or entity.get("canonical_id") or entity.get("name") or ""
-        ).casefold()
-        for code in _COMPETITION_CODES:
-            if re.search(rf"(?<![a-z]){re.escape(code)}(?![a-z])", value):
-                return code
+    def competition_codes(values: list[dict[str, object]] | tuple[dict[str, object], ...]) -> set[str]:
+        codes: set[str] = set()
+        for entity in values:
+            if str(entity.get("type") or "").casefold() not in {"league", "tournament"}:
+                continue
+            value = str(
+                entity.get("canonical_name")
+                or entity.get("canonical_id")
+                or entity.get("name")
+                or ""
+            ).casefold()
+            codes.update(
+                code
+                for code in _COMPETITION_CODES
+                if re.search(rf"(?<![a-z]){re.escape(code)}(?![a-z])", value)
+            )
+        return codes
+
+    direct_codes = competition_codes(evidence.entities)
+    if len(direct_codes) == 1:
+        return next(iter(direct_codes))
+    team_codes = {
+        _TEAM_CODE_PATTERN.sub(
+            "",
+            str(entity.get("canonical_name") or entity.get("name") or "").casefold(),
+        )
+        for entity in evidence.entities
+        if str(entity.get("type") or "").casefold() == "team"
+    }
+    inferred_codes = {
+        competition
+        for competition, members in _TEAM_COMPETITIONS.items()
+        if team_codes & members
+    }
+    if len(inferred_codes) == 1:
+        return next(iter(inferred_codes))
+    fallback_codes = competition_codes(fallback_entities)
+    if len(fallback_codes) == 1:
+        return next(iter(fallback_codes))
     lowered = text.casefold()
     if "全球总决赛" in text or "世界赛" in text:
         return "worlds"
     if _LPL_STAGE_PATTERN.search(text):
         return "lpl"
-    for code in _COMPETITION_CODES:
-        if re.search(rf"(?<![a-z]){re.escape(code)}(?![a-z])", lowered):
-            return code
+    text_codes = {
+        code
+        for code in _COMPETITION_CODES
+        if re.search(rf"(?<![a-z]){re.escape(code)}(?![a-z])", lowered)
+    }
+    if len(text_codes) == 1:
+        return next(iter(text_codes))
     return None
 
 
-def is_marquee_match(text: str, competition: str | None) -> bool:
-    if _LATE_STAGE_PATTERN.search(text) or _FOCUS_PATTERN.search(text):
-        return True
-    return bool(
-        competition in _INTERNATIONAL_CODES and _INTERNATIONAL_KNOCKOUT_PATTERN.search(text)
+def is_marquee_match(
+    text: str,
+    competition: str | None,
+    prominence: str = "normal",
+) -> bool:
+    popular_matchup = prominence in {"notable", "star"}
+    key_stage = bool(
+        _LATE_STAGE_PATTERN.search(text)
+        or _PLAYOFF_STAGE_PATTERN.search(text)
     )
+    if competition in _INTERNATIONAL_CODES:
+        return popular_matchup or key_stage
+    return bool(competition and popular_matchup and key_stage)
 
 
 def _market_region(
@@ -309,6 +381,7 @@ def build_event_clusters(
     facets: dict[str, object],
     published_at: datetime | None,
     content_form: str,
+    editorial_prominence: str = "normal",
     source_connector_type: str = "",
     source_name: str = "",
 ) -> list[EventCluster]:
@@ -498,7 +571,10 @@ def build_event_clusters(
         if (
             competition
             and date_key
-            and (has_multiple_matches or not is_marquee_match(text, competition))
+            and (
+                has_multiple_matches
+                or not is_marquee_match(text, competition, editorial_prominence)
+            )
         ):
             matchday_groups.setdefault((competition, date_key), []).append(evidence)
             continue
@@ -590,6 +666,7 @@ def route_event_clusters(
     fact_claims: list[dict[str, object]] | None = None,
     source_connector_type: str = "",
     source_name: str = "",
+    editorial_prominence: str = "normal",
 ) -> list[EventRoute]:
     clusters = build_event_clusters(
         topic=topic,
@@ -601,6 +678,7 @@ def route_event_clusters(
         facets=facets,
         published_at=published_at,
         content_form=content_form,
+        editorial_prominence=editorial_prominence,
         source_connector_type=source_connector_type,
         source_name=source_name,
     )

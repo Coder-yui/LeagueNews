@@ -1,8 +1,5 @@
-"use client";
-
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useState } from "react";
 import {
   ArrowUpRight,
   ChevronLeft,
@@ -11,8 +8,6 @@ import {
 } from "lucide-react";
 import { importanceLevel } from "@/lib/event-labels";
 import type { PublishedItem } from "@/lib/types";
-
-const MESSAGE_PAGE_SIZE = 10;
 
 function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
   const image = item.translated_content_blocks.find(
@@ -79,18 +74,19 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
   );
 }
 
-export function MessageFeed({ items }: { items: PublishedItem[] }) {
-  const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(items.length / MESSAGE_PAGE_SIZE));
-  const visibleItems = items.slice(
-    (page - 1) * MESSAGE_PAGE_SIZE,
-    page * MESSAGE_PAGE_SIZE,
-  );
-
-  useEffect(() => {
-    if (page > pageCount) setPage(pageCount);
-  }, [page, pageCount]);
-
+export function MessageFeed({
+  items,
+  page,
+  pageCount,
+  pageSize,
+  total,
+}: {
+  items: PublishedItem[];
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  total: number;
+}) {
   if (!items.length) {
     return (
       <div className="message-empty">
@@ -101,33 +97,33 @@ export function MessageFeed({ items }: { items: PublishedItem[] }) {
   return (
     <>
       <div className="message-list">
-        {visibleItems.map((item, index) => (
+        {items.map((item, index) => (
           <MessageCard
             item={item}
-            index={(page - 1) * MESSAGE_PAGE_SIZE + index}
+            index={(page - 1) * pageSize + index}
             key={item.id}
           />
         ))}
       </div>
       {pageCount > 1 && (
         <div className="public-pagination">
-          <span>共 {items.length} 条消息</span>
+          <span>共 {total} 条消息</span>
           <div>
-            <button
-              type="button"
-              disabled={page === 1}
-              onClick={() => setPage((value) => Math.max(1, value - 1))}
+            <Link
+              className={page === 1 ? "disabled" : ""}
+              aria-disabled={page === 1}
+              href={`/?page=${Math.max(1, page - 1)}#messages`}
             >
               <ChevronLeft size={13} /> 上一页
-            </button>
+            </Link>
             <span>{page} / {pageCount}</span>
-            <button
-              type="button"
-              disabled={page === pageCount}
-              onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
+            <Link
+              className={page === pageCount ? "disabled" : ""}
+              aria-disabled={page === pageCount}
+              href={`/?page=${Math.min(pageCount, page + 1)}#messages`}
             >
               下一页 <ChevronRight size={13} />
-            </button>
+            </Link>
           </div>
         </div>
       )}

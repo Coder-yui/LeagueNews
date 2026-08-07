@@ -15,6 +15,7 @@ from app.domain.content_semantics import (
     has_hotfix_signal,
     has_test_environment_signal,
     is_catalog_asset_preview,
+    is_interaction_post_without_update_details,
 )
 from app.domain.importance import (
     IMPORTANCE_POLICY_VERSION,
@@ -1705,7 +1706,24 @@ def _apply_classification_evidence_guardrails(
             )
 
     original_subtopic = str(guarded.get("subtopic") or "")
-    if has_hotfix_signal(text) and original_subtopic in {
+    if is_interaction_post_without_update_details(text):
+        reason = "正文以提问或征集讨论为主，未提供可独立聚合的更新细节"
+        set_field("topic", "community", reason)
+        set_field("subtopic", "community_post", reason)
+        set_field("source_kind", "community", reason)
+        set_field("information_stage", "commentary", reason)
+        set_field("event_assertion", "context_only", reason)
+        if guarded.get("event_mentions"):
+            adjustments.append(
+                {
+                    "field": "event_mentions",
+                    "from": str(len(guarded["event_mentions"])),
+                    "to": "0",
+                    "reason": reason,
+                }
+            )
+            guarded["event_mentions"] = []
+    elif has_hotfix_signal(text) and original_subtopic in {
         "hotfix",
         "patch_notes",
         "champion_update",

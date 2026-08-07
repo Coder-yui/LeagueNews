@@ -199,6 +199,10 @@ _TEAM_SUFFIX_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _LATIN_TOKEN_PATTERN = re.compile(r"(?<![a-z0-9])[a-z][a-z0-9]{1,15}(?![a-z0-9])", re.IGNORECASE)
+_ARAM_MAYHEM_PATTERN = re.compile(
+    r"(?:\baram\b.{0,12}(?:mayhem|混乱))|(?:极地大乱斗.{0,8}混乱)|(?:海克斯大乱斗)",
+    re.IGNORECASE,
+)
 _COMPETITION_CODES: Final = (
     "worlds",
     "cblol",
@@ -221,6 +225,8 @@ def canonical_entity_name(entity_type: str, value: str) -> str:
     if not normalized:
         return normalized
     lowered = normalized.casefold()
+    if entity_type == "game_mode" and _ARAM_MAYHEM_PATTERN.search(lowered):
+        return "ARAM Mayhem"
     if entity_type in {"league", "tournament"}:
         for code in _COMPETITION_CODES:
             if re.search(rf"(?<![a-z]){re.escape(code)}(?![a-z])", lowered):

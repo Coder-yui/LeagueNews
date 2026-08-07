@@ -6,11 +6,34 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { MessageFeed } from "@/components/message-feed";
-import { getPublishedItems } from "@/lib/api";
+import { getPublishedItemsPage } from "@/lib/api";
 
-export default async function Home() {
-  const items = await getPublishedItems();
-  const topItem = items[0];
+const MESSAGE_PAGE_SIZE = 10;
+
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string }>;
+}) {
+  const params = await searchParams;
+  const parsedPage = Number.parseInt(params.page ?? "1", 10);
+  const requestedPage = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+  let messagePage = await getPublishedItemsPage(
+    MESSAGE_PAGE_SIZE,
+    (requestedPage - 1) * MESSAGE_PAGE_SIZE,
+  );
+  const pageCount = Math.max(1, Math.ceil(messagePage.total / MESSAGE_PAGE_SIZE));
+  const page = Math.min(requestedPage, pageCount);
+  if (page !== requestedPage) {
+    messagePage = await getPublishedItemsPage(
+      MESSAGE_PAGE_SIZE,
+      (page - 1) * MESSAGE_PAGE_SIZE,
+    );
+  }
+  const items = messagePage.items;
+  const topItem = page === 1
+    ? items[0]
+    : (await getPublishedItemsPage(1, 0)).items[0];
   const dateLabel = new Intl.DateTimeFormat("zh-CN", {
     month: "long",
     day: "numeric",
@@ -41,9 +64,9 @@ export default async function Home() {
       </section>
 
       <section className="signal-grid" aria-label="今日概览">
-        <div><span>已审消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
-        <div><span>高优先级</span><strong>{items.filter((item) => item.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
-        <div><span>已发布消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
+        <div><span>已审消息</span><strong>{messagePage.total.toString().padStart(2, "0")}</strong></div>
+        <div><span>本页高优先级</span><strong>{items.filter((item) => item.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
+        <div><span>本页消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
         <div className="pulse"><Activity size={18} /><span>持续更新</span></div>
       </section>
 
@@ -64,7 +87,13 @@ export default async function Home() {
           <div><span className="kicker">REVIEWED STREAM</span><h2>已审核消息</h2></div>
           <span>按原始发布时间排序</span>
         </div>
-        <MessageFeed items={items} />
+        <MessageFeed
+          items={items}
+          page={page}
+          pageCount={pageCount}
+          pageSize={MESSAGE_PAGE_SIZE}
+          total={messagePage.total}
+        />
       </section>
 
       <section id="pipeline" className="pipeline">
@@ -73,7 +102,7 @@ export default async function Home() {
       </section>
 
       <section id="sources" className="source-summary">
-        <span>信源</span>
+        <span>本页信源</span>
         <strong>{new Set(items.map((item) => item.source_name)).size}</strong>
         <p>不同平台账号保持独立信源身份，所有消息均可返回原始位置核验。</p>
       </section>

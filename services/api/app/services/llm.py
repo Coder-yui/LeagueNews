@@ -399,7 +399,11 @@ class LLMClient:
     event_assertion=speculative，各对应 event_mention 也必须是 speculative；不能把爆料人的确定语气
     当作官方确认。只有设计师本人或游戏官方信源直接发布的更新才可作为正式更新。
 15. “不停机更新/无需停机更新/热修复/hotfix”统一使用 topic=patch、subtopic=hotfix，
-    受影响英雄、模式和系统只是 affected 实体，不得把它们改成主分类。"""
+    受影响英雄、模式和系统只是 affected 实体，不得把它们改成主分类。
+16. 以提问、投票、征集回忆或观点为主要动作，且没有日期、版本、数值、机制或改动明细的互动帖，
+    即使顺带写“即将上线”，也使用 community/community_post、information_stage=commentary、
+    event_assertion=context_only，并输出空 event_mentions。混合多个联赛的赛程中，每场比赛应在
+    identity_entities 中补充可由稳定队伍归属确定的 league；不要因正文称某场为“焦点战”而改变分类。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={

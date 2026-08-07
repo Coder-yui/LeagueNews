@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 from app.core.database import Base
+from app.domain.event_clusters import is_marquee_match
 from app.domain.ontology import normalize_entities, normalize_event_mentions
 from app.models.intelligence import Claim
 from app.models.normalized_item import NormalizedItem
@@ -416,9 +417,9 @@ def test_unscoped_match_result_resolves_to_the_existing_same_team_matchday(
     candidates = find_event_candidates(db, normalized_item_id=game_result.id)
     resolved = resolve_aggregation_routes(routes, candidates)
 
-    assert routes[0].aggregation_key == "match:2026-07-30:nip-vs-wbg"
+    assert routes[0].aggregation_key == "matchday:lpl:2026-07-30"
     assert candidates[0].event_id == event.id
-    assert candidates[0].deterministic_route_key == routes[0].aggregation_key
+    assert candidates[0].aggregation_key == routes[0].aggregation_key
     assert resolved[0].aggregation_key == "matchday:lpl:2026-07-30"
     assert resolved[0].aggregation_strategy == "calendar_day"
 
@@ -535,33 +536,30 @@ def test_hotfix_identity_is_the_update_batch_not_the_first_target(
     assert _stable_key(item) == "hotfix:lol_pc:2026-08-06"
 
 
-def test_hotfix_with_shared_subject_continues_the_previous_short_window_batch(
+def test_explicit_dated_hotfixes_do_not_continue_across_dates(
     db: Session,
 ) -> None:
-    reporter = Source(name="Balance reporter", connector_type="x_twitter")
     official = Source(name="LOL CN", connector_type="tencent_lol", is_official=True)
-    db.add_all([reporter, official])
+    db.add(official)
     db.commit()
-    preview = _add_item(
+    first_update = _add_item(
         db,
-        source_id=reporter.id,
+        source_id=official.id,
         index=136,
-        title="佛耶戈和机器人靴子修复预告",
+        title="8月5日不停机更新修复佛耶戈",
         published_at=datetime(2026, 8, 5, 10, tzinfo=UTC),
-        entities=[
-            {"name": "佛耶戈", "type": "champion", "role": "core"},
-            {"name": "机器人靴子", "type": "item", "role": "affected"},
-        ],
+        entities=[{"name": "佛耶戈", "type": "champion", "role": "affected"}],
         primary_topic="patch",
         subtopic="hotfix",
+        information_stage="active",
         facets={"temporal": {"event_date": "2026-08-05"}},
     )
     event = create_event(
         db,
-        normalized_item_id=preview.id,
+        normalized_item_id=first_update.id,
         aggregation_key="hotfix:lol_pc:2026-08-05",
-        title="佛耶戈和机器人靴子热更新",
-        summary="开发者预告修复。",
+        title="8月5日不停机更新",
+        summary="修复佛耶戈。",
         event_kind="gameplay_update",
         aggregation_strategy="timeline",
         product_scope="lol_pc",
@@ -584,14 +582,16 @@ def test_hotfix_with_shared_subject_continues_the_previous_short_window_batch(
     )
 
     candidates = find_event_candidates(db, normalized_item_id=announcement.id)
+    dated_candidate = next(candidate for candidate in candidates if candidate.event_id == event.id)
 
-    assert candidates[0].event_id == event.id
-    assert candidates[0].deterministic_route_key == "hotfix:lol_pc:2026-08-06"
+    assert dated_candidate.deterministic_route_key is None
     assert (
-        resolve_aggregation_routes(aggregation_routes(announcement), candidates)[0].aggregation_key
-        == "hotfix:lol_pc:2026-08-05"
+        resolve_aggregation_routes(
+            aggregation_routes(announcement),
+            candidates,
+        )[0].aggregation_key
+        == "hotfix:lol_pc:2026-08-06"
     )
-    assert any(reason.startswith("短窗口热更新连续：") for reason in candidates[0].reasons)
 
 
 def test_nonstop_update_keeps_hotfix_as_the_message_level_identity(
@@ -963,6 +963,8 @@ def test_program_routes_patch_component_roster_and_match_windows(
         product_scope="lol_esports",
         facets={"temporal": {"event_date": "2026-08-02"}},
     )
+    final.importance_dimensions = {"prominence": {"value": "star"}}
+    db.commit()
 
     patch_routes = aggregation_routes(patch)
     assert [
@@ -1015,6 +1017,13 @@ def test_event_identity_normalization_is_domain_general(db: Session) -> None:
         "league:lpl",
         "player:flandre",
     ]
+    aram_aliases = [
+        normalize_entities(
+            [{"name": alias, "type": "game_mode", "role": "core"}]
+        )[0]["canonical_name"]
+        for alias in ("ARAM：混乱", "极地大乱斗：混乱模式", "海克斯大乱斗")
+    ]
+    assert aram_aliases == ["ARAM Mayhem"] * 3
 
 
 def test_event_mentions_cluster_regular_matches_and_route_transfer_subjects(
@@ -1036,14 +1045,16 @@ def test_event_mentions_cluster_regular_matches_and_route_transfer_subjects(
                 "temporal": {"event_date": "2026-07-30"},
                 "membership_role": "primary" if index == 0 else "component",
             }
-            for index, (left, right) in enumerate((("NIP", "WBG"), ("EDG", "WE"), ("TT", "JDG")))
+            for index, (left, right) in enumerate(
+                (("AL", "EDG"), ("GEN", "T1"), ("WE", "BLG"))
+            )
         ]
     )
     schedule = _add_item(
         db,
         source_id=source.id,
         index=102,
-        title="LPL今日赛程：三场对决，NIP vs WBG为焦点生死战",
+        title="今日赛程：AL vs EDG、GEN vs T1、WE vs BLG，GEN vs T1为焦点战",
         published_at=datetime(2026, 7, 29, tzinfo=UTC),
         primary_topic="esports",
         subtopic="match_schedule",
@@ -1052,7 +1063,8 @@ def test_event_mentions_cluster_regular_matches_and_route_transfer_subjects(
     )
 
     assert [route.aggregation_key for route in aggregation_routes(schedule)] == [
-        "matchday:lpl:2026-07-30"
+        "matchday:lpl:2026-07-30",
+        "matchday:lck:2026-07-30",
     ]
 
     roster = _add_item(
@@ -1261,30 +1273,13 @@ def test_lpl_schedule_and_result_share_matchday_key_out_of_order(
     assert "发布时间相距 0 天" in candidates[0].reasons
 
 
-def test_lpl_late_playoff_series_gets_individual_match_key(
-    db: Session,
+def test_marquee_match_uses_stage_competition_and_structured_prominence(
 ) -> None:
-    source = Source(name="LPL Playoffs", connector_type="weibo")
-    db.add(source)
-    db.commit()
-    semifinal = _add_item(
-        db,
-        source_id=source.id,
-        index=22,
-        title="2026LPL季后赛半决赛7月30日 BLG 对阵 TES",
-        published_at=datetime(2026, 7, 30, 10, tzinfo=UTC),
-        entities=[
-            {"name": "LPL", "type": "league"},
-            {"name": "BLG", "type": "team"},
-            {"name": "TES", "type": "team"},
-        ],
-        primary_topic="esports",
-        subtopic="match_schedule",
-        product_scope="lol_esports",
-        facets={"temporal": {"event_date": "2026-07-30"}},
-    )
-
-    assert _stable_key(semifinal) == "match:2026-07-30:blg-vs-tes"
+    assert not is_marquee_match("LPL常规赛焦点战", "lpl", "star")
+    assert not is_marquee_match("LPL季后赛半决赛", "lpl", "normal")
+    assert is_marquee_match("LPL季后赛半决赛", "lpl", "star")
+    assert is_marquee_match("MSI瑞士轮", "msi", "notable")
+    assert is_marquee_match("全球总决赛八强赛", "worlds", "normal")
 
 
 def test_candidate_search_returns_exact_patch_match_with_reasons(db: Session) -> None:

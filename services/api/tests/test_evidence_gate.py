@@ -385,6 +385,35 @@ def test_content_semantics_normalize_classification_before_scoring_and_routing()
                 1,
             ),
         },
+        {
+            "source_key": "official-interaction-post",
+            "official": True,
+            "title": "经典模式即将上线",
+            "text": "你还记得当年有哪些出圈的梗吗？",
+            "proposal": {
+                "topic": "game_mode",
+                "subtopic": "game_mode_release",
+                "source_kind": "first_party",
+                "information_stage": "announcement",
+                "content_form": "original",
+                "event_assertion": "asserted",
+                "event_mentions": [
+                    {
+                        "topic": "game_mode",
+                        "subtopic": "game_mode_release",
+                        "assertion": "asserted",
+                    }
+                ],
+            },
+            "expected": (
+                "community",
+                "community_post",
+                "community",
+                "commentary",
+                "context_only",
+                0,
+            ),
+        },
     ]
 
     for case in cases:

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.content_blocks import text_from_content_blocks
 from app.domain.event_clusters import is_marquee_match, route_event_clusters
 from app.domain.ontology import EventRoute
 from app.models.event import Event, EventMessage
@@ -48,6 +49,13 @@ _ROUTE_SUBJECT_NOISE = {
     "player_activity": ("活动", "event"),
     "community_activity": ("活动", "event"),
 }
+
+
+def _importance_dimension_value(item: NormalizedItem, key: str) -> str:
+    dimension = item.importance_dimensions.get(key)
+    if not isinstance(dimension, dict):
+        return ""
+    return str(dimension.get("value") or "")
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,7 @@ def aggregation_routes(item: NormalizedItem) -> list[EventRoute]:
         ],
         source_connector_type=item.raw_item.source.connector_type,
         source_name=item.raw_item.source.name,
+        editorial_prominence=_importance_dimension_value(item, "prominence") or "normal",
     )
 
 
@@ -391,8 +400,47 @@ def _hotfix_continuation_key(
             and event.aggregation_strategy == route.aggregation_strategy
             and event.product_scope == route.product_scope
         ):
+            if _explicit_hotfix_date(item, key) and _event_has_explicit_hotfix_date(
+                event,
+                event.aggregation_key,
+            ):
+                continue
             return key, overlap
     return None, set()
+
+
+def _source_text(item: NormalizedItem) -> str:
+    return "\n".join(
+        (
+            item.raw_item.native_title or "",
+            text_from_content_blocks(item.raw_item.content_blocks),
+        )
+    )
+
+
+def _explicit_hotfix_date(item: NormalizedItem, key: str) -> bool:
+    try:
+        date_value = datetime.strptime(key.rsplit(":", 1)[-1], "%Y-%m-%d")
+    except ValueError:
+        return False
+    year = date_value.year
+    month = date_value.month
+    day = date_value.day
+    pattern = re.compile(
+        rf"(?:{year}[年\-/]\s*0?{month}[月\-/]\s*0?{day}日?)"
+        rf"|(?:0?{month}月\s*0?{day}日)"
+        rf"|(?:0?{month}[\-/]\s*0?{day})(?!\d)"
+    )
+    return pattern.search(_source_text(item)) is not None
+
+
+def _event_has_explicit_hotfix_date(event: Event, key: str) -> bool:
+    return any(
+        message.membership_status == "active"
+        and message.normalized_item.publication_status == "published"
+        and _explicit_hotfix_date(message.normalized_item, key)
+        for message in event.messages
+    )
 
 
 def _matchday_context_key(
@@ -401,8 +449,6 @@ def _matchday_context_key(
     routes: list[EventRoute],
 ) -> tuple[str | None, set[str]]:
     text = f"{item.translated_title or item.normalized_title} {item.summary}"
-    if is_marquee_match(text, None):
-        return None, set()
     item_teams = _team_subjects(item)
     if len(item_teams) != 2 or not item_teams.issubset(_event_team_subjects(event)):
         return None, set()
@@ -414,6 +460,14 @@ def _matchday_context_key(
         if len(parts) != 3:
             continue
         date_key = parts[1]
+        event_key_parts = (event.aggregation_key or "").split(":", 2)
+        competition = event_key_parts[1] if len(event_key_parts) == 3 else None
+        if is_marquee_match(
+            text,
+            competition,
+            _importance_dimension_value(item, "prominence") or "normal",
+        ):
+            continue
         if (
             event.aggregation_key
             and event.aggregation_key.startswith("matchday:")

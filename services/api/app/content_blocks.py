@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -231,6 +232,16 @@ def has_quoted_post(blocks: list[dict[str, Any]]) -> bool:
     return any(
         block.get("type") == "embed" and block.get("embed_kind") == "quoted_post"
         for block in blocks
+    )
+
+
+def has_repost_evidence(blocks: list[dict[str, Any]]) -> bool:
+    if has_quoted_post(blocks):
+        return True
+    text = text_from_content_blocks(blocks).lstrip()
+    return bool(
+        re.match(r"(?i)^RT\s+@[A-Z0-9_]+\s*:", text)
+        or re.search(r"(?:^|\n)转发自\s+@", text)
     )
 
 

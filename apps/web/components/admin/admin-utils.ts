@@ -26,12 +26,6 @@ export const STAGE_LABELS: Record<PipelineStageName, string> = {
 
 export function canonicalStage(stage: string | null | undefined): PipelineStageName {
   if (stage === "image_ocr") return "ocr";
-  if (
-    stage === "fact_extract" ||
-    stage === "classify" ||
-    stage === "item_analysis"
-  )
-    return "fact_classify";
   return PIPELINE_STAGES.includes(stage as PipelineStageName)
     ? (stage as PipelineStageName)
     : "relevance";
@@ -39,8 +33,8 @@ export function canonicalStage(stage: string | null | undefined): PipelineStageN
 
 function summarizeContext(context: Record<string, unknown>, stage: PipelineStageName): string {
   const contextKeys: Record<PipelineStageName, string[]> = {
-    relevance: ["approved_relevance_proposal", "relevance"],
-    ocr: ["approved_ocr_proposal", "image_ocr", "ocr"],
+    relevance: ["relevance_decision"],
+    ocr: ["approved_media_extraction_ids"],
     translation: ["approved_translation_proposal", "translation"],
     fact_classify: [
       "approved_classification_proposal",
@@ -106,6 +100,10 @@ export function relativeTime(value: string | null | undefined): string {
 
 export function score(value: number | null | undefined): string {
   return typeof value === "number" ? value.toFixed(2) : "—";
+}
+
+export function pointScore(value: number | null | undefined): string {
+  return typeof value === "number" ? String(Math.round(value * 100)) : "—";
 }
 
 export function objectNumber(value: unknown): number | null {

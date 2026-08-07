@@ -16,7 +16,7 @@ def test_prompt_registry_versions_known_tasks() -> None:
         schema_version="ImportanceResult:v1",
     )
     assert prompt.name == "importance-scoring"
-    assert prompt.version == "v4-editorial-baselines"
+    assert prompt.version == "v5-cosmetic-releases"
     assert prompt.content == "contract"
 
 
@@ -28,14 +28,14 @@ def test_all_production_llm_operations_are_registered() -> None:
         schema_version="EventDecisionDraft:v1",
     )
     assert prompt.name == "event-decision"
-    assert prompt.version == "v4-multi-membership"
+    assert prompt.version == "v7-semantic-candidate-binding"
     classification = prompt_registry.resolve(
         operation=CLASSIFICATION_OPERATION,
         content="dual-axis contract",
         schema_version="ClassificationResult:v1",
     )
     assert classification.name == "classification"
-    assert classification.version == "v1"
+    assert classification.version == "v6-cosmetic-releases"
     claim_generation = prompt_registry.resolve(
         operation=CLAIM_GENERATION_OPERATION,
         content="timeline claim contract",

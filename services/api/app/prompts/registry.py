@@ -33,17 +33,17 @@ class PromptSpec:
 class PromptRegistry:
     _versions = {
         FACT_EXTRACTION_OPERATION: ("fact-extraction", "v1"),
-        CLASSIFICATION_OPERATION: ("classification", "v1"),
+        CLASSIFICATION_OPERATION: ("classification", "v6-cosmetic-releases"),
         CLAIM_GENERATION_OPERATION: ("claim-generation", "v2-timeline"),
         IMPORTANCE_SCORING_OPERATION: (
             "importance-scoring",
-            "v4-editorial-baselines",
+            "v5-cosmetic-releases",
         ),
         RELEVANCE_OPERATION: ("relevance", "v2-product-scope"),
         TRANSLATION_OPERATION: ("translation", "v2-contextual-chunks"),
         EVENT_AGGREGATION_OPERATION: (
             "event-decision",
-            "v4-multi-membership",
+            "v7-semantic-candidate-binding",
         ),
         KNOWLEDGE_ORGANIZATION_OPERATION: (
             "knowledge-organization",

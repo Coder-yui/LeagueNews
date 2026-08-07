@@ -1,266 +1,107 @@
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.domain.ontology import EventRoute, route_event_types
+from app.domain.event_clusters import is_marquee_match, route_event_clusters
+from app.domain.ontology import EventRoute
 from app.models.event import Event, EventMessage
 from app.models.normalized_item import NormalizedItem
+from app.models.raw_item import RawItem
 from app.services.raw_item_versions import superseded_normalized_item_ids
 
-_PATCH_PATTERN = re.compile(r"(?<!\d)(\d{1,2}\.\d{1,2})(?!\d)")
-_EVENT_DATE_PATTERN = re.compile(
-    r"(?:(?P<year>20\d{2})年)?(?P<month>\d{1,2})月(?P<day>\d{1,2})日"
-)
 _WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+", re.IGNORECASE)
-_KEY_TOKEN_PATTERN = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
-_MATCH_WORDS = ("击败", "战胜", "对阵", "vs", " vs ", "比分", "赛果")
-_ESPORTS_CATEGORY_WORDS = ("赛事", "赛果", "赛程", "比赛", "集锦")
-_LATE_PLAYOFF_WORDS = (
-    "半决赛",
-    "胜者组决赛",
-    "败者组决赛",
-    "季军赛",
-    "总决赛",
-    "决赛",
-)
-_TRANSFER_WORDS = ("转会", "加盟", "离队", "续约", "试训", "接触")
-_CN_CONNECTORS = {"baidu_tieba", "weibo", "tencent_lol"}
-_MYTHIC_SHOP_TERMS = ("神话商城", "mythic shop")
-_ROTATION_TERMS = ("轮换", "每日更新", "每周更新", "daily rotation", "weekly rotation")
+_HOTFIX_CONTINUITY_TYPES = {
+    "champion",
+    "game_mode",
+    "item",
+    "system",
+}
+_IDENTITY_TEXT_PATTERN = re.compile(r"[^a-z0-9\u4e00-\u9fff]+", re.IGNORECASE)
+_GENERIC_ENTITY_NAMES = {
+    "英雄联盟",
+    "leagueoflegends",
+    "lol",
+    "云顶之弈",
+    "teamfighttactics",
+    "tft",
+    "拳头游戏",
+    "riotgames",
+}
+_ROUTE_SUBJECT_NOISE = {
+    "gameplay_release": (
+        "英雄联盟",
+        "leagueoflegends",
+        "lol",
+        "云顶之弈",
+        "teamfighttactics",
+        "tft",
+        "游戏模式",
+        "gamemode",
+        "模式",
+        "mode",
+    ),
+    "cosmetic_release": ("皮肤", "skin"),
+    "player_activity": ("活动", "event"),
+    "community_activity": ("活动", "event"),
+}
 
 
 @dataclass(frozen=True)
 class EventCandidate:
     event_id: int
-    event_key: str | None
     aggregation_key: str | None
     title: str
     summary: str
-    category: str
     core_entities: tuple[str, ...]
-    event_type: str
+    event_kind: str
+    aggregation_strategy: str
+    product_scope: str
     lifecycle_status: str
     credibility_status: str
     timeline_nodes: tuple[str, ...]
     member_count: int
     match_level: str
+    deterministic_route_key: str | None
     score: float
     reasons: tuple[str, ...]
 
 
 def aggregation_routes(item: NormalizedItem) -> list[EventRoute]:
-    policy = event_aggregation_policy(item)
-    if policy is not None:
-        if not policy["event_eligible"]:
-            return []
-        return [EventRoute("shop_rotation", str(policy["aggregation_key"]))]
-    return route_event_types(
-        content_type=item.content_type,
+    return route_event_clusters(
         topic=item.primary_topic,
+        subtopic=item.subtopic,
+        source_kind=item.source_kind,
+        information_stage=item.information_stage,
+        content_form=item.content_form,
+        product_scope=item.product_scope,
         title=item.translated_title or item.normalized_title,
         summary=item.summary,
         entities=list(item.entities),
         facets=dict(item.facets),
         published_at=item.raw_item.published_at,
-    )
-
-
-def _event_date_key(item: NormalizedItem, text: str) -> str | None:
-    published_at = item.raw_item.published_at
-    local_published_at = (
-        published_at.astimezone(ZoneInfo("Asia/Shanghai"))
-        if published_at is not None and published_at.tzinfo is not None
-        else published_at
-    )
-    match = _EVENT_DATE_PATTERN.search(text)
-    if match is not None:
-        year = int(
-            match.group("year")
-            or (
-                local_published_at.year
-                if local_published_at is not None
-                else datetime.now(ZoneInfo("Asia/Shanghai")).year
-            )
-        )
-        try:
-            return datetime(
-                year,
-                int(match.group("month")),
-                int(match.group("day")),
-            ).date().isoformat()
-        except ValueError:
-            pass
-    return (
-        local_published_at.date().isoformat()
-        if local_published_at is not None
-        else None
-    )
-
-
-def stable_event_key(item: NormalizedItem) -> str | None:
-    routes = aggregation_routes(item)
-    if routes:
-        return routes[0].aggregation_key
-    entity_text = " ".join(
-        str(entity.get("canonical_name") or entity.get("name") or "")
-        for entity in item.entities
-    )
-    text = f"{item.normalized_title} {item.translated_title or ''} {entity_text}"
-    match = _PATCH_PATTERN.search(text)
-    lowered = text.casefold()
-    if match is not None:
-        has_patch_context = (
-            "patch" in lowered
-            or "preview" in lowered
-            or "版本" in text
-            or any(
-                str(entity.get("type", "")).casefold() in {"patch", "version"}
-                for entity in item.entities
-            )
-        )
-        if has_patch_context:
-            return f"patch:{match.group(1)}"
-
-    policy = event_aggregation_policy(item)
-    if policy and policy["event_eligible"]:
-        return str(policy["stable_event_key"])
-
-    game_modes = _entity_values(item, {"game_mode", "mode"})
-    if game_modes and (
-        _category_family(item.category) == "game_mode"
-        or "模式" in text
-        or "mode" in lowered
-    ):
-        return f"mode:{game_modes[0]}"
-
-    published_at = item.raw_item.published_at
-    date_key = _event_date_key(item, f"{text} {item.summary}")
-    teams = _entity_values(item, {"team", "esports_team"})
-    is_lpl = "lpl" in lowered or "英雄联盟职业联赛" in text
-    is_esports = any(word in item.category for word in _ESPORTS_CATEGORY_WORDS)
-    if is_lpl and is_esports and date_key:
-        is_late_playoff = any(word in text for word in _LATE_PLAYOFF_WORDS)
-        if is_late_playoff:
-            if len(teams) >= 2:
-                return (
-                    f"match:lpl:{date_key}:"
-                    f"{'-vs-'.join(sorted(teams)[:2])}"
-                )
-            return None
-        return f"matchday:lpl:{date_key}"
-
-    is_match = (
-        is_esports
-        and len(teams) >= 2
-        and any(word in lowered for word in _MATCH_WORDS)
-    )
-    if is_match and date_key:
-        league = "lpl" if "lpl" in lowered or "英雄联盟职业联赛" in text else "lol"
-        return f"match:{league}:{date_key}:{'-vs-'.join(sorted(teams)[:2])}"
-
-    players = _entity_values(item, {"player", "pro_player", "coach"})
-    is_transfer = "转会" in item.category or any(
-        word in lowered for word in _TRANSFER_WORDS
-    )
-    if is_transfer and players and teams:
-        year = published_at.year if published_at else datetime.now(UTC).year
-        return f"transfer:{year}:{players[0]}:{teams[0]}"
-    return None
-
-
-def event_aggregation_policy(item: NormalizedItem) -> dict[str, object] | None:
-    text = " ".join(
-        (
-            item.normalized_title,
-            item.translated_title or "",
-            item.summary,
-            item.normalized_text,
-        )
-    )
-    lowered = text.casefold()
-    if not (
-        any(term in lowered for term in _MYTHIC_SHOP_TERMS)
-        and any(term in lowered for term in _ROTATION_TERMS)
-    ):
-        return None
-
-    connector_type = item.raw_item.source.connector_type
-    explicit_cn = "国服" in text or "中国服务器" in text
-    is_cn = connector_type != "x_twitter" and (
-        explicit_cn or connector_type in _CN_CONNECTORS
-    )
-    headline = f"{item.normalized_title} {item.translated_title or ''}"
-    headline_lowered = headline.casefold()
-    if "每周" in headline or "weekly rotation" in headline_lowered:
-        cadence = "weekly"
-    elif "每日" in headline or "daily rotation" in headline_lowered:
-        cadence = "daily"
-    else:
-        cadence = (
-            "daily"
-            if "每日" in text or "daily rotation" in lowered
-            else "weekly"
-        )
-    published_at = item.raw_item.published_at or item.raw_item.ingested_at
-    localized = (
-        published_at.replace(tzinfo=UTC)
-        if published_at.tzinfo is None
-        else published_at
-    ).astimezone(ZoneInfo("Asia/Shanghai"))
-    iso_year, iso_week, _ = localized.isocalendar()
-    return {
-        "policy_type": "mythic_shop_rotation",
-        "region": "cn" if is_cn else "international",
-        "event_eligible": is_cn,
-        "cadence": cadence,
-        "aggregation_period": f"{iso_year}-W{iso_week:02d}",
-        "stable_event_key": (
-            f"mythic_shop:cn:{iso_year}-W{iso_week:02d}"
-            if is_cn
-            else None
-        ),
-        "importance_range": (
-            [0.45, 0.70] if is_cn else [0.25, 0.50]
-        ),
-        "required_event_type": "shop_rotation",
-        "aggregation_key": (
-            f"mythic_shop:cn:{iso_year}-W{iso_week:02d}"
-            if is_cn
-            else None
-        ),
-        "daily_update_kind": "context",
-    }
-
-
-def _key_token(value: str) -> str:
-    return _KEY_TOKEN_PATTERN.sub("-", value.strip().casefold()).strip("-")[:60]
-
-
-def _entity_values(item: NormalizedItem, accepted_types: set[str]) -> list[str]:
-    return sorted(
-        {
-            token
-            for entity in item.entities
-            if str(entity.get("type", "")).casefold() in accepted_types
-            if (
-                token := _key_token(
-                    str(entity.get("canonical_name") or entity.get("name") or "")
-                )
-            )
-        }
+        fact_claims=[
+            {
+                "subject": dict(claim.subject),
+                "predicate": claim.predicate,
+                "object": dict(claim.object_value),
+                "temporal_role": claim.temporal_role,
+            }
+            for claim in item.claims
+            if claim.status == "active"
+        ],
+        source_connector_type=item.raw_item.source.connector_type,
+        source_name=item.raw_item.source.name,
     )
 
 
 def _tokens(text: str) -> set[str]:
     tokens: set[str] = set()
     for part in _WORD_PATTERN.findall(text.casefold()):
-        if part.isascii():
-            tokens.add(part)
-        elif len(part) == 1:
+        if part.isascii() or len(part) == 1:
             tokens.add(part)
         else:
             tokens.update(part[index : index + 2] for index in range(len(part) - 1))
@@ -276,11 +117,17 @@ def _similarity(left: str, right: str) -> float:
 
 
 def _entity_names(item: NormalizedItem) -> set[str]:
-    return {
-        str(entity.get("canonical_name") or entity.get("name") or "").strip().casefold()
-        for entity in item.entities
-        if entity.get("canonical_name") or entity.get("name")
-    }
+    names: set[str] = set()
+    for entity in item.entities:
+        if str(entity.get("role") or "").casefold() == "context":
+            continue
+        name = str(
+            entity.get("canonical_name") or entity.get("name") or ""
+        ).strip().casefold()
+        if not name or _identity_text(name) in _GENERIC_ENTITY_NAMES:
+            continue
+        names.add(name)
+    return names
 
 
 def _event_entity_names(event: Event) -> set[str]:
@@ -293,16 +140,177 @@ def _event_entity_names(event: Event) -> set[str]:
     }
 
 
-def _item_context(item: NormalizedItem) -> str:
-    entities = " ".join(
+def _hotfix_subjects(item: NormalizedItem) -> set[str]:
+    return {
         str(entity.get("canonical_name") or entity.get("name") or "")
+        .strip()
+        .casefold()
         for entity in item.entities
+        if str(entity.get("type") or "").casefold() in _HOTFIX_CONTINUITY_TYPES
+        and str(entity.get("role") or "core").casefold() in {"core", "affected"}
+        and (entity.get("canonical_name") or entity.get("name"))
+    }
+
+
+def _event_hotfix_subjects(event: Event) -> set[str]:
+    return {
+        subject
+        for message in event.messages
+        if message.membership_status == "active"
+        and message.normalized_item.publication_status == "published"
+        for subject in _hotfix_subjects(message.normalized_item)
+    }
+
+
+def _named_activity_subjects(item: NormalizedItem) -> set[str]:
+    return {
+        str(entity.get("canonical_name") or entity.get("name") or "").strip()
+        for entity in item.entities
+        if str(entity.get("type") or "").casefold() == "activity"
+        and str(entity.get("role") or "core").casefold() in {"core", "affected"}
+        and (entity.get("canonical_name") or entity.get("name"))
+    }
+
+
+def _event_named_activity_subjects(event: Event) -> set[str]:
+    return {
+        subject
+        for message in event.messages
+        if message.membership_status == "active"
+        and message.normalized_item.publication_status == "published"
+        for subject in _named_activity_subjects(message.normalized_item)
+    }
+
+
+def _team_subjects(item: NormalizedItem) -> set[str]:
+    return {
+        str(entity.get("canonical_name") or entity.get("name") or "")
+        .strip()
+        .casefold()
+        for entity in item.entities
+        if str(entity.get("type") or "").casefold() == "team"
+        and str(entity.get("role") or "core").casefold() in {"core", "affected"}
+        and (entity.get("canonical_name") or entity.get("name"))
+    }
+
+
+def _event_team_subjects(event: Event) -> set[str]:
+    return {
+        subject
+        for message in event.messages
+        if message.membership_status == "active"
+        and message.normalized_item.publication_status == "published"
+        for subject in _team_subjects(message.normalized_item)
+    }
+
+
+def _identity_text(value: str) -> str:
+    return _IDENTITY_TEXT_PATTERN.sub("", value.casefold())
+
+
+def _route_subject(key: str, event_kind: str) -> str:
+    subject = _identity_text(key.rsplit(":", 1)[-1])
+    for noise in _ROUTE_SUBJECT_NOISE.get(event_kind, ()):
+        subject = subject.replace(_identity_text(noise), "")
+    return subject
+
+
+def _same_stable_subject(
+    left_key: str,
+    right_key: str,
+    *,
+    event_kind: str,
+) -> bool:
+    left = _route_subject(left_key, event_kind)
+    right = _route_subject(right_key, event_kind)
+    if not left or not right:
+        return False
+    if left == right:
+        return len(left) >= 2
+    return min(len(left), len(right)) >= 4 and (
+        left in right or right in left
     )
+
+
+def _stable_subject_alias_key(
+    event: Event,
+    routes: list[EventRoute],
+) -> tuple[str | None, set[str]]:
+    if not event.aggregation_key or event.event_kind not in _ROUTE_SUBJECT_NOISE:
+        return None, set()
+    matches = [
+        route
+        for route in routes
+        if route.aggregation_key
+        and route.aggregation_key != event.aggregation_key
+        and route.event_kind == event.event_kind
+        and route.aggregation_strategy == event.aggregation_strategy
+        and route.product_scope == event.product_scope
+        and _same_stable_subject(
+            route.aggregation_key,
+            event.aggregation_key,
+            event_kind=route.event_kind,
+        )
+    ]
+    if len(matches) != 1:
+        return None, set()
+    route = matches[0]
+    return route.aggregation_key, {
+        f"{route.aggregation_key} ↔ {event.aggregation_key}"
+    }
+
+
+def _single_activity_reminder_route(
+    event: Event,
+    routes: list[EventRoute],
+) -> EventRoute | None:
+    matches = [
+        route
+        for route in routes
+        if route.event_kind == "player_activity"
+        and route.aggregation_strategy == "timeline"
+        and route.creation_policy == "existing_only"
+        and route.product_scope == event.product_scope
+        and route.event_kind == event.event_kind
+        and route.aggregation_strategy == event.aggregation_strategy
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _named_activity_aliases(
+    item: NormalizedItem,
+    event: Event,
+    routes: list[EventRoute],
+) -> tuple[str | None, set[str]]:
+    route = _single_activity_reminder_route(event, routes)
+    if route is None:
+        return None, set()
+    aliases: set[str] = set()
+    for current in _named_activity_subjects(item):
+        current_identity = _identity_text(current)
+        if len(current_identity) < 4:
+            continue
+        for existing in _event_named_activity_subjects(event):
+            existing_identity = _identity_text(existing)
+            if (
+                current_identity != existing_identity
+                and (
+                    current_identity in existing_identity
+                    or existing_identity in current_identity
+                )
+            ):
+                aliases.add(f"{current} ↔ {existing}")
+    if not aliases:
+        return None, set()
+    return route.aggregation_key, aliases
+
+
+def _item_context(item: NormalizedItem) -> str:
     return " ".join(
         (
             item.translated_title or item.normalized_title,
             item.summary,
-            entities,
+            " ".join(sorted(_entity_names(item))),
             " ".join(
                 f"{claim.subject} {claim.predicate} {claim.object_value}"
                 for claim in item.claims
@@ -323,6 +331,7 @@ def _event_context(event: Event) -> str:
                 for message in event.messages
                 if message.membership_status == "active"
                 for claim in message.normalized_item.claims
+                if claim.status == "active"
             ),
         )
     )
@@ -334,69 +343,132 @@ def _naive_utc(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(tzinfo=None)
 
 
-def _category_family(category: str) -> str:
-    value = category.strip().casefold()
-    if any(token in value for token in ("新模式", "游戏模式", "玩法模式", "game mode")):
-        return "game_mode"
-    if "版本" in value or "patch" in value:
-        return "patch"
-    if "转会" in value or "阵容" in value:
-        return "roster"
-    if "赛事" in value or "赛果" in value or "比赛" in value:
-        return "esports"
-    if "活动" in value:
-        return "activity"
-    return value
-
-
 def _within_window(item: NormalizedItem, event: Event) -> tuple[bool, int | None]:
     published_at = item.raw_item.published_at
     event_at = event.last_published_at
     if published_at is None or event_at is None:
         return False, None
     distance = int(
-        abs(
-            (
-                _naive_utc(published_at) - _naive_utc(event_at)
-            ).total_seconds()
-        )
+        abs((_naive_utc(published_at) - _naive_utc(event_at)).total_seconds())
         // 86_400
     )
-    category_family = _category_family(item.category)
-    if category_family == "patch" or event.event_type in {
-        "patch",
-        "patch_cycle",
-        "sr_patch",
-        "tft_patch",
-    }:
-        window_days = 45
-    elif (
-        category_family == "game_mode"
-        or event.event_type == "major_gameplay_change"
-    ):
-        window_days = 180
-    elif category_family == "roster" or event.event_type in {
-        "transfer",
-        "roster",
-        "transfer_saga",
-    }:
-        window_days = 180
-    elif category_family == "esports" or event.event_type in {
-        "match",
-        "tournament",
-        "daily_matches",
-        "major_match",
-        "qualification_saga",
-    }:
-        window_days = 14
-    elif category_family == "activity" or event.event_type in {
-        "activity",
-        "shop_rotation",
-    }:
-        window_days = 90
-    else:
-        window_days = 7
+    window_days = {
+        "patch_cycle": 45,
+        "timeline": 180,
+        "calendar_day": 2,
+        "recurring_window": 8,
+        "release": 90,
+        "singleton": 14,
+    }.get(event.aggregation_strategy, 14)
     return distance <= window_days, distance
+
+
+def _hotfix_continuation_key(
+    item: NormalizedItem,
+    event: Event,
+    routes: list[EventRoute],
+) -> tuple[str | None, set[str]]:
+    if item.raw_item.published_at is None or event.last_published_at is None:
+        return None, set()
+    gap = abs(
+        _naive_utc(item.raw_item.published_at) - _naive_utc(event.last_published_at)
+    )
+    if gap > timedelta(days=2):
+        return None, set()
+    overlap = _hotfix_subjects(item) & _event_hotfix_subjects(event)
+    if not overlap:
+        return None, set()
+    for route in routes:
+        key = route.aggregation_key
+        prefix = f"hotfix:{route.product_scope}:"
+        if (
+            key
+            and key.startswith(prefix)
+            and event.aggregation_key
+            and event.aggregation_key.startswith(prefix)
+            and event.aggregation_key != key
+            and event.event_kind == route.event_kind
+            and event.aggregation_strategy == route.aggregation_strategy
+            and event.product_scope == route.product_scope
+        ):
+            return key, overlap
+    return None, set()
+
+
+def _matchday_context_key(
+    item: NormalizedItem,
+    event: Event,
+    routes: list[EventRoute],
+) -> tuple[str | None, set[str]]:
+    text = f"{item.translated_title or item.normalized_title} {item.summary}"
+    if is_marquee_match(text, None):
+        return None, set()
+    item_teams = _team_subjects(item)
+    if len(item_teams) != 2 or not item_teams.issubset(_event_team_subjects(event)):
+        return None, set()
+    for route in routes:
+        key = route.aggregation_key
+        if not key or not key.startswith("match:"):
+            continue
+        parts = key.split(":", 2)
+        if len(parts) != 3:
+            continue
+        date_key = parts[1]
+        if (
+            event.aggregation_key
+            and event.aggregation_key.startswith("matchday:")
+            and event.aggregation_key.endswith(f":{date_key}")
+            and event.event_kind == "esports_match"
+            and event.aggregation_strategy == "calendar_day"
+            and event.product_scope == route.product_scope
+        ):
+            return key, item_teams
+    return None, set()
+
+
+def resolve_aggregation_routes(
+    routes: list[EventRoute],
+    candidates: Iterable[EventCandidate | dict[str, object]],
+) -> list[EventRoute]:
+    """Replace a provisional route when exactly one deterministic parent exists."""
+    matches_by_route: dict[str, list[EventCandidate | dict[str, object]]] = {}
+    for candidate in candidates:
+        route_key = (
+            candidate.deterministic_route_key
+            if isinstance(candidate, EventCandidate)
+            else candidate.get("deterministic_route_key")
+        )
+        if route_key:
+            matches_by_route.setdefault(str(route_key), []).append(candidate)
+    resolved: list[EventRoute] = []
+    for route in routes:
+        matches = matches_by_route.get(str(route.aggregation_key), [])
+        if len(matches) != 1:
+            resolved.append(route)
+            continue
+        candidate = matches[0]
+
+        def value(name: str) -> object:
+            return (
+                getattr(candidate, name)
+                if isinstance(candidate, EventCandidate)
+                else candidate.get(name)
+            )
+
+        aggregation_key = value("aggregation_key")
+        if not aggregation_key:
+            resolved.append(route)
+            continue
+        resolved.append(
+            replace(
+                route,
+                event_kind=str(value("event_kind")),
+                aggregation_strategy=str(value("aggregation_strategy")),
+                product_scope=str(value("product_scope")),
+                aggregation_key=str(aggregation_key),
+            )
+        )
+    return resolved
 
 
 def find_event_candidates(
@@ -408,44 +480,46 @@ def find_event_candidates(
 ) -> list[EventCandidate]:
     if limit < 1 or limit > 8:
         raise ValueError("candidate limit must be between 1 and 8")
-
     item = db.scalar(
         select(NormalizedItem)
         .where(NormalizedItem.id == normalized_item_id)
-        .options(selectinload(NormalizedItem.raw_item))
+        .options(
+            selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
+            selectinload(NormalizedItem.claims),
+        )
     )
     if item is None:
         raise ValueError(f"normalized item {normalized_item_id} not found")
-
     routes = aggregation_routes(item)
-    aggregation_keys = {
-        route.aggregation_key for route in routes
-    }
-    item_key = stable_event_key(item)
-    item_entities = _entity_names(item)
-    superseded_item_ids = set(superseded_normalized_item_ids(db, item))
+    keys = {route.aggregation_key for route in routes if route.aggregation_key}
+    kinds = {route.event_kind for route in routes}
+    strategies = {route.aggregation_strategy for route in routes}
+    superseded_ids = set(superseded_normalized_item_ids(db, item))
     included_ids = include_event_ids or set()
-    revision_event_ids = set(
-        db.scalars(
-            select(EventMessage.event_id).where(
-                EventMessage.normalized_item_id.in_(superseded_item_ids)
+    revision_event_ids = (
+        set(
+            db.scalars(
+                select(EventMessage.event_id).where(
+                    EventMessage.normalized_item_id.in_(superseded_ids)
+                )
             )
         )
-    ) if superseded_item_ids else set()
-    recalled_event_ids = included_ids | revision_event_ids
-    reference_at = item.raw_item.published_at or datetime.now(UTC)
-    if reference_at.tzinfo is not None:
-        reference_at = reference_at.astimezone(UTC).replace(tzinfo=None)
-    indexed_cutoff = reference_at - timedelta(days=180)
-    recall_filters = [
-        Event.id.in_(recalled_event_ids),
-        Event.category == item.category,
-        Event.last_published_at >= indexed_cutoff,
-    ]
-    if item_key is not None:
-        recall_filters.append(Event.event_key == item_key)
-    if aggregation_keys:
-        recall_filters.append(Event.aggregation_key.in_(aggregation_keys))
+        if superseded_ids
+        else set()
+    )
+    recalled_ids = included_ids | revision_event_ids
+    reference = item.raw_item.published_at or datetime.now(UTC)
+    if reference.tzinfo is not None:
+        reference = reference.astimezone(UTC).replace(tzinfo=None)
+    recall_filters = [Event.id.in_(recalled_ids)]
+    if keys:
+        recall_filters.append(Event.aggregation_key.in_(keys))
+    if kinds:
+        recall_filters.append(
+            (Event.event_kind.in_(kinds))
+            & (Event.product_scope == item.product_scope)
+            & (Event.last_published_at >= reference - timedelta(days=180))
+        )
     statement = (
         select(Event)
         .options(
@@ -455,107 +529,120 @@ def find_event_candidates(
         )
         .where(
             or_(*recall_filters),
-            or_(
-                Event.status == "active",
-                Event.id.in_(recalled_event_ids),
-            )
+            or_(Event.status == "active", Event.id.in_(recalled_ids)),
         )
         .order_by(Event.last_published_at.desc().nullslast(), Event.id.desc())
         .limit(200)
     )
-
+    item_entities = _entity_names(item)
     candidates: list[EventCandidate] = []
     for event in db.scalars(statement):
         reasons: list[str] = []
         score = 0.0
-        forced_candidate = event.id in included_ids
-        if forced_candidate:
-            score += 500
-            reasons.append("该事件是本次撤回前的原事件，保留为纠正候选")
-        supersedes_member = event.id in revision_event_ids
-        if supersedes_member:
-            score += 200
-            reasons.append("当前消息是该事件成员的更新版本")
-        exact_key = (
-            event.aggregation_key in aggregation_keys
-            if event.aggregation_key is not None
-            else item_key is not None and event.event_key == item_key
+        forced = event.id in included_ids
+        revision_member = event.id in revision_event_ids
+        exact_key = event.aggregation_key is not None and event.aggregation_key in keys
+        hotfix_route_key, continuation_subjects = _hotfix_continuation_key(
+            item,
+            event,
+            routes,
         )
+        alias_route_key, activity_aliases = _named_activity_aliases(
+            item,
+            event,
+            routes,
+        )
+        matchday_route_key, matchday_teams = _matchday_context_key(
+            item,
+            event,
+            routes,
+        )
+        subject_alias_key, subject_aliases = _stable_subject_alias_key(
+            event,
+            routes,
+        )
+        deterministic_route_key = (
+            hotfix_route_key
+            or alias_route_key
+            or matchday_route_key
+            or subject_alias_key
+        )
+        if forced:
+            score += 500
+            reasons.append("该事件是撤回前的原事件")
+        if revision_member:
+            score += 200
+            reasons.append("当前消息是该事件成员的新修订")
         if exact_key:
             score += 300
+            reasons.append(f"稳定聚合键匹配：{event.aggregation_key}")
+        if hotfix_route_key:
+            score += 250
             reasons.append(
-                "聚合键精确匹配："
-                f"{event.aggregation_key or item_key}"
+                "短窗口热更新连续：核心对象重叠："
+                + "、".join(sorted(continuation_subjects))
             )
-
+        if alias_route_key:
+            score += 250
+            reasons.append("命名主体包含：" + "、".join(sorted(activity_aliases)))
+        if matchday_route_key:
+            score += 300
+            reasons.append(
+                "比赛日上下文：同日双方队伍已归入比赛日："
+                + "、".join(sorted(matchday_teams))
+            )
+        if subject_alias_key:
+            score += 250
+            reasons.append("稳定主体同义：" + "、".join(sorted(subject_aliases)))
         within_window, distance = _within_window(item, event)
         if within_window:
             score += 5
             reasons.append(f"发布时间相距 {distance} 天")
-
-        if event.category == item.category:
+        if event.event_kind in kinds:
+            score += 20
+            reasons.append(f"事件事实类型一致：{event.event_kind}")
+        if event.aggregation_strategy in strategies:
             score += 10
-            reasons.append(f"分类一致：{item.category}")
-        elif _category_family(event.category) == _category_family(item.category):
-            score += 10
-            reasons.append(
-                f"分类归一一致：{event.category} / {item.category}"
-            )
-
-        overlapping_entities = sorted(item_entities & _event_entity_names(event))
-        if overlapping_entities:
-            score += min(200, 100 * len(overlapping_entities))
-            reasons.append(
-                "实体重叠召回：" + "、".join(overlapping_entities)
-            )
-
+            reasons.append(f"聚合策略一致：{event.aggregation_strategy}")
+        overlapping = sorted(item_entities & _event_entity_names(event))
+        if overlapping:
+            score += min(200, 100 * len(overlapping))
+            reasons.append("实体重叠：" + "、".join(overlapping))
         title_similarity = _similarity(
-            item.translated_title or item.normalized_title,
-            event.title,
+            item.translated_title or item.normalized_title, event.title
         )
+        semantic_similarity = _similarity(_item_context(item), _event_context(event))
         if title_similarity >= 0.15:
-            score += round(title_similarity * 40, 4)
+            score += title_similarity * 40
             reasons.append(f"标题相似度 {title_similarity:.2f}")
-
-        semantic_similarity = _similarity(
-            _item_context(item),
-            _event_context(event),
-        )
         if semantic_similarity >= 0.12:
-            score += round(semantic_similarity * 100, 4)
-            reasons.append(
-                f"fact_claim语义相似召回 {semantic_similarity:.2f}"
-            )
-
-        has_identity_signal = (
-            supersedes_member
+            score += semantic_similarity * 100
+            reasons.append(f"事实相似度 {semantic_similarity:.2f}")
+        strong_identity = bool(
+            revision_member
             or exact_key
-            or bool(overlapping_entities)
+            or deterministic_route_key
+            or overlapping
+            or semantic_similarity >= 0.25
+            or title_similarity >= 0.35
+        )
+        has_identity = bool(
+            strong_identity
             or semantic_similarity >= 0.12
             or title_similarity >= 0.15
         )
-        if (
-            not forced_candidate
-            and not supersedes_member
-            and not exact_key
-            and not within_window
-        ):
+        if not forced and not has_identity and not within_window:
             continue
-        match_level = "strong" if has_identity_signal else "broad"
-        if not has_identity_signal:
-            reasons.append(
-                "宽召回候选：时间范围相符，交由事件编辑判断别名、父级对象或附属内容关系"
-            )
         candidates.append(
             EventCandidate(
                 event_id=event.id,
-                event_key=event.event_key,
                 aggregation_key=event.aggregation_key,
                 title=event.title,
                 summary=event.summary[:800],
-                category=event.category,
                 core_entities=tuple(sorted(_event_entity_names(event))),
-                event_type=event.event_type,
+                event_kind=event.event_kind,
+                aggregation_strategy=event.aggregation_strategy,
+                product_scope=event.product_scope,
                 lifecycle_status=event.lifecycle_status,
                 credibility_status=event.credibility_status,
                 timeline_nodes=tuple(
@@ -566,21 +653,19 @@ def find_event_candidates(
                             for value in event.messages
                             if value.membership_status == "active"
                         ),
-                        key=lambda value: (
-                            value.source_published_at or value.added_at
-                        ),
+                        key=lambda value: value.source_published_at or value.added_at,
                     )[-5:]
                 ),
                 member_count=sum(
                     message.membership_status == "active"
                     for message in event.messages
                 ),
-                match_level=match_level,
+                match_level="strong" if strong_identity else "broad",
+                deterministic_route_key=deterministic_route_key,
                 score=round(score, 4),
                 reasons=tuple(reasons),
             )
         )
-
     return sorted(
         candidates,
         key=lambda candidate: (

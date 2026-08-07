@@ -40,8 +40,9 @@ export default async function EventPage({
       <article className="event-detail">
         <header className="event-detail-head">
           <div className="event-topline">
-            <span>{event.category}</span>
-            <span>{eventTypeLabel(event.event_type)}</span>
+            <span>{event.product_scope}</span>
+            <span>{eventTypeLabel(event.event_kind)}</span>
+            <span>{event.aggregation_strategy}</span>
             <span>{lifecycleLabel(event.lifecycle_status)}</span>
           </div>
           <h1>{event.title}</h1>
@@ -93,7 +94,7 @@ export default async function EventPage({
           <div className="section-heading"><div><span className="kicker">AUDIT HISTORY</span><h2>Revision 历史</h2></div></div>
           <div className="event-audit-meta">
             <span><GitBranch size={13} /> 当前 Revision {event.current_revision}</span>
-            {event.event_key && <code>{event.event_key}</code>}
+            {event.aggregation_key && <code>{event.aggregation_key}</code>}
           </div>
           {event.revisions.map((revision) => (
             <article key={revision.id}>

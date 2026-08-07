@@ -21,19 +21,22 @@ from app.services.pipeline_execution import (
     PipelineLeaseLost,
     assert_execution_owned,
 )
+from app.services.maintenance import run_daily_maintenance
 from app.services.raw_item_versions import (
     is_latest_normalized_item,
     is_latest_raw_item,
     latest_raw_item_condition,
 )
-from app.services.maintenance import run_daily_maintenance
 from app.workflows.event_aggregation import (
     approve_event_review,
+    resume_event_aggregation,
     start_event_aggregation,
 )
-from app.workflows.reviewed_pipeline import approve_review, start_item_processing
-from app.workflows.reviewed_pipeline import resume_item_processing
-from app.workflows.event_aggregation import resume_event_aggregation
+from app.workflows.reviewed_pipeline import (
+    approve_review,
+    resume_item_processing,
+    start_item_processing,
+)
 
 
 def _worker_id() -> str:
@@ -193,6 +196,9 @@ async def execute_pipeline_job(
             review = _pending_item_review(db, item_run.id)
             if review is None:
                 raise RuntimeError("automatic item run has no pending review")
+            if review.proposal.get("requires_manual_review"):
+                job.current_stage = review.stage
+                return
             job.current_stage = review.stage
             review.decision_source = "automatic"
             review.policy_version = "auto-approve-v1"
@@ -208,7 +214,7 @@ async def execute_pipeline_job(
             raise RuntimeError(
                 f"automatic item run stopped with status={item_run.status}"
             )
-        if item_run.outcome == "irrelevant":
+        if item_run.outcome in {"irrelevant", "insufficient_evidence"}:
             return
 
     db.refresh(raw_item)

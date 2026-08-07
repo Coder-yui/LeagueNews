@@ -24,9 +24,8 @@ from app.services.automatic_pipeline import (
     enqueue_pipeline_job,
     execute_pipeline_job,
 )
-from app.services.event_aggregation import create_event
-from app.services.event_aggregation import add_message_to_event
 from app.services.claims import extract_traceable_claim
+from app.services.event_aggregation import add_message_to_event, create_event
 from app.services.pipeline_execution import (
     PipelineExecutionGuard,
     PipelineLeaseLost,
@@ -62,8 +61,12 @@ def _published_item(
         normalized_title="Correction target",
         normalized_text="Correction target",
         summary="Existing summary",
-        category="news",
         entities=[],
+        primary_topic="other",
+        subtopic="other",
+        source_kind="unknown",
+        information_stage="update",
+        product_scope="lol_pc",
         importance_score=0.5,
         target_language="zh-CN",
         translated_content_blocks=[],
@@ -88,14 +91,18 @@ async def test_event_only_correction_withdraws_membership_but_keeps_message_publ
         normalized_item_id=item.id,
         title="Existing event",
         summary="Existing event summary",
-        category="news",
+        event_kind="other",
+        aggregation_strategy="singleton",
+        product_scope="lol_pc",
     )
     other_event = create_event(
         db,
         normalized_item_id=item.id,
         title="Other event",
         summary="The claim is independently relevant here.",
-        category="news",
+        event_kind="other",
+        aggregation_strategy="singleton",
+        product_scope="lol_pc",
         membership_role="component",
     )
     started: dict[str, object] = {}
@@ -148,7 +155,7 @@ async def test_translation_correction_hides_message_and_restores_context(
         workflow_type="item",
         status="completed",
         outcome="approved",
-        current_stage="item_analysis",
+        current_stage="claim_gen",
         context={
             "approved_media_extraction_ids": [11],
             "approved_translation_proposal": {"translated_title": "old"},
@@ -183,6 +190,63 @@ async def test_translation_correction_hides_message_and_restores_context(
 
 
 @pytest.mark.anyio
+async def test_importance_correction_preserves_relevance_context(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db)
+    run = ProcessingRun(
+        raw_item_id=item.raw_item_id,
+        workflow_type="item",
+        status="completed",
+        outcome="approved",
+        current_stage="claim_gen",
+        context={
+            "evidence_gate": {"decision": "process"},
+            "relevance_decision": {
+                "product_scope": "lol_pc",
+                "is_lol_relevant": True,
+            },
+            "approved_media_extraction_ids": [],
+            "approved_translation_proposal": {"translated_title": "活动"},
+            "approved_fact_proposal": {"title": "活动"},
+            "approved_classification_proposal": {
+                "topic": "activity",
+                "subtopic": "free_reward",
+            },
+        },
+    )
+    db.add(run)
+    db.commit()
+    started: dict[str, object] = {}
+
+    async def fake_start_item(_db: Session, raw_item: RawItem, **kwargs: object):
+        started["raw_item_id"] = raw_item.id
+        started.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(correction_service, "start_item_processing", fake_start_item)
+
+    await correction_service.create_and_start_correction(
+        db,
+        item=item,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="importance",
+            resume_mode="manual",
+            reason="同步新的重要性政策",
+        ),
+    )
+
+    resumed = started["context"]
+    assert isinstance(resumed, dict)
+    assert resumed["evidence_gate"] == {"decision": "process"}
+    assert resumed["relevance_decision"] == {
+        "product_scope": "lol_pc",
+        "is_lol_relevant": True,
+    }
+
+
+@pytest.mark.anyio
 async def test_failed_non_event_correction_keeps_membership_and_claim_projection_consistent(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -197,7 +261,9 @@ async def test_failed_non_event_correction_keeps_membership_and_claim_projection
         normalized_item_id=target.id,
         title="Correction event",
         summary="Two members keep the event visible.",
-        category="news",
+        event_kind="other",
+        aggregation_strategy="singleton",
+        product_scope="lol_pc",
     )
     add_message_to_event(
         db,

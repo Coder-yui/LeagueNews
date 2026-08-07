@@ -11,23 +11,46 @@ class CandidateRejection(BaseModel):
 
 class EventMembershipDraft(BaseModel):
     target: str = Field(min_length=1, max_length=80)
-    event_type: Literal[
-        "transfer_saga",
-        "patch_cycle",
-        "release_saga",
-        "shop_rotation",
-        "daily_matches",
-        "tft_patch",
-        "sr_patch",
-        "major_match",
-        "major_gameplay_change",
-        "dev_preview",
-        "incident",
-        "activity",
-        "qualification_saga",
+    event_kind: Literal[
+        "gameplay_update",
+        "gameplay_release",
+        "cosmetic_release",
+        "roster_change",
+        "esports_match",
+        "esports_schedule",
+        "qualification_change",
+        "commercial_offer",
+        "player_activity",
+        "service_incident",
+        "disciplinary_action",
+        "security_notice",
+        "media_release",
+        "corporate_announcement",
+        "community_activity",
         "other",
     ] = "other"
+    aggregation_strategy: Literal[
+        "timeline",
+        "patch_cycle",
+        "calendar_day",
+        "recurring_window",
+        "release",
+        "singleton",
+    ] = "singleton"
+    product_scope: Literal[
+        "lol_pc",
+        "lol_esports",
+        "tft",
+        "lol_universe",
+        "riot_corporate",
+        "lol_merch_music",
+        "uncertain",
+    ] = "uncertain"
     aggregation_key: str = Field(min_length=1, max_length=255)
+    identity_resolution: Literal[
+        "exact_key", "semantic_candidate", "new_event"
+    ] = "new_event"
+    identity_rationale: str | None = Field(default=None, max_length=500)
     membership_role: Literal["primary", "component", "cross_ref"] = "primary"
     evidence_stance: Literal["supports", "contradicts", "context"] = "supports"
     update_kind: Literal[
@@ -79,7 +102,7 @@ class EventMembershipDraft(BaseModel):
 class EventDecisionDraft(BaseModel):
     memberships: list[EventMembershipDraft] = Field(
         default_factory=list,
-        max_length=4,
+        max_length=12,
     )
     candidate_rejections: list[CandidateRejection] = Field(
         default_factory=list,

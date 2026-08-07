@@ -61,4 +61,16 @@ def test_migration_ledger_is_contiguous_and_self_records_version(
     monkeypatch.setenv("MIGRATIONS_DIR", str(migrations))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "047_add_event_evidence_projection.sql"
+    assert files[-1].name == "055_update_event_market_reach_policy.sql"
+
+
+def test_runtime_compatibility_migration_supports_json_and_jsonb_databases() -> None:
+    migration = (
+        Path(__file__).parents[3]
+        / "infra"
+        / "postgres"
+        / "migrations"
+        / "054_remove_runtime_compatibility_layers.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "json_array_length(original_event_ids::json)" in migration

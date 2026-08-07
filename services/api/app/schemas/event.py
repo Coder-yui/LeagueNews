@@ -6,18 +6,20 @@ from pydantic import BaseModel, Field
 
 class EventSummaryRead(BaseModel):
     id: int
-    event_key: str | None
     aggregation_key: str | None
     title: str
     summary: str
-    category: str
     status: str
-    event_type: str
+    event_kind: str
+    aggregation_strategy: str
+    product_scope: str
     lifecycle_status: str
     credibility_status: str
     credibility_score: float
     importance_score: float
     importance_evidence: list[str]
+    importance_dimensions: dict[str, Any]
+    importance_policy_version: str
     latest_development: str
     independent_source_count: int
     supporting_source_count: int
@@ -33,7 +35,6 @@ class EventSummaryRead(BaseModel):
 
 class EventMessageRead(BaseModel):
     normalized_item_id: int
-    relation_type: str
     membership_role: str
     evidence_stance: str
     is_official_evidence: bool
@@ -41,6 +42,8 @@ class EventMessageRead(BaseModel):
     timeline_note: str
     update_kind: str
     is_significant_update: bool
+    importance_contribution: float
+    importance_contribution_evidence: list[str]
     source_published_at: datetime | None
     added_at: datetime
     title: str

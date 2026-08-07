@@ -5,8 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.content_blocks import has_quoted_post
+from app.content_blocks import has_repost_evidence
 from app.models.event import (
+    Event,
     EventAggregationRun,
     EventMessage,
     EventReviewTask,
@@ -19,16 +20,19 @@ from app.schemas.event_workflow import (
     EventReviewRejection,
 )
 from app.services.event_aggregation import (
+    EventMembershipConflictError,
     add_message_to_event,
     create_event,
 )
 from app.services.event_candidates import (
     aggregation_routes,
-    event_aggregation_policy,
     find_event_candidates,
-    stable_event_key,
+    resolve_aggregation_routes,
 )
-from app.services.event_decision import validate_event_decision_business
+from app.services.event_decision import (
+    stabilize_event_decision,
+    validate_event_decision_business,
+)
 from app.services.llm import LLMClient, execution_metadata
 from app.services.pipeline_execution import (
     PipelineExecutionGuard,
@@ -61,7 +65,7 @@ async def start_event_aggregation(
             EventMessage.membership_status == "active",
         )
     ):
-        raise ValueError("normalized item already belongs to an event")
+        raise ValueError("normalized item already has active event memberships")
     active = db.scalar(
         select(EventAggregationRun).where(
             EventAggregationRun.normalized_item_id == item.id,
@@ -160,6 +164,14 @@ async def resume_event_aggregation(
     return run
 
 
+def _correction_event_ids(
+    correction: PipelineCorrection | None,
+) -> set[int] | None:
+    if correction is None:
+        return None
+    return set(correction.original_event_ids) or None
+
+
 async def _generate_review(
     db: Session,
     run: EventAggregationRun,
@@ -175,18 +187,26 @@ async def _generate_review(
     candidates = find_event_candidates(
         db,
         normalized_item_id=item.id,
-        include_event_ids=set(correction.original_event_ids)
-        if correction is not None and correction.original_event_ids
-        else ({correction.event_id} if correction is not None and correction.event_id is not None else None),
+        include_event_ids=_correction_event_ids(correction),
     )
     candidate_payloads = [asdict(candidate) for candidate in candidates]
+    routes = resolve_aggregation_routes(
+        aggregation_routes(item),
+        candidate_payloads,
+    )
     selected_rules = list(
         db.scalars(
             select(KnowledgeRule)
             .where(
                 KnowledgeRule.knowledge_type == "event_aggregation",
-                KnowledgeRule.is_active.is_(True),
-                KnowledgeRule.scope.in_(["global", item.category]),
+                KnowledgeRule.lifecycle_status == "active",
+                KnowledgeRule.scope.in_(
+                    [
+                        "global",
+                        f"topic:{item.primary_topic}",
+                        f"subtopic:{item.subtopic}",
+                    ]
+                ),
             )
             .order_by(KnowledgeRule.updated_at.desc())
         )
@@ -199,11 +219,16 @@ async def _generate_review(
         "original_title": item.raw_item.display_title,
         "original_content_blocks": item.raw_item.content_blocks,
         "translated_content_blocks": item.translated_content_blocks,
-        "category": item.category,
         "entities": item.entities,
-        "content_type": item.content_type,
+        "source_kind": item.source_kind,
+        "information_stage": item.information_stage,
+        "content_form": item.content_form,
         "topic": item.primary_topic,
+        "subtopic": item.subtopic,
+        "product_scope": item.product_scope,
         "temporal": item.facets.get("temporal", {}),
+        "event_assertion": item.facets.get("event_assertion", "asserted"),
+        "event_mentions": item.facets.get("event_mentions", []),
         "fact_claims": [
             {
                 "claim_id": claim.id,
@@ -216,7 +241,8 @@ async def _generate_review(
             for claim in item.claims
             if claim.status == "active"
         ],
-        "importance_score": item.importance_score,
+        "intrinsic_importance_score": item.importance_score,
+        "message_priority_score": item.priority_score,
         "processing_metadata": {
             "analysis_model": item.analysis_model,
             "analysis_version": item.analysis_version,
@@ -227,10 +253,7 @@ async def _generate_review(
         "superseded_normalized_item_ids": superseded_normalized_item_ids(
             db, item
         ),
-        "event_policy": event_aggregation_policy(item),
-        "event_routes": [
-            asdict(route) for route in aggregation_routes(item)
-        ],
+        "event_routes": [asdict(route) for route in routes],
         "source": {
             "source_id": item.raw_item.source_id,
             "source_name": item.raw_item.source.name,
@@ -240,7 +263,7 @@ async def _generate_review(
             ),
             "is_official": item.raw_item.source.is_official,
             "reliability_score": item.raw_item.source.reliability_score,
-            "is_repost": has_quoted_post(item.raw_item.content_blocks),
+            "is_repost": has_repost_evidence(item.raw_item.content_blocks),
         },
         "published_at": (
             item.raw_item.published_at.isoformat()
@@ -250,14 +273,14 @@ async def _generate_review(
     }
     assert_execution_owned(db, execution_guard)
     db.commit()
-    decision = await LLMClient().propose_event(
-        item=item_payload,
-        candidates=candidate_payloads,
-        stable_event_key=stable_event_key(item),
-        knowledge_rules=rules,
-        route_aggregation_keys=[
-            route.aggregation_key for route in aggregation_routes(item)
-        ],
+    decision = (
+        await LLMClient().propose_event(
+            item=item_payload,
+            candidates=candidate_payloads,
+            knowledge_rules=rules,
+        )
+        if routes
+        else EventDecisionDraft()
     )
     run.candidate_snapshot = candidate_payloads
     run.decision_draft = {
@@ -277,7 +300,9 @@ async def _generate_review(
                     "normalized_item_id": item.id,
                     "title": item.translated_title or item.normalized_title,
                     "summary": item.summary,
-                    "category": item.category,
+                    "topic": item.primary_topic,
+                    "subtopic": item.subtopic,
+                    "product_scope": item.product_scope,
                 },
                 "candidates": candidate_payloads,
                 "decision": run.decision_draft,
@@ -302,7 +327,7 @@ def approve_event_review(
         raise ValueError("normalized item was superseded before event review approval")
     if run.normalized_item.publication_status != "published":
         raise ValueError("normalized item was withdrawn before event review approval")
-    decision = validate_event_decision(run, run.decision_draft)
+    decision = validate_event_decision(db, run, run.decision_draft)
     candidate_ids = {
         int(candidate["event_id"]) for candidate in run.candidate_snapshot
     }
@@ -313,46 +338,68 @@ def approve_event_review(
     updated_count = 0
     affected_event_ids = []
     for membership in decision.memberships:
-        existing_event_id = membership.existing_event_id
-        if existing_event_id is None:
-            event = create_event(
-                db,
-                normalized_item_id=run.normalized_item_id,
-                aggregation_key=membership.aggregation_key,
-                title=membership.timeline_note
-                or item.translated_title
-                or item.normalized_title,
-                summary=item.summary,
-                category=item.category,
-                event_type=membership.event_type,
-                lifecycle_status=membership.lifecycle_status or "developing",
-                membership_role=membership.membership_role,
-                evidence_stance=membership.evidence_stance,
-                independence_key=None,
-                timeline_note=membership.timeline_note,
-                update_kind=membership.update_kind,
-                importance_score=item.importance_score,
-                importance_evidence=[
-                    f"由成员消息 {item.id} 的编辑重要性初始化"
-                ],
-                latest_development=membership.timeline_note,
-                change_note=f"创建时间线节点：{membership.timeline_note}",
-                evidence={
-                    "event_run_id": run.id,
-                    "timeline_note": membership.timeline_note,
-                },
-                commit=False,
-            )
-            affected_event_ids.append(event.id)
-            created_count += 1
-            continue
-        if existing_event_id not in candidate_ids:
-            raise ValueError(
-                "decision references an event outside the candidate snapshot"
-            )
+        created_here = False
+        event = db.scalar(
+            select(Event)
+            .where(Event.aggregation_key == membership.aggregation_key)
+            .with_for_update()
+        )
+        existing_event_id = (
+            event.id if event is not None else membership.existing_event_id
+        )
+        if event is None and existing_event_id is None:
+            try:
+                with db.begin_nested():
+                    event = create_event(
+                        db,
+                        normalized_item_id=run.normalized_item_id,
+                        aggregation_key=membership.aggregation_key,
+                        title=membership.timeline_note
+                        or item.translated_title
+                        or item.normalized_title,
+                        summary=item.summary,
+                        event_kind=membership.event_kind,
+                        aggregation_strategy=membership.aggregation_strategy,
+                        product_scope=membership.product_scope,
+                        lifecycle_status=membership.lifecycle_status or "developing",
+                        membership_role=membership.membership_role,
+                        evidence_stance=membership.evidence_stance,
+                        independence_key=None,
+                        timeline_note=membership.timeline_note,
+                        update_kind=membership.update_kind,
+                        latest_development=membership.timeline_note,
+                        change_note=f"创建时间线节点：{membership.timeline_note}",
+                        evidence={
+                            "event_run_id": run.id,
+                            "timeline_note": membership.timeline_note,
+                        },
+                        commit=False,
+                    )
+                    created_here = True
+            except EventMembershipConflictError:
+                event = db.scalar(
+                    select(Event)
+                    .where(Event.aggregation_key == membership.aggregation_key)
+                    .with_for_update()
+                )
+                if event is None:
+                    raise
+            if created_here:
+                affected_event_ids.append(event.id)
+                created_count += 1
+                continue
+            existing_event_id = event.id
+        if event is None and existing_event_id is not None:
+            if existing_event_id not in candidate_ids:
+                raise ValueError(
+                    "decision references an event outside the candidate snapshot"
+                )
+            event = db.get(Event, existing_event_id)
+        if event is None:
+            raise ValueError("target event no longer exists")
         event, added = add_message_to_event(
             db,
-            event_id=existing_event_id,
+            event_id=event.id,
             normalized_item_id=run.normalized_item_id,
             lifecycle_status=membership.lifecycle_status,
             membership_role=membership.membership_role,
@@ -364,10 +411,6 @@ def approve_event_review(
                 "context",
                 "duplicate_evidence",
             },
-            importance_score=item.importance_score,
-            importance_evidence=[
-                f"由成员消息 {item.id} 的编辑重要性更新"
-            ],
             latest_development=membership.timeline_note,
             change_note=f"时间线节点：{membership.timeline_note}",
             evidence={
@@ -377,7 +420,8 @@ def approve_event_review(
             commit=False,
         )
         if not added:
-            raise ValueError("normalized item was already attached before approval")
+            affected_event_ids.append(event.id)
+            continue
         affected_event_ids.append(event.id)
         updated_count += 1
     if not decision.memberships:
@@ -434,18 +478,54 @@ def approve_event_review(
 
 
 def validate_event_decision(
+    db: Session,
     run: EventAggregationRun,
     value: dict[str, object],
 ) -> EventDecisionDraft:
     """Apply the same deterministic candidate and routing rules to every decision source."""
     decision = EventDecisionDraft.model_validate(value)
-    allowed_keys = {route.aggregation_key for route in aggregation_routes(run.normalized_item)}
+    routes = resolve_aggregation_routes(
+        aggregation_routes(run.normalized_item),
+        run.candidate_snapshot,
+    )
+    routes_by_key = {
+        route.aggregation_key: route
+        for route in routes
+        if route.aggregation_key is not None
+    }
+    creatable_keys = {
+        key
+        for key, route in routes_by_key.items()
+        if route.creation_policy != "existing_only"
+    }
     item = run.normalized_item
+    item_payload = {
+        "title": item.translated_title or item.normalized_title,
+        "summary": item.summary,
+        "information_stage": item.information_stage,
+        "content_form": item.content_form,
+        "product_scope": item.product_scope,
+        "event_assertion": item.facets.get("event_assertion", "asserted"),
+        "event_mentions": item.facets.get("event_mentions", []),
+        "event_routes": [asdict(route) for route in routes],
+    }
+    decision = stabilize_event_decision(
+        decision,
+        item=item_payload,
+        candidates=list(run.candidate_snapshot),
+    )
+    for membership in decision.memberships:
+        route = routes_by_key.get(membership.aggregation_key)
+        if route is None:
+            continue
+        membership.event_kind = route.event_kind
+        membership.aggregation_strategy = route.aggregation_strategy
+        membership.product_scope = route.product_scope
     error = validate_event_decision_business(
         decision,
-        item={"event_policy": event_aggregation_policy(item)},
+        item=item_payload,
         candidates=list(run.candidate_snapshot),
-        allowed_new_keys=allowed_keys,
+        allowed_new_keys=creatable_keys,
     )
     if error:
         raise ValueError(error)
@@ -479,7 +559,6 @@ def reject_event_review(
                 },
                 source_event_review_id=review.id,
                 lifecycle_status="draft",
-                is_active=False,
             )
         )
     db.commit()

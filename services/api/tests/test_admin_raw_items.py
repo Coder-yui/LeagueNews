@@ -5,6 +5,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
 from app.main import app
+from app.models.media_asset import MediaAsset
 from app.models.raw_item import RawItem
 from app.models.source import Source
 
@@ -47,6 +48,56 @@ def test_raw_item_list_exposes_admin_pipeline_projection() -> None:
     assert payload["current_pipeline_stage"] is None
     assert payload["current_pipeline_job_status"] is None
     assert payload["processing_runs"] == []
+
+
+def test_raw_item_list_projects_repaired_media_path() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Media Source", connector_type="manual")
+        raw = RawItem(
+            source=source,
+            native_title="Repaired media",
+            content_blocks=[
+                {
+                    "id": "b0001",
+                    "type": "image",
+                    "source_url": "https://cdn.example.com/image.jpg",
+                }
+            ],
+        )
+        db.add_all(
+            [
+                source,
+                raw,
+                MediaAsset(
+                    raw_item=raw,
+                    block_index=0,
+                    source_url="https://cdn.example.com/image.jpg",
+                    storage_path="/api/v1/media-assets/files/manual/image.jpg",
+                ),
+            ]
+        )
+        db.commit()
+
+    def override_get_db():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        response = TestClient(app).get("/api/v1/raw-items")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()[0]["content_blocks"][0]["storage_path"] == (
+        "/api/v1/media-assets/files/manual/image.jpg"
+    )
 
 
 def test_raw_item_admin_queries_exclude_superseded_revisions() -> None:

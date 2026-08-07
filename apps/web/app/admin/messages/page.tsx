@@ -8,13 +8,14 @@ import type { PublishedItemPage } from "@/lib/types";
 import { ContentBlocks } from "@/components/admin/ContentBlocks";
 import { ImportanceDimensions } from "@/components/admin/ImportanceDimensions";
 import { PaginationControls } from "@/components/admin/PaginationControls";
-import { relativeTime, score } from "@/components/admin/admin-utils";
+import { pointScore, relativeTime } from "@/components/admin/admin-utils";
 
 const emptyPage: PublishedItemPage = {
   items: [],
   total: 0,
   topic_options: [],
-  content_type_options: [],
+  subtopic_options: [],
+  information_stage_options: [],
 };
 
 export default function MessagesPage() {
@@ -45,7 +46,7 @@ export default function MessagesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const sortBy = importanceSort !== "none" ? "importance" : "time";
+    const sortBy = importanceSort !== "none" ? "priority" : "time";
     const direction = importanceSort !== "none" ? importanceSort : sort;
     const params = new URLSearchParams({
       limit: String(pageSize),
@@ -54,7 +55,7 @@ export default function MessagesPage() {
       sort: direction,
     });
     if (topic !== "all") params.set("primary_topic", topic);
-    if (type !== "all") params.set("content_type", type);
+    if (type !== "all") params.set("subtopic", type);
     if (query) params.set("search", query);
     try {
       setData(
@@ -145,19 +146,19 @@ export default function MessagesPage() {
           </select>
         </label>
         <label>
-          内容类型
+          子主题
           <select
             value={type}
             onChange={(event) => resetPage(() => setType(event.target.value))}
           >
             <option value="all">全部</option>
-            {data.content_type_options.map((value) => (
+            {data.subtopic_options.map((value) => (
               <option key={value}>{value}</option>
             ))}
           </select>
         </label>
         <label>
-          重要性排序
+          展示优先级排序
           <select
             value={importanceSort}
             onChange={(event) => {
@@ -219,7 +220,7 @@ export default function MessagesPage() {
                 <tr>
                   <th>ID</th>
                   <th>标题</th>
-                  <th>内容类型</th>
+                  <th>子主题</th>
                   <th>Topic</th>
                   <th>重要性</th>
                   <th>事件</th>
@@ -238,7 +239,7 @@ export default function MessagesPage() {
                     </td>
                     <td>
                       <span className="admin-badge">
-                        {item.content_type ?? "null"}
+                        {item.subtopic}
                       </span>
                     </td>
                     <td>
@@ -255,7 +256,7 @@ export default function MessagesPage() {
                           } as React.CSSProperties
                         }
                       >
-                        {score(item.importance_score)}
+                        {pointScore(item.importance_score)}
                       </span>
                     </td>
                     <td className="admin-number">
@@ -314,7 +315,7 @@ export default function MessagesPage() {
             <article>
               <header>
                 <span className="admin-badge">
-                  {current.content_type ?? "null"}
+                  {current.subtopic}
                 </span>
                 <span className="admin-badge subtle">
                   {current.primary_topic}

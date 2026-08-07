@@ -8,10 +8,10 @@ import type { EventDetail, EventPage, EventSummary } from "@/lib/types";
 import { EventTimeline } from "@/components/admin/EventTimeline";
 import { MultiMembershipView } from "@/components/admin/MultiMembershipView";
 import { PaginationControls } from "@/components/admin/PaginationControls";
-import { score } from "@/components/admin/admin-utils";
+import { pointScore, score } from "@/components/admin/admin-utils";
 
 type View = "list" | "timeline" | "multi";
-const timelineTypes = new Set(["transfer_saga", "patch_cycle", "release_saga", "dev_preview", "incident", "qualification_saga"]);
+const timelineTypes = new Set(["gameplay_update", "roster_change", "qualification_change", "service_incident", "disciplinary_action", "security_notice"]);
 
 export default function EventsPage() {
   const [data, setData] = useState<EventPage>({ items: [], total: 0 });
@@ -48,7 +48,7 @@ export default function EventsPage() {
       setData(rows);
       setDetails([]);
       setSelectedId(
-        rows.items.find((event) => timelineTypes.has(event.event_type))?.id ??
+        rows.items.find((event) => timelineTypes.has(event.event_kind))?.id ??
           null,
       );
     } catch (value) {
@@ -99,7 +99,7 @@ export default function EventsPage() {
   const grouped = useMemo(() => {
     const map = new Map<string, EventSummary[]>();
     for (const event of events)
-      map.set(event.event_type, [...(map.get(event.event_type) ?? []), event]);
+      map.set(event.event_kind, [...(map.get(event.event_kind) ?? []), event]);
     return map;
   }, [events]);
   const selected = details.find((event) => event.id === selectedId);
@@ -210,6 +210,7 @@ export default function EventsPage() {
                         {event.credibility_status}
                       </span>
                       <span>{score(event.credibility_score)} cred</span>
+                      <span>{pointScore(event.importance_score)} / 100 重要性</span>
                       <span>{event.message_count} 消息</span>
                       <span>{event.independent_source_count} 信源</span>
                       <b>详情 →</b>
@@ -231,10 +232,10 @@ export default function EventsPage() {
                 onChange={(event) => setSelectedId(Number(event.target.value))}
               >
                 {events
-                  .filter((event) => timelineTypes.has(event.event_type))
+                  .filter((event) => timelineTypes.has(event.event_kind))
                   .map((event) => (
                     <option value={event.id} key={event.id}>
-                      #{event.id} · {event.event_type} · {event.title}
+                      #{event.id} · {event.event_kind} · {event.title}
                     </option>
                   ))}
               </select>

@@ -12,17 +12,22 @@ class NormalizedItemRead(BaseModel):
     normalized_title: str
     normalized_text: str
     summary: str
-    category: str
     entities: list[dict[str, Any]]
-    content_type: str | None
     primary_topic: str
+    subtopic: str
     secondary_topics: list[str]
+    source_kind: str
+    information_stage: str
+    content_form: str
+    product_scope: str
     facets: dict[str, Any]
     ontology_version: str
     importance_score: float
     importance_dimensions: dict[str, Any]
     importance_policy_version: str
     importance_calculation: dict[str, Any]
+    priority_score: float
+    priority_calculation: dict[str, Any]
     language: str | None
     source_language: str | None
     target_language: str
@@ -55,21 +60,35 @@ class PublishedMediaExtractionRead(BaseModel):
     translated_data: dict[str, Any]
 
 
+class PublishedEventMembershipRead(BaseModel):
+    event_id: int
+    event_title: str
+    event_kind: str
+    aggregation_strategy: str
+    product_scope: str
+    membership_role: str
+    evidence_stance: str
+
+
 class PublishedItemRead(BaseModel):
     id: int
     raw_item_id: int
     title: str
     summary: str
-    category: str
     entities: list[dict[str, Any]]
-    content_type: str | None
     primary_topic: str
+    subtopic: str
     secondary_topics: list[str]
+    source_kind: str
+    information_stage: str
+    content_form: str
+    product_scope: str
     facets: dict[str, Any]
     ontology_version: str
     importance_score: float
     importance_dimensions: dict[str, Any]
     importance_policy_version: str
+    priority_score: float
     source_id: int
     source_name: str
     source_base_url: str | None
@@ -84,7 +103,7 @@ class PublishedItemRead(BaseModel):
     translation_status: str
     media_extractions: list[PublishedMediaExtractionRead]
     fact_claims: list[dict[str, Any]]
-    event_memberships: list[dict[str, Any]]
+    event_memberships: list[PublishedEventMembershipRead]
     created_at: datetime
 
 
@@ -92,4 +111,5 @@ class PublishedItemPageRead(BaseModel):
     items: list[PublishedItemRead]
     total: int
     topic_options: list[str]
-    content_type_options: list[str]
+    subtopic_options: list[str]
+    information_stage_options: list[str]

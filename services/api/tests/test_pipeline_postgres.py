@@ -23,6 +23,7 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import ProcessingRun, ReviewTask
 from app.services.automatic_pipeline import _claim_next_job
+from app.services.event_candidates import aggregation_routes
 from app.services.pipeline_execution import (
     PipelineExecutionGuard,
     PipelineLeaseLost,
@@ -125,10 +126,20 @@ def test_workers_claim_one_job_once_and_manual_auto_share_active_run(
     not os.getenv("EVENT_TEST_DATABASE_URL"),
     reason="EVENT_TEST_DATABASE_URL is not configured",
 )
-def test_reclaimed_worker_fences_stale_business_writes() -> None:
+def test_reclaimed_worker_fences_stale_business_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = create_engine(os.environ["EVENT_TEST_DATABASE_URL"], pool_pre_ping=True)
     suffix = uuid4().hex
     source_id = raw_item_id = job_id = None
+
+    async def defer_event_aggregation(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.workflows.event_aggregation.start_event_aggregation",
+        defer_event_aggregation,
+    )
     try:
         with Session(engine, expire_on_commit=False) as setup:
             source = Source(
@@ -184,24 +195,76 @@ def test_reclaimed_worker_fences_stale_business_writes() -> None:
                 raw_item_id=raw.id,
                 workflow_type="item",
                 status="awaiting_review",
-                current_stage="item_analysis",
+                current_stage="claim_gen",
                 execution_mode="automatic",
+                context={
+                    "relevance_decision": {"product_scope": "lol_pc"},
+                    "approved_translation_proposal": {
+                        "normalized_text": "Fenced publication",
+                        "source_language": "en",
+                        "target_language": "zh-CN",
+                        "translated_title": "Fenced publication",
+                        "translated_text": "Fenced publication",
+                        "translated_content_blocks": [],
+                        "translation_status": "source_language",
+                        "translation_model": None,
+                        "approved_media_extraction_ids": [],
+                        "translated_media_extractions": [],
+                    },
+                    "approved_fact_proposal": {
+                        "title": "Fenced publication",
+                        "summary": "Only worker B may publish this item.",
+                        "entities": [],
+                    },
+                    "approved_classification_proposal": {
+                        "source_kind": "unknown",
+                        "information_stage": "update",
+                        "content_form": "original",
+                        "topic": "commerce",
+                        "subtopic": "free_rotation",
+                        "secondary_topics": [],
+                        "entity_roles": [],
+                        "temporal": {},
+                        "event_mentions": [
+                            {
+                                "topic": "commerce",
+                                "subtopic": "free_rotation",
+                                "identity_entities": [
+                                    {
+                                        "name": "英雄联盟",
+                                        "canonical_name": "英雄联盟",
+                                        "type": "product",
+                                        "role": "context",
+                                    }
+                                ],
+                                "assertion": "asserted",
+                                "temporal": {},
+                                "membership_role": "primary",
+                            }
+                        ],
+                    },
+                    "approved_importance_proposal": {
+                        "importance_score": 0.5,
+                        "importance_evidence": ["fencing test"],
+                        "importance_dimensions": {},
+                        "importance_policy_version": "test",
+                        "importance_calculation": {},
+                        "priority_score": 0.5,
+                        "priority_calculation": {},
+                    },
+                },
             )
             worker_b.add(run)
             worker_b.flush()
             item_review = ReviewTask(
                 processing_run_id=run.id,
-                stage="item_analysis",
+                stage="claim_gen",
                 status="pending",
                 decision_source="automatic",
                 policy_version="auto-approve-v1",
                 proposal={
-                    "normalized_title": "Fenced publication",
-                    "normalized_text": "Fenced publication",
-                    "summary": "Only worker B may publish this item.",
-                    "category": "news",
-                    "entities": [],
-                    "importance_score": 0.5,
+                    "fact_claims": [],
+                    "attribution": {},
                     "analysis_model": "postgres-fencing-test",
                 },
             )
@@ -222,6 +285,7 @@ def test_reclaimed_worker_fences_stale_business_writes() -> None:
                 )
             )
             assert item is not None
+            route = aggregation_routes(item)[0]
             event_run = EventAggregationRun(
                 normalized_item_id=item.id,
                 status="awaiting_review",
@@ -232,8 +296,10 @@ def test_reclaimed_worker_fences_stale_business_writes() -> None:
                     "memberships": [
                         {
                             "target": "new",
-                            "event_type": "other",
-                            "aggregation_key": f"fencing:{suffix}",
+                            "event_kind": route.event_kind,
+                            "aggregation_strategy": route.aggregation_strategy,
+                            "product_scope": route.product_scope,
+                            "aggregation_key": route.aggregation_key,
                             "membership_role": "primary",
                             "evidence_stance": "supports",
                             "update_kind": "new_fact",
@@ -332,7 +398,7 @@ def test_reclaimed_worker_fences_stale_business_writes() -> None:
             assert verify.scalar(
                 select(func.count(ProcessingCheckpoint.id)).where(
                     ProcessingCheckpoint.raw_item_id == raw_item_id,
-                    ProcessingCheckpoint.stage == "item_analysis",
+                    ProcessingCheckpoint.stage == "claim_gen",
                 )
             ) == 1
             assert verify.scalar(

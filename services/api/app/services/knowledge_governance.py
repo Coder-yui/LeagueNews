@@ -11,7 +11,7 @@ def detect_active_knowledge_conflicts(db: Session) -> list[dict[str, Any]]:
     conflicts: list[dict[str, Any]] = []
     rule_groups: dict[tuple[str, str, str], list[KnowledgeRule]] = defaultdict(list)
     for rule in db.scalars(
-        select(KnowledgeRule).where(KnowledgeRule.is_active.is_(True))
+        select(KnowledgeRule).where(KnowledgeRule.lifecycle_status == "active")
     ):
         constraint_key = rule.correction_data.get("constraint_key")
         if isinstance(constraint_key, str) and constraint_key.strip():

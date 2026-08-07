@@ -40,6 +40,9 @@ def _add_normalized_item(
     revision: int = 1,
     supersedes_raw_item_id: int | None = None,
     quoted_url: str | None = None,
+    primary_topic: str = "patch",
+    subtopic: str = "patch_preview",
+    product_scope: str = "lol_pc",
 ) -> NormalizedItem:
     blocks = [{"id": "b0001", "type": "paragraph", "text": title}]
     if quoted_url:
@@ -62,8 +65,12 @@ def _add_normalized_item(
         normalized_title=title,
         normalized_text=title,
         summary=f"{title} summary",
-        category="版本更新",
         entities=[{"name": "26.13", "type": "patch"}],
+        primary_topic=primary_topic,
+        subtopic=subtopic,
+        source_kind="first_party" if source.is_official else "attributed_report",
+        information_stage="preview",
+        product_scope=product_scope,
         importance_score=0.9,
         language="zh-CN",
         source_language="en",
@@ -106,10 +113,12 @@ def test_create_and_update_event_tracks_membership_time_and_revisions() -> None:
         event = create_event(
             db,
             normalized_item_id=preview.id,
-            event_key="patch:26.13",
+            aggregation_key="patch:lol_pc:26.13",
             title="英雄联盟 26.13 版本预览",
             summary="设计师发布了 26.13 版本预览。",
-            category="版本更新",
+            event_kind="gameplay_update",
+            aggregation_strategy="patch_cycle",
+            product_scope="lol_pc",
             evidence={"match": "patch_key"},
         )
         event, added = add_message_to_event(
@@ -118,7 +127,7 @@ def test_create_and_update_event_tracks_membership_time_and_revisions() -> None:
             normalized_item_id=full_preview.id,
             title="英雄联盟 26.13 版本完整预览",
             summary="设计师补充了 26.13 版本的完整改动。",
-            evidence={"match": "patch:26.13"},
+            evidence={"match": "patch:lol_pc:26.13"},
         )
 
         assert added is True
@@ -158,10 +167,12 @@ def test_repeating_same_message_is_idempotent() -> None:
         event = create_event(
             db,
             normalized_item_id=item.id,
-            event_key="patch:26.13",
+            aggregation_key="patch:lol_pc:26.13",
             title="26.13 版本预览",
             summary="初始摘要",
-            category="版本更新",
+            event_kind="gameplay_update",
+            aggregation_strategy="patch_cycle",
+            product_scope="lol_pc",
         )
 
         repeated, added = add_message_to_event(
@@ -207,7 +218,8 @@ def test_new_raw_revision_replaces_membership_and_event_claim_atomically() -> No
             normalized_item_id=previous.id,
             title="Versioned event",
             summary="Initial",
-            category="测试",
+            event_kind="other",
+            aggregation_strategy="singleton",
         )
         replacement = _add_normalized_item(
             db,
@@ -273,14 +285,16 @@ def test_message_can_belong_to_two_events_with_distinct_roles() -> None:
             normalized_item_id=first.id,
             title="Event One",
             summary="One",
-            category="测试",
+            event_kind="other",
+            aggregation_strategy="singleton",
         )
         event_two = create_event(
             db,
             normalized_item_id=second.id,
             title="Event Two",
             summary="Two",
-            category="测试",
+            event_kind="other",
+            aggregation_strategy="singleton",
         )
 
         _, added = add_message_to_event(
@@ -329,10 +343,11 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
         event = create_event(
             db,
             normalized_item_id=item.id,
-            event_key="test:api",
+            aggregation_key="test:api",
             title="API Event",
             summary="API summary",
-            category="测试",
+            event_kind="other",
+            aggregation_strategy="singleton",
         )
         newer_item = _add_normalized_item(
             db,
@@ -374,7 +389,7 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
         with TestClient(app) as client:
             listing = client.get("/api/v1/events")
             filtered = client.get(
-                "/api/v1/events?event_type=other&lifecycle_status=confirmed&limit=1&offset=0"
+                "/api/v1/events?event_kind=other&lifecycle_status=confirmed&limit=1&offset=0"
             )
             event_page = client.get(f"/api/v1/events/page?search={event_id}")
             message_page = client.get(
@@ -406,7 +421,7 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
         app.dependency_overrides.clear()
 
     assert listing.status_code == 200
-    assert listing.json()[0]["event_key"] == "test:api"
+    assert listing.json()[0]["aggregation_key"] == "test:api"
     assert listing.json()[0]["message_count"] == 3
     assert filtered.status_code == 200
     assert event_page.status_code == 200
@@ -415,7 +430,7 @@ def test_event_read_api_returns_timeline_and_revision_history() -> None:
     assert message_page.status_code == 200
     assert message_page.json()["total"] == 1
     assert message_page.json()["items"][0]["id"] == newer_item_id
-    assert [row["event_key"] for row in filtered.json()] == ["test:api"]
+    assert [row["aggregation_key"] for row in filtered.json()] == ["test:api"]
     assert detail.status_code == 200
     assert detail.json()["revisions"][0]["revision"] == 1
     assert detail.json()["messages"][0]["timeline_note"]
@@ -493,8 +508,9 @@ def test_event_credibility_counts_independent_sources_not_message_volume() -> No
             normalized_item_id=first.id,
             title="传闻：选手加入战队",
             summary="单源转会爆料。",
-            category="转会",
-            event_type="transfer",
+            event_kind="roster_change",
+            aggregation_strategy="timeline",
+            product_scope="lol_esports",
             lifecycle_status="unconfirmed",
         )
         assert event.credibility_status == "single_source"
@@ -542,8 +558,9 @@ def test_event_credibility_caps_nonofficial_source_at_ninety_percent() -> None:
             normalized_item_id=item.id,
             title="传闻事件",
             summary="单一高确定性信源。",
-            category="转会",
-            event_type="transfer",
+            event_kind="roster_change",
+            aggregation_strategy="timeline",
+            product_scope="lol_esports",
             lifecycle_status="unconfirmed",
         )
 
@@ -577,8 +594,9 @@ def test_official_confirmation_overrides_event_credibility() -> None:
             normalized_item_id=rumor.id,
             title="传闻：选手加入战队",
             summary="尚未确认。",
-            category="转会",
-            event_type="transfer",
+            event_kind="roster_change",
+            aggregation_strategy="timeline",
+            product_scope="lol_esports",
             lifecycle_status="unconfirmed",
         )
         event, _ = add_message_to_event(
@@ -605,7 +623,7 @@ def test_official_refutation_and_official_conflict_have_priority() -> None:
         db.commit()
         denial = _add_normalized_item(db, source=official, external_id="denial", title="官方否认", published_at=datetime(2026, 7, 1, tzinfo=UTC))
         support = _add_normalized_item(db, source=official, external_id="support", title="官方支持", published_at=datetime(2026, 7, 2, tzinfo=UTC))
-        event = create_event(db, normalized_item_id=denial.id, title="争议事件", summary="官方否认", category="转会", lifecycle_status="unconfirmed", evidence_stance="contradicts", update_kind="refutation")
+        event = create_event(db, normalized_item_id=denial.id, title="争议事件", summary="官方否认", event_kind="roster_change", aggregation_strategy="timeline", product_scope="lol_esports", lifecycle_status="unconfirmed", evidence_stance="contradicts", update_kind="refutation")
         assert event.credibility_status == "officially_refuted"
         assert event.credibility_score == 0
         event, _ = add_message_to_event(db, event_id=event.id, normalized_item_id=support.id, evidence_stance="supports", update_kind="confirmation")
@@ -624,7 +642,7 @@ def test_official_repost_is_not_official_evidence_and_shared_upstream_is_one_sou
         upstream = "https://x.com/original/status/123?ref=share"
         first = _add_normalized_item(db, source=first_source, external_id="repost-1", title="转载原帖", published_at=datetime(2026, 7, 1, tzinfo=UTC), quoted_url=upstream)
         second = _add_normalized_item(db, source=second_source, external_id="repost-2", title="再次转载", published_at=datetime(2026, 7, 2, tzinfo=UTC), quoted_url="https://www.x.com/original/status/123")
-        event = create_event(db, normalized_item_id=first.id, title="转载事件", summary="两次转载", category="转会", lifecycle_status="unconfirmed")
+        event = create_event(db, normalized_item_id=first.id, title="转载事件", summary="两次转载", event_kind="roster_change", aggregation_strategy="timeline", product_scope="lol_esports", lifecycle_status="unconfirmed")
         event, _ = add_message_to_event(db, event_id=event.id, normalized_item_id=second.id)
         assert event.official_source_count == 0
         assert event.independent_source_count == 1
@@ -640,7 +658,7 @@ def test_three_independent_sources_add_two_tenths_and_conflict_is_disputed() -> 
         db.add_all(sources)
         db.commit()
         items = [_add_normalized_item(db, source=source, external_id=f"s-{index}", title=f"证据 {index}", published_at=datetime(2026, 7, index + 1, tzinfo=UTC)) for index, source in enumerate(sources)]
-        event = create_event(db, normalized_item_id=items[0].id, title="多源事件", summary="多源支持", category="转会", lifecycle_status="unconfirmed")
+        event = create_event(db, normalized_item_id=items[0].id, title="多源事件", summary="多源支持", event_kind="roster_change", aggregation_strategy="timeline", product_scope="lol_esports", lifecycle_status="unconfirmed")
         for item in items[1:3]:
             event, _ = add_message_to_event(db, event_id=event.id, normalized_item_id=item.id)
         assert event.supporting_source_count == 3
@@ -675,11 +693,12 @@ def test_late_schedule_cannot_regress_completed_match_event() -> None:
         event = create_event(
             db,
             normalized_item_id=result.id,
-            event_key="matchday:lpl:2026-07-26",
+            aggregation_key="matchday:lpl:2026-07-26",
             title="7月26日赛果",
             summary="三场比赛已经结束。",
-            category="LPL赛程赛果",
-            event_type="match",
+            event_kind="esports_match",
+            aggregation_strategy="calendar_day",
+            product_scope="lol_esports",
             lifecycle_status="completed",
         )
 
@@ -720,7 +739,9 @@ def test_new_raw_revision_replaces_event_member_without_duplicate_revision() -> 
             normalized_item_id=old.id,
             title="活动开放申请",
             summary="活动已开放申请。",
-            category="社区活动",
+            event_kind="community_activity",
+            aggregation_strategy="singleton",
+            product_scope="lol_pc",
         )
         new = _add_normalized_item(
             db,
@@ -759,7 +780,7 @@ def test_new_raw_revision_replaces_event_member_without_duplicate_revision() -> 
         ) == 1
 
 
-def test_event_importance_uses_highest_significant_member_without_credibility_boost() -> None:
+def test_event_importance_is_led_by_member_contributions() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
@@ -772,6 +793,8 @@ def test_event_importance_uses_highest_significant_member_without_credibility_bo
             external_id="weekly",
             title="神话商城每周轮换",
             published_at=datetime(2026, 7, 23, tzinfo=UTC),
+            primary_topic="commerce",
+            subtopic="shop_rotation",
         )
         daily = _add_normalized_item(
             db,
@@ -779,28 +802,124 @@ def test_event_importance_uses_highest_significant_member_without_credibility_bo
             external_id="daily",
             title="神话商城每日轮换",
             published_at=datetime(2026, 7, 24, tzinfo=UTC),
+            primary_topic="commerce",
+            subtopic="shop_rotation",
         )
         event = create_event(
             db,
             normalized_item_id=weekly.id,
+            aggregation_key="shop_rotation:lol_pc:cn:2026-W30",
             title="2026年第30周国服神话商城轮换",
             summary="本周轮换。",
-            category="国服活动",
-            event_type="activity",
-            importance_score=0.4,
+            event_kind="commercial_offer",
+            aggregation_strategy="recurring_window",
+            product_scope="lol_pc",
         )
         event, _ = add_message_to_event(
             db,
             event_id=event.id,
             normalized_item_id=daily.id,
             is_significant_update=False,
-            importance_score=0.35,
         )
 
         assert weekly.importance_score == 0.9
         assert daily.importance_score == 0.9
         assert event.importance_score == 0.9
+        assert event.importance_dimensions["event_kind"] == "commercial_offer"
+        assert event.importance_dimensions["member_evidence_signal"] == 0.9
+        assert event.importance_dimensions["breadth_boost"] == 0
         assert event.current_revision == 1
+
+        component_event = create_event(
+            db,
+            normalized_item_id=weekly.id,
+            title="轮换中的外观发布",
+            summary="作为商城消息中的独立外观事件。",
+            event_kind="cosmetic_release",
+            aggregation_strategy="release",
+            product_scope="lol_pc",
+            membership_role="component",
+            update_kind="duplicate_evidence",
+        )
+        component = db.get(EventMessage, (component_event.id, weekly.id))
+        assert component.importance_contribution == 0.68
+        assert component_event.importance_score == 0.68
+
+
+def test_global_shop_rotation_is_lower_than_cn_rotation() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Global Rotation", connector_type="x_twitter")
+        db.add(source)
+        db.commit()
+        item = _add_normalized_item(
+            db,
+            source=source,
+            external_id="global-weekly",
+            title="Mythic Shop weekly rotation",
+            published_at=datetime(2026, 7, 23, tzinfo=UTC),
+            primary_topic="commerce",
+            subtopic="shop_rotation",
+        )
+        event = create_event(
+            db,
+            normalized_item_id=item.id,
+            aggregation_key="shop_rotation:lol_pc:global:2026-W30",
+            title="2026 W30 global Mythic Shop rotation",
+            summary="Global rotation.",
+            event_kind="commercial_offer",
+            aggregation_strategy="recurring_window",
+            product_scope="lol_pc",
+        )
+
+        assert item.importance_score == 0.9
+        assert event.importance_score == 0.78
+        assert event.importance_dimensions["market_reach_modifier"] == -0.12
+        assert event.importance_policy_version == "event-importance-v5-component-baselines"
+
+
+def test_event_importance_does_not_increase_with_source_count() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        first_source = Source(name="First report", connector_type="weibo")
+        second_source = Source(name="Second report", connector_type="weibo")
+        db.add_all([first_source, second_source])
+        db.commit()
+        first = _add_normalized_item(
+            db,
+            source=first_source,
+            external_id="first-report",
+            title="同一事件的第一条消息",
+            published_at=datetime(2026, 7, 23, tzinfo=UTC),
+        )
+        second = _add_normalized_item(
+            db,
+            source=second_source,
+            external_id="second-report",
+            title="同一事件的第二条消息",
+            published_at=datetime(2026, 7, 24, tzinfo=UTC),
+        )
+        event = create_event(
+            db,
+            normalized_item_id=first.id,
+            title="同一事件",
+            summary="第一条消息。",
+            event_kind="gameplay_update",
+            aggregation_strategy="timeline",
+            product_scope="lol_pc",
+        )
+        event, _ = add_message_to_event(
+            db,
+            event_id=event.id,
+            normalized_item_id=second.id,
+        )
+
+        assert event.independent_source_count == 2
+        assert event.importance_score == first.importance_score == 0.9
+        assert event.importance_dimensions["breadth_boost"] == 0
+        assert event.importance_policy_version == "event-importance-v5-component-baselines"
 
 
 def test_unconfirmed_timeline_expires_idempotently_without_decay() -> None:
@@ -823,8 +942,9 @@ def test_unconfirmed_timeline_expires_idempotently_without_decay() -> None:
             aggregation_key="WBG:jungle:2026off",
             title="WBG 打野转会",
             summary="WBG 正在考察打野候选。",
-            category="转会",
-            event_type="transfer_saga",
+            event_kind="roster_change",
+            aggregation_strategy="timeline",
+            product_scope="lol_esports",
             lifecycle_status="unconfirmed",
         )
 

@@ -25,17 +25,19 @@ class Event(Base):
     __tablename__ = "events"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    event_key: Mapped[str | None] = mapped_column(
-        String(160), nullable=True, unique=True, index=True
-    )
     aggregation_key: Mapped[str | None] = mapped_column(
         String(255), nullable=True, unique=True, index=True
     )
     title: Mapped[str] = mapped_column(String(500))
     summary: Mapped[str] = mapped_column(Text)
-    category: Mapped[str] = mapped_column(String(60), index=True)
     status: Mapped[str] = mapped_column(String(30), default="active", index=True)
-    event_type: Mapped[str] = mapped_column(String(40), default="other", index=True)
+    event_kind: Mapped[str] = mapped_column(String(50), default="other", index=True)
+    aggregation_strategy: Mapped[str] = mapped_column(
+        String(30), default="singleton"
+    )
+    product_scope: Mapped[str] = mapped_column(
+        String(40), default="uncertain", index=True
+    )
     lifecycle_status: Mapped[str] = mapped_column(
         String(40), default="developing", index=True
     )
@@ -45,6 +47,10 @@ class Event(Base):
     credibility_score: Mapped[float] = mapped_column(Float, default=0)
     importance_score: Mapped[float] = mapped_column(Float, default=0, index=True)
     importance_evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+    importance_dimensions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    importance_policy_version: Mapped[str] = mapped_column(
+        String(80), default="event-importance-v5-component-baselines"
+    )
     latest_development: Mapped[str] = mapped_column(Text, default="")
     independent_source_count: Mapped[int] = mapped_column(Integer, default=0)
     supporting_source_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -109,7 +115,6 @@ class EventMessage(Base):
         ForeignKey("normalized_items.id", ondelete="RESTRICT"),
         primary_key=True,
     )
-    relation_type: Mapped[str] = mapped_column(String(30), default="primary")
     membership_role: Mapped[str] = mapped_column(String(20), default="primary")
     evidence_stance: Mapped[str] = mapped_column(String(20), default="supports")
     independence_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -118,6 +123,10 @@ class EventMessage(Base):
     timeline_note: Mapped[str] = mapped_column(Text, default="")
     update_kind: Mapped[str] = mapped_column(String(30), default="new_fact")
     is_significant_update: Mapped[bool] = mapped_column(Boolean, default=True)
+    importance_contribution: Mapped[float] = mapped_column(Float, default=0)
+    importance_contribution_evidence: Mapped[list[str]] = mapped_column(
+        JSON, default=list
+    )
     source_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
@@ -141,7 +150,10 @@ class EventMessage(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("relation_type = 'primary'", name="ck_event_messages_relation_type"),
+        CheckConstraint(
+            "importance_contribution >= 0 AND importance_contribution <= 1",
+            name="ck_event_messages_importance_contribution",
+        ),
         CheckConstraint(
             "membership_role IN ('primary', 'component', 'cross_ref')",
             name="ck_event_messages_membership_role",

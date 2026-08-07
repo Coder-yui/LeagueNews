@@ -9,7 +9,6 @@ type Rule = {
   scope: string;
   rule_text: string;
   lifecycle_status: string;
-  is_active: boolean;
   version: number;
   updated_at: string;
 };
@@ -70,7 +69,6 @@ export default function KnowledgePage() {
           rule_text: ruleText,
           correction_data: {},
           lifecycle_status: "draft",
-          is_active: false,
         }),
       }).then(() => setRuleText("")),
     );
@@ -97,9 +95,7 @@ export default function KnowledgePage() {
         <div>
           <span className="admin-eyebrow">GOVERNANCE</span>
           <h1>知识库</h1>
-          <p>
-            维护分析规则与翻译术语；历史相关性规则仅供追溯，不再参与新判断。
-          </p>
+          <p>维护分析规则与翻译术语。</p>
         </div>
         <button
           className="admin-primary-button"
@@ -161,9 +157,7 @@ export default function KnowledgePage() {
               <article
                 key={rule.id}
                 className={
-                  !rule.is_active || rule.knowledge_type === "relevance"
-                    ? "inactive"
-                    : ""
+                  rule.lifecycle_status !== "active" ? "inactive" : ""
                 }
               >
                 <header>
@@ -174,12 +168,7 @@ export default function KnowledgePage() {
                   </b>
                 </header>
                 <p>{rule.rule_text}</p>
-                {rule.knowledge_type === "relevance" ? (
-                  <div className="admin-inline-actions">
-                    <span className="admin-muted">历史留档 · 只读</span>
-                  </div>
-                ) : (
-                  <div className="admin-inline-actions">
+                <div className="admin-inline-actions">
                     <button
                       disabled={
                         busy !== null || rule.lifecycle_status !== "draft"
@@ -218,8 +207,7 @@ export default function KnowledgePage() {
                     >
                       激活
                     </button>
-                  </div>
-                )}
+                </div>
               </article>
             ))}
           </div>

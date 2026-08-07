@@ -34,6 +34,10 @@ def _corrected_review_proposal(
     payload: ReviewCorrectionApproval,
 ) -> dict[str, object]:
     corrections = payload.model_dump(exclude={"note"}, exclude_none=True)
+    if review.stage == "fact_classify":
+        primary_topic = corrections.pop("primary_topic", None)
+        if primary_topic is not None:
+            corrections["topic"] = primary_topic
     proposal = {**review.proposal, **corrections}
     if review.stage != "importance" or payload.importance_score is None:
         return proposal
@@ -144,8 +148,6 @@ def list_reviews(
         statement = statement.where(ReviewTask.status == status_filter)
     if stage:
         statement = statement.where(ReviewTask.stage == stage)
-    else:
-        statement = statement.where(ReviewTask.stage != "relevance")
     return list(db.scalars(statement))
 
 
@@ -177,7 +179,6 @@ def list_review_queue(db: Session = Depends(get_db)) -> list[dict[str, object]]:
             )
             .where(
                 ReviewTask.status == "pending",
-                ReviewTask.stage != "relevance",
             )
             .order_by(ReviewTask.created_at.desc())
             .limit(200)

@@ -23,6 +23,7 @@ TIMELINE_PREDICATES = {
     "buffs",
     "nerfs",
     "reworks",
+    "adjusts",
     "adds_mode",
     "wins",
     "loses",

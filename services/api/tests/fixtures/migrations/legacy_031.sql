@@ -103,14 +103,32 @@ CREATE TABLE pipeline_jobs (
 CREATE TABLE processing_runs (
     id serial PRIMARY KEY,
     raw_item_id integer NOT NULL,
+    supersedes_run_id integer,
     workflow_type varchar(40) NOT NULL,
-    status varchar(40) NOT NULL DEFAULT 'running'
+    status varchar(40) NOT NULL DEFAULT 'running',
+    outcome varchar(40),
+    current_stage varchar(40) NOT NULL,
+    execution_mode varchar(20) NOT NULL DEFAULT 'manual',
+    correction_id integer,
+    restart_from_stage varchar(40),
+    context json NOT NULL DEFAULT '{}'::json,
+    error_message text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz
 );
 
 CREATE TABLE review_tasks (
     id serial PRIMARY KEY,
     processing_run_id integer NOT NULL,
-    status varchar(30) NOT NULL DEFAULT 'pending'
+    stage varchar(40) NOT NULL,
+    status varchar(30) NOT NULL DEFAULT 'pending',
+    proposal json NOT NULL DEFAULT '{}'::json,
+    feedback json NOT NULL DEFAULT '{}'::json,
+    decision_source varchar(20) NOT NULL DEFAULT 'manual',
+    policy_version varchar(80),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    resolved_at timestamptz
 );
 
 CREATE TABLE knowledge_rules (
@@ -143,19 +161,117 @@ CREATE TABLE media_assets (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE raw_items (
+    id serial PRIMARY KEY,
+    source_id integer NOT NULL,
+    external_id varchar(255),
+    revision integer NOT NULL DEFAULT 1,
+    content_blocks json NOT NULL DEFAULT '[]'::json
+);
+
 CREATE TABLE normalized_items (
     id serial PRIMARY KEY,
+    raw_item_id integer NOT NULL UNIQUE,
+    normalized_title varchar(500) NOT NULL,
+    normalized_text text NOT NULL,
+    summary text NOT NULL,
     category varchar(60) NOT NULL,
     entities json NOT NULL DEFAULT '[]'::json,
     importance_score double precision NOT NULL,
     credibility varchar(30) NOT NULL,
-    credibility_score double precision NOT NULL
+    credibility_score double precision NOT NULL,
+    credibility_evidence json NOT NULL DEFAULT '[]'::json,
+    language varchar(30),
+    source_language varchar(30),
+    target_language varchar(30) NOT NULL DEFAULT 'zh-CN',
+    translated_title varchar(500),
+    translated_text text,
+    translated_content_blocks json NOT NULL DEFAULT '[]'::json,
+    translation_status varchar(30) NOT NULL DEFAULT 'pending',
+    translation_model varchar(120),
+    analysis_model varchar(120) NOT NULL,
+    analysis_version varchar(30) NOT NULL DEFAULT 'v2',
+    current_revision integer NOT NULL DEFAULT 1,
+    publication_status varchar(30) NOT NULL DEFAULT 'published',
+    withdrawn_at timestamptz,
+    withdrawal_reason text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_normalized_items_publication_status
+        CHECK (publication_status IN ('published', 'withdrawn'))
 );
 
 CREATE TABLE events (
     id serial PRIMARY KEY,
+    event_key varchar(160) UNIQUE,
+    title varchar(500) NOT NULL,
+    summary text NOT NULL,
+    category varchar(60) NOT NULL,
     status varchar(30) NOT NULL DEFAULT 'active',
-    importance_score double precision NOT NULL DEFAULT 0
+    first_published_at timestamptz,
+    last_published_at timestamptz,
+    current_revision integer NOT NULL DEFAULT 1,
+    event_type varchar(40) NOT NULL DEFAULT 'other',
+    lifecycle_status varchar(40) NOT NULL DEFAULT 'developing',
+    credibility_status varchar(40) NOT NULL DEFAULT 'unverified',
+    credibility_score double precision NOT NULL DEFAULT 0,
+    importance_score double precision NOT NULL DEFAULT 0,
+    importance_evidence json NOT NULL DEFAULT '[]'::json,
+    latest_development text NOT NULL DEFAULT '',
+    independent_source_count integer NOT NULL DEFAULT 0,
+    official_source_count integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE pipeline_corrections (
+    id serial PRIMARY KEY,
+    event_id integer,
+    restart_from_stage varchar(40) NOT NULL,
+    CONSTRAINT ck_pipeline_corrections_restart_stage
+        CHECK (
+            restart_from_stage IN (
+                'relevance',
+                'image_ocr',
+                'translation',
+                'item_analysis',
+                'event_decision'
+            )
+        )
+);
+
+CREATE TABLE processing_checkpoints (
+    id serial PRIMARY KEY,
+    stage varchar(40) NOT NULL,
+    CONSTRAINT ck_processing_checkpoints_stage
+        CHECK (
+            stage IN (
+                'relevance',
+                'image_ocr',
+                'translation',
+                'item_analysis',
+                'event_decision'
+            )
+        )
+);
+
+CREATE TABLE event_messages (
+    event_id integer NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    normalized_item_id integer NOT NULL,
+    relation_type varchar(30) NOT NULL DEFAULT 'primary',
+    source_published_at timestamptz,
+    added_at timestamptz NOT NULL DEFAULT now(),
+    evidence_stance varchar(20) NOT NULL DEFAULT 'supports',
+    independence_key varchar(255),
+    is_official_confirmation boolean NOT NULL DEFAULT false,
+    is_significant_update boolean NOT NULL DEFAULT true,
+    membership_status varchar(20) NOT NULL DEFAULT 'active',
+    withdrawn_at timestamptz,
+    withdrawal_reason text,
+    source_correction_id integer,
+    PRIMARY KEY (event_id, normalized_item_id),
+    CONSTRAINT ck_event_messages_evidence_stance
+        CHECK (evidence_stance IN ('supports', 'contradicts', 'context'))
 );
 
 CREATE TABLE event_revisions (
@@ -167,4 +283,14 @@ CREATE TABLE event_revisions (
     change_note text NOT NULL,
     evidence_snapshot json NOT NULL DEFAULT '{}'::json,
     created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE ocr_profiles (
+    id serial PRIMARY KEY,
+    name varchar(120) NOT NULL,
+    parameters json NOT NULL,
+    source_test_run_id integer,
+    is_active boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
 );

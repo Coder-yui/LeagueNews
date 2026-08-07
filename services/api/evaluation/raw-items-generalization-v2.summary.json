@@ -1,0 +1,65 @@
+{
+  "dataset": "raw-items-generalization-v2",
+  "selected": 60,
+  "completed_pipeline": 60,
+  "event_run_outcomes": {
+    "created": 21,
+    "updated": 13,
+    "not_event": 21,
+    "multi_membership": 2,
+    "missing": 3
+  },
+  "active_memberships": 44,
+  "membership_types": {
+    "new": 32,
+    "existing": 12
+  },
+  "rows_with_existing_event": 11,
+  "rows_with_new_event": 27,
+  "rows_with_no_event": 24,
+  "routes_without_membership": 9,
+  "connectors": {
+    "riot_official": 1,
+    "x_twitter": 27,
+    "weibo": 22,
+    "baidu_tieba": 9,
+    "tencent_lol": 1
+  },
+  "topics": {
+    "community": 8,
+    "patch": 3,
+    "esports": 20,
+    "game_mode": 3,
+    "skin": 4,
+    "tft": 3,
+    "champion": 4,
+    "roster": 1,
+    "activity": 4,
+    "service": 1,
+    "commerce": 5,
+    "business": 1,
+    "null": 3
+  },
+  "event_kinds": {
+    "community_activity": 1,
+    "gameplay_update": 6,
+    "esports_match": 15,
+    "gameplay_release": 4,
+    "cosmetic_release": 5,
+    "roster_change": 1,
+    "player_activity": 6,
+    "commercial_offer": 6
+  },
+  "baseline_event_count": 54,
+  "final_event_count": 82,
+  "new_events_created": 28,
+  "manual_review_raw_items": [],
+  "insufficient_evidence_raw_items": [
+    589,
+    690
+  ],
+  "irrelevant_raw_items": [
+    601
+  ],
+  "event_decision_completed": 57
+}

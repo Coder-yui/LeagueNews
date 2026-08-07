@@ -51,8 +51,6 @@ export type PublishedItem = {
   raw_item_id: number;
   title: string;
   summary: string;
-  category: string;
-  content_type?: string | null;
   entities: Array<{
     name?: string;
     display_name?: string;
@@ -62,7 +60,12 @@ export type PublishedItem = {
     role?: "core" | "context" | "affected";
   }>;
   primary_topic: string;
+  subtopic: string;
   secondary_topics: string[];
+  source_kind: string;
+  information_stage: string;
+  content_form: string;
+  product_scope: string;
   facets: Record<string, unknown>;
   ontology_version: string;
   importance_score: number;
@@ -72,6 +75,7 @@ export type PublishedItem = {
     evidence?: string;
   }>;
   importance_policy_version: string;
+  priority_score: number;
   source_id: number;
   source_name: string;
   source_base_url: string | null;
@@ -97,7 +101,9 @@ export type PublishedItem = {
   event_memberships?: Array<{
     event_id: number;
     event_title: string;
-    event_type: string;
+    event_kind: string;
+    aggregation_strategy: string;
+    product_scope: string;
     membership_role: string;
     evidence_stance: string;
   }>;
@@ -134,7 +140,8 @@ export type RawAdminItem = {
   published_at: string | null;
   ingested_at: string;
   normalized_item_id: number | null;
-  content_type: string | null;
+  subtopic: string | null;
+  information_stage: string | null;
   summary: string | null;
   importance_score: number | null;
   current_pipeline_stage: string | null;
@@ -149,14 +156,15 @@ export type RawAdminPage = {
   total_items: number;
   status_counts: Record<"all" | "failed" | "processing" | "completed", number>;
   source_options: { id: number; name: string }[];
-  content_type_options: string[];
+  subtopic_options: string[];
 };
 
 export type PublishedItemPage = {
   items: PublishedItem[];
   total: number;
   topic_options: string[];
-  content_type_options: string[];
+  subtopic_options: string[];
+  information_stage_options: string[];
 };
 
 export type PipelineJob = {
@@ -179,7 +187,7 @@ export type PipelineCorrection = {
   id: number;
   raw_item_id: number;
   normalized_item_id: number | null;
-  event_id: number | null;
+  original_event_ids: number[];
   restart_from_stage: string;
   resume_mode: string;
   reason: string;
@@ -324,18 +332,20 @@ export type ConnectorRunPage = {
 
 export type EventSummary = {
   id: number;
-  event_key: string | null;
-  aggregation_key?: string | null;
+  aggregation_key: string | null;
   title: string;
   summary: string;
-  category: string;
   status: string;
-  event_type: string;
+  event_kind: string;
+  aggregation_strategy: string;
+  product_scope: string;
   lifecycle_status: string;
   credibility_status: string;
   credibility_score: number;
   importance_score: number;
   importance_evidence: string[];
+  importance_dimensions: Record<string, unknown>;
+  importance_policy_version: string;
   latest_development: string;
   independent_source_count: number;
   supporting_source_count: number;
@@ -356,14 +366,15 @@ export type EventPage = {
 
 export type EventMessage = {
   normalized_item_id: number;
-  relation_type: string;
-  membership_role?: string | null;
+  membership_role: string;
   evidence_stance: string;
   is_official_evidence: boolean;
   source_reliability_snapshot: number;
   timeline_note: string;
   update_kind: string;
   is_significant_update: boolean;
+  importance_contribution: number;
+  importance_contribution_evidence: string[];
   source_published_at: string | null;
   added_at: string;
   title: string;

@@ -40,7 +40,6 @@ def _message_payload(message: EventMessage) -> dict[str, Any]:
     raw_item = item.raw_item
     return {
         "normalized_item_id": item.id,
-        "relation_type": message.relation_type,
         "membership_role": message.membership_role,
         "evidence_stance": message.evidence_stance,
         "is_official_evidence": message.is_official_evidence,
@@ -48,6 +47,10 @@ def _message_payload(message: EventMessage) -> dict[str, Any]:
         "timeline_note": message.timeline_note,
         "update_kind": message.update_kind,
         "is_significant_update": message.is_significant_update,
+        "importance_contribution": message.importance_contribution,
+        "importance_contribution_evidence": (
+            message.importance_contribution_evidence
+        ),
         "source_published_at": message.source_published_at,
         "added_at": message.added_at,
         "title": item.translated_title or item.normalized_title,
@@ -66,18 +69,20 @@ def _summary_payload(event: Event) -> dict[str, Any]:
     ]
     return {
         "id": event.id,
-        "event_key": event.event_key,
         "aggregation_key": event.aggregation_key,
         "title": event.title,
         "summary": event.summary,
-        "category": event.category,
         "status": event.status,
-        "event_type": event.event_type,
+        "event_kind": event.event_kind,
+        "aggregation_strategy": event.aggregation_strategy,
+        "product_scope": event.product_scope,
         "lifecycle_status": event.lifecycle_status,
         "credibility_status": event.credibility_status,
         "credibility_score": event.credibility_score,
         "importance_score": event.importance_score,
         "importance_evidence": event.importance_evidence,
+        "importance_dimensions": event.importance_dimensions,
+        "importance_policy_version": event.importance_policy_version,
         "latest_development": event.latest_development,
         "independent_source_count": event.independent_source_count,
         "supporting_source_count": event.supporting_source_count,
@@ -139,15 +144,15 @@ def _get_event(db: Session, event_id: int) -> Event:
 
 @router.get("", response_model=list[EventSummaryRead])
 def list_events(
-    event_type: str | None = None,
+    event_kind: str | None = None,
     lifecycle_status: str | None = None,
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     statement = _event_statement().where(Event.status == "active")
-    if event_type:
-        statement = statement.where(Event.event_type == event_type)
+    if event_kind:
+        statement = statement.where(Event.event_kind == event_kind)
     if lifecycle_status:
         statement = statement.where(Event.lifecycle_status == lifecycle_status)
     statement = statement.order_by(
@@ -160,7 +165,7 @@ def list_events(
 
 @router.get("/page", response_model=EventPageRead)
 def list_events_page(
-    event_type: str | None = None,
+    event_kind: str | None = None,
     lifecycle_status: str | None = None,
     search: str | None = None,
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
@@ -169,8 +174,8 @@ def list_events_page(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     conditions = [Event.status == "active"]
-    if event_type:
-        conditions.append(Event.event_type == event_type)
+    if event_kind:
+        conditions.append(Event.event_kind == event_kind)
     if lifecycle_status:
         conditions.append(Event.lifecycle_status == lifecycle_status)
     if search:

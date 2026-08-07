@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"
+    llm_timeout_seconds: float = 120.0
+    llm_max_retries: int = 1
     media_root: str = "../../apps/web/public/media"
     media_max_bytes: int = 20 * 1024 * 1024
     connector_user_agent: str = "LoLDailyIntel/0.1 (local development)"
@@ -55,6 +57,10 @@ class Settings(BaseSettings):
             )
         if self.rumor_expiry_days <= 0:
             raise ValueError("rumor_expiry_days must be greater than 0")
+        if self.llm_timeout_seconds <= 0:
+            raise ValueError("llm_timeout_seconds must be greater than 0")
+        if self.llm_max_retries < 0:
+            raise ValueError("llm_max_retries cannot be negative")
         if (
             self.pipeline_worker_heartbeat_seconds
             >= self.pipeline_worker_lease_seconds

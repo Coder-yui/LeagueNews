@@ -69,8 +69,13 @@ def test_concurrent_message_update_creates_one_membership_and_revision(
                     normalized_title=f"Concurrency item {index}",
                     normalized_text="test",
                     summary="test",
-                    category="测试",
                     entities=[],
+                    primary_topic="other",
+                    subtopic="other",
+                    source_kind="unknown",
+                    information_stage="update",
+                    content_form="original",
+                    product_scope="uncertain",
                     importance_score=0.5,
                     target_language="zh-CN",
                     translated_content_blocks=[],
@@ -86,10 +91,12 @@ def test_concurrent_message_update_creates_one_membership_and_revision(
             event = create_event(
                 db,
                 normalized_item_id=items[0].id,
-                event_key=f"test:concurrency:{suffix}",
+                aggregation_key=f"test:concurrency:{suffix}",
                 title="Concurrency event",
                 summary="Initial",
-                category="测试",
+                event_kind="other",
+                aggregation_strategy="singleton",
+                product_scope="uncertain",
             )
             event_id = event.id
             second_item_id = items[1].id

@@ -50,7 +50,7 @@ export default function PipelinePage() {
     total_items: 0,
     status_counts: { all: 0, failed: 0, processing: 0, completed: 0 },
     source_options: [],
-    content_type_options: [],
+    subtopic_options: [],
   });
   const [corrections, setCorrections] = useState<PipelineCorrection[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +84,7 @@ export default function PipelinePage() {
       sort,
     });
     if (sourceId !== "all") params.set("source_id", sourceId);
-    if (type !== "all") params.set("content_type", type);
+    if (type !== "all") params.set("subtopic", type);
     if (query) params.set("search", query);
     try {
       const [pageData, correctionRows] = await Promise.all([
@@ -216,13 +216,13 @@ export default function PipelinePage() {
           </select>
         </label>
         <label>
-          内容类型
+          子主题
           <select
             value={type}
             onChange={(event) => resetPage(() => setType(event.target.value))}
           >
             <option value="all">全部</option>
-            {data.content_type_options.map((value) => (
+            {data.subtopic_options.map((value) => (
               <option value={value} key={value}>
                 {value}
               </option>
@@ -309,7 +309,7 @@ export default function PipelinePage() {
                             <strong>
                               {(item.display_title ?? "无标题").slice(0, 40)}
                             </strong>
-                            <small>{item.content_type ?? "未分类"}</small>
+                            <small>{item.subtopic ?? "未分类"}</small>
                           </td>
                           <td
                             title={new Date(

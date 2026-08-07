@@ -1,6 +1,6 @@
 # LoL Daily Intel 开发 Handoff
 
-更新时间：2026-08-03
+更新时间：2026-08-07
 
 本地工作区：`E:\leagueNews`
 
@@ -20,9 +20,9 @@ Source 周期调度或手工触发
   -> 相关性
   -> 可选 Patch 图片 OCR
   -> 翻译
-  -> 摘要、实体、重要性、可信度分析
+  -> 事实分类、摘要、实体、重要性与 Claim
   -> NormalizedItem 发布
-  -> 事件判断与聚合
+  -> 多事件路由、判断与聚合
 ```
 
 当前已经完成：
@@ -34,12 +34,13 @@ Source 周期调度或手工触发
 - 每阶段不可变 checkpoint、失败任务恢复、按阶段撤回、人工/自动重跑。
 - 公开消息列表/详情、事件列表/详情；事件成员按最近发生时间在上展示。
 - 事件稳定键、候选限制、结构化决策、revision 和成员生命周期。
+- 日报/周报生成、公开页面、RSS，以及只读 MCP 查询接口。
 - 管理台审核、自动化采集、采集日志、管线日志、撤回、知识和 OCR Lab。
 - Docker Compose 单机生产架构、Caddy Basic Auth、GHCR 镜像发布、备份和恢复脚本。
 
-尚未实现：
+尚未实现或配置：
 
-- 日报或定时摘要页面。
+- 生产环境日报/周报定时 cutoff 调度；生成服务和公开页面已经实现。
 - embedding/向量召回和大规模事件候选检索。
 - 应用内账号、RBAC 和多管理员操作审计。
 - 外部可观测平台、自动异地备份和恢复演练。
@@ -72,8 +73,10 @@ Source 周期调度或手工触发
 1. `relevance`
 2. 可选 `image_ocr`
 3. `translation`
-4. `item_analysis`
-5. `event_decision`
+4. `fact_classify`
+5. `importance`
+6. `claim_gen`
+7. `event_decision`
 
 自动模式仍创建审核任务记录，并写入：
 
@@ -93,21 +96,29 @@ OCR、翻译、分析或事件判断重新开始。失败任务从失败前最�
 
 ```text
 Published NormalizedItem
-  -> 确定性候选检索（最多 5 个）
-  -> AI 返回 not_event / create / update
+  -> 程序将 event_mentions 归并为主题簇
+  -> 每个主题簇生成一个稳定 event_route
+  -> 确定性候选检索（最多 8 个）
+  -> AI 为既定路由返回 0 至 12 个结构化 memberships
   -> 自动接受或人工审核
-  -> Event + EventMessage + EventRevision 原子提交
+  -> 一个或多个 Event + EventMessage + EventRevision 原子提交
 ```
 
 核心规则：
 
 - 模型不能生成 SQL，也不能更新未提供的候选 ID。
-- 一个 active NormalizedItem 当前只能属于一个主事件。
+- 一个 active NormalizedItem 可以按 `primary`、`component`、`cross_ref` 角色进入多个事件；
+  空 memberships 表示不形成事件。
 - 事件更新时间来自成员 RawItem 的原始发布时间，不使用审核时间代替发生时间。
-- 稳定业务键优先于文本相似度，例如版本事件 `patch:26.13`。
-- 普通 LPL 常规赛按中国时区比赛日使用 `matchday:lpl:YYYY-MM-DD`。
-- 同一天的赛程预告、进行中、赛果和赛后内容属于同一事件。
-- 季后赛后程在能够确定对阵双方时才允许使用单场系列赛事件。
+- 稳定业务键优先于文本相似度，例如版本事件 `patch:lol_pc:26.13`。
+- 版本主题簇中的普通英雄/模式调整作为组件，不另建玩法事件；无版本号热更新在两天短窗口
+  内有核心修复对象重叠时，程序直接续接已有批次，不交给模型决定。
+- LPL/LCK 普通比赛按联赛和日期使用 `matchday:{league}:{date}`，不依赖当天是一场、两场
+  还是三场；缺少联赛字段的普通单局消息按同日同双方唯一命中已有比赛日；后段季后赛、
+  决赛和焦点战才使用 `match:{date}:{team-a}-vs-{team-b}`。
+- `event_kind`、`aggregation_strategy`、`product_scope` 和可新建的稳定键由程序生成，模型
+  只能选择同键候选、可解释的同义实体候选或允许新建的路由。
+- 评论、提醒、否定和仅上下文提及使用 `existing_only`，不能据此创建新事件。
 - 晚采集的早期赛程只能作为 context 加入，不得让 completed 事件回退状态或标题。
 
 ## 5. 采集调度与平台会话
@@ -161,6 +172,8 @@ Published NormalizedItem
 /messages/{id}       消息详情
 /events              事件列表
 /events/{id}         事件详情
+/digests             日报与周报
+/digests/{id}        摘要详情
 /admin                审核与自动化管理台
 ```
 
@@ -176,6 +189,9 @@ API 分组：
 /api/v1/normalized-items
 /api/v1/event-workflows
 /api/v1/events
+/api/v1/digests
+/api/v1/feeds
+/api/v1/mcp
 /api/v1/pipeline
 /api/v1/knowledge
 /api/v1/ocr-lab
@@ -186,7 +202,7 @@ API 分组：
 
 ## 8. 数据库和迁移
 
-当前最新迁移：`047_add_event_evidence_projection.sql`。
+当前最新迁移：`055_update_event_market_reach_policy.sql`。
 
 关键阶段：
 
@@ -198,6 +214,8 @@ API 分组：
 - `032`–`040`：租约、知识治理、来源可靠性、Claim 时间线与编辑指标。
 - `041`–`044`：RawItem 修订链、合并事实分类审核阶段与生产 OCR 基线修复。
 - `045`–`047`：显式来源可靠性、编辑基准重要性与事件证据投影。
+- `048`–`054`：消息受控 ontology、事件身份与多提及路由、成员贡献重要性、外观发布评分，
+  以及当前运行时模型收敛。
 
 本地 `scripts/start.ps1` 和生产 `migrate` 容器现在统一调用
 `services/api/scripts/migrate_database.py`。全新数据库通过当前 SQLAlchemy 模型建表、登记历史
@@ -232,37 +250,7 @@ Basic Auth。仓库文档不记录真实主机 IP、项目标识、账号、Cook
 - [`GOOGLE_CLOUD_FIRST_DEPLOY.md`](GOOGLE_CLOUD_FIRST_DEPLOY.md)
 - [`PRODUCTION_DEPLOYMENT.md`](PRODUCTION_DEPLOYMENT.md)
 
-## 10. 2026-07-28 生产快照
-
-以下是交接时观测值，不应写进业务逻辑：
-
-```text
-sources                 15
-raw_items               205
-published items         190
-active events           25
-active event messages   88
-queued pipeline jobs     0
-running pipeline jobs    0
-failed pipeline jobs     2
-```
-
-已启用周期：
-
-- X：3 / 5
-- 微博：5 / 5
-- 百度贴吧：2 / 2
-- Riot 官网：0 / 1
-- 腾讯官网：0 / 1
-
-微博和贴吧最近一轮均成功。两个失败任务都属于 RawItem #46 的历史重跑：
-
-- job #18：`item_analysis`，旧的商城事件类型校验失败。
-- job #22：`event_decision`，旧的商城重要性区间校验失败。
-
-它们没有造成当前队列积压，但应在管理台确认是否取消旧任务或按当前规则恢复，不要直接删行。
-
-## 11. 当前生产风险与后续事项
+## 10. 当前生产风险与后续事项
 
 1. Basic Auth 只适合单管理员；升级条件见生产部署手册。
 2. 数据库、媒体和平台 Cookie 需要自动异地备份及定期恢复演练。
@@ -312,7 +300,7 @@ pnpm build:web
 1. 在管理台处理 RawItem #46 的两个历史失败 job，确认恢复或取消语义。
 2. 配置每日数据库备份、媒体备份和异地副本，并完成一次恢复演练。
 3. 接入轻量外部监控和磁盘/任务失败告警。
-4. 购买域名，切换 Caddy 到 80/443 自动 HTTPS。
+4. 验证生产 RSS discovery 和只读 MCP 客户端经反向代理的互操作性。
 5. 把部署从 `latest` 改为明确的 `sha-<commit>`。
 6. 观察 1–2 个月采集成功率、LLM 成本和撤回频率，再决定扩容。
-7. 稳定后再开发日报；embedding 和 Agent 类能力继续后置。
+7. 配置日报/周报 cutoff 调度并验证晚到事件会产生 DigestRevision；embedding 继续后置。

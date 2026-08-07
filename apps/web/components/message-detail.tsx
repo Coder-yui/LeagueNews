@@ -176,7 +176,7 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
     <article className="message-detail">
       <header className="message-detail-head">
         <div className="message-detail-kicker">
-          <span>{item.category}</span>
+          <span>{item.primary_topic} · {item.subtopic}</span>
           <span>重要性 {Math.round(item.importance_score * 100)}</span>
         </div>
         <h1>{title}</h1>

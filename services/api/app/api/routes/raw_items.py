@@ -13,6 +13,7 @@ from app.models.workflow import ProcessingRun
 from app.schemas.raw_item import RawItemAdminPageRead, RawItemRead
 from app.schemas.workflow import ProcessingRunRead
 from app.services.llm import LLMAnalysisError, LLMConfigurationError
+from app.services.media_repair import project_media_storage_paths
 from app.services.media_ocr import OCRProcessingError
 from app.services.raw_item_versions import (
     is_latest_raw_item,
@@ -63,7 +64,7 @@ def _raw_item_payloads(
                 "author_name": item.author_name,
                 "language": item.language,
                 "canonical_url": item.canonical_url,
-                "content_blocks": item.content_blocks,
+                "content_blocks": project_media_storage_paths(item),
                 "content_hash": item.content_hash,
                 "content_hash_version": item.content_hash_version,
                 "revision": item.revision,
@@ -74,7 +75,10 @@ def _raw_item_payloads(
                 "source_name": item.source.name,
                 "source_connector_type": item.source.connector_type,
                 "normalized_item_id": normalized.id if normalized else None,
-                "content_type": normalized.content_type if normalized else None,
+                "subtopic": normalized.subtopic if normalized else None,
+                "information_stage": (
+                    normalized.information_stage if normalized else None
+                ),
                 "summary": normalized.summary if normalized else None,
                 "importance_score": normalized.importance_score if normalized else None,
                 "current_pipeline_stage": job.current_stage if job else None,
@@ -95,6 +99,7 @@ def list_raw_items(db: Session = Depends(get_db)) -> list[dict[str, object]]:
         .options(
             selectinload(RawItem.source),
             selectinload(RawItem.normalized_item),
+            selectinload(RawItem.media_assets),
             selectinload(RawItem.processing_runs),
         )
         .where(latest_raw_item_condition())
@@ -109,7 +114,7 @@ def list_raw_items(db: Session = Depends(get_db)) -> list[dict[str, object]]:
 def list_raw_items_admin_page(
     process_status: str = Query(default="failed", pattern="^(all|failed|processing|completed)$"),
     source_id: int | None = None,
-    content_type: str | None = None,
+    subtopic: str | None = None,
     search: str | None = None,
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=25, ge=1, le=100),
@@ -175,11 +180,11 @@ def list_raw_items_admin_page(
     filtered = joins
     if source_id is not None:
         filtered = filtered.where(RawItem.source_id == source_id)
-    if content_type is not None:
+    if subtopic is not None:
         filtered = filtered.where(
-            NormalizedItem.content_type.is_(None)
-            if content_type == "null"
-            else NormalizedItem.content_type == content_type
+            NormalizedItem.subtopic.is_(None)
+            if subtopic == "null"
+            else NormalizedItem.subtopic == subtopic
         )
     if search:
         pattern = f"%{search.strip()}%"
@@ -219,6 +224,7 @@ def list_raw_items_admin_page(
         .options(
             selectinload(RawItem.source),
             selectinload(RawItem.normalized_item),
+            selectinload(RawItem.media_assets),
             selectinload(RawItem.processing_runs),
         )
         .order_by(*ordering)
@@ -234,12 +240,12 @@ def list_raw_items_admin_page(
             .order_by(Source.name)
         )
     ]
-    content_type_options = [
+    subtopic_options = [
         value
         for value in db.scalars(
-            select(NormalizedItem.content_type)
+            select(NormalizedItem.subtopic)
             .distinct()
-            .order_by(NormalizedItem.content_type)
+            .order_by(NormalizedItem.subtopic)
         )
         if value
     ]
@@ -248,7 +254,7 @@ def list_raw_items_admin_page(
         .outerjoin(NormalizedItem, NormalizedItem.raw_item_id == RawItem.id)
         .where(latest_raw_item_condition(), NormalizedItem.id.is_(None))
     ):
-        content_type_options.append("null")
+        subtopic_options.append("null")
     return {
         "items": _raw_item_payloads(db, items),
         "total": total,
@@ -258,7 +264,7 @@ def list_raw_items_admin_page(
             **status_counts,
         },
         "source_options": source_options,
-        "content_type_options": content_type_options,
+        "subtopic_options": subtopic_options,
     }
 
 

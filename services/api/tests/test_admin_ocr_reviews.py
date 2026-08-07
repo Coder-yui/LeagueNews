@@ -183,8 +183,10 @@ def test_review_queue_links_event_review_back_to_raw_item() -> None:
             normalized_title="事件候选",
             normalized_text="事件候选",
             summary="事件候选摘要",
-            category="版本更新",
             entities=[],
+            primary_topic="patch",
+            subtopic="patch_preview",
+            product_scope="lol_pc",
             importance_score=0.8,
             analysis_model="test",
         )

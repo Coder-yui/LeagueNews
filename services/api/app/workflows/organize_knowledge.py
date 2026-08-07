@@ -9,10 +9,7 @@ async def organize_active_knowledge_rules(db: Session) -> list[KnowledgeRule]:
     source_rules = list(
         db.scalars(
             select(KnowledgeRule)
-            .where(
-                KnowledgeRule.is_active.is_(True),
-                KnowledgeRule.knowledge_type != "relevance",
-            )
+            .where(KnowledgeRule.lifecycle_status == "active")
             .order_by(
                 KnowledgeRule.knowledge_type,
                 KnowledgeRule.scope,
@@ -57,7 +54,6 @@ async def organize_active_knowledge_rules(db: Session) -> list[KnowledgeRule]:
                 "organization_only": True,
                 "requires_regression_evaluation": True,
             },
-            is_active=False,
         )
         db.add(rule)
         organized_rules.append(rule)

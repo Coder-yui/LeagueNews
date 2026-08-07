@@ -72,7 +72,8 @@ def list_knowledge_rules(
     if knowledge_type:
         statement = statement.where(KnowledgeRule.knowledge_type == knowledge_type)
     if active is not None:
-        statement = statement.where(KnowledgeRule.is_active.is_(active))
+        condition = KnowledgeRule.lifecycle_status == "active"
+        statement = statement.where(condition if active else ~condition)
     return list(db.scalars(statement))
 
 
@@ -86,12 +87,11 @@ def create_knowledge_rule(
     db: Session = Depends(get_db),
 ) -> KnowledgeRule:
     values = payload.model_dump()
-    if values["lifecycle_status"] != "draft" or values["is_active"]:
+    if values["lifecycle_status"] != "draft":
         raise HTTPException(
             status_code=409,
             detail="new knowledge rules must start as draft",
         )
-    values["is_active"] = False
     rule = KnowledgeRule(**values)
     db.add(rule)
     db.commit()
@@ -130,11 +130,6 @@ def update_knowledge_rule(
     rule = db.get(KnowledgeRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="knowledge rule not found")
-    if rule.knowledge_type == "relevance":
-        raise HTTPException(
-            status_code=409,
-            detail="historical relevance rules are read-only",
-        )
     updates = payload.model_dump(exclude_unset=True)
     target_lifecycle = updates.get("lifecycle_status")
     evaluation_summary = updates.get(
@@ -150,15 +145,9 @@ def update_knowledge_rule(
             status_code=409,
             detail="only evaluated rules can be promoted to active",
         )
-    if updates.get("is_active") is True and rule.lifecycle_status != "evaluated":
-        raise HTTPException(
-            status_code=409,
-            detail="only evaluated rules can be activated",
-        )
     for field, value in updates.items():
         setattr(rule, field, value)
     if "lifecycle_status" in updates:
-        rule.is_active = rule.lifecycle_status == "active"
         now = datetime.now(UTC)
         if rule.lifecycle_status == "evaluated":
             rule.evaluated_at = now
@@ -166,8 +155,6 @@ def update_knowledge_rule(
             rule.promoted_at = now
         elif rule.lifecycle_status == "retired":
             rule.retired_at = now
-    elif "is_active" in updates:
-        rule.lifecycle_status = "active" if rule.is_active else "retired"
     rule.version += 1
     db.commit()
     db.refresh(rule)

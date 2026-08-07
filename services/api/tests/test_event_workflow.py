@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 import pytest
@@ -7,10 +8,12 @@ from sqlalchemy.orm import Session
 import app.models  # noqa: F401
 from app.core.database import Base
 from app.models.event import Event, EventAggregationRun, EventMessage, EventReviewTask
+from app.models.intelligence import Claim
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import KnowledgeRule
+from app.domain.ontology import EventRoute
 from app.schemas.event_workflow import (
     EventDecisionDraft,
     EventMembershipDraft,
@@ -19,6 +22,11 @@ from app.schemas.event_workflow import (
 )
 from app.api.routes.event_workflows import correct_and_approve_event_review
 from app.services.event_aggregation import create_event
+from app.services.event_candidates import resolve_aggregation_routes
+from app.services.event_decision import (
+    stabilize_event_decision,
+    validate_event_decision_business,
+)
 from app.services.llm import LLMClient
 from app.workflows.event_aggregation import (
     approve_event_review,
@@ -51,8 +59,12 @@ def _item(db: Session, source: Source, index: int, title: str) -> NormalizedItem
         normalized_title=title,
         normalized_text=title,
         summary=f"{title} 摘要",
-        category="版本更新",
-        entities=[{"name": "26.13", "type": "patch"}],
+        entities=[{"name": "26.13", "type": "patch", "role": "core"}],
+        primary_topic="patch",
+        subtopic="patch_preview",
+        source_kind="first_party" if source.is_official else "attributed_report",
+        information_stage="preview",
+        product_scope="lol_pc",
         importance_score=0.8,
         target_language="zh-CN",
         translated_title=title,
@@ -60,8 +72,6 @@ def _item(db: Session, source: Source, index: int, title: str) -> NormalizedItem
         translation_status="not_required",
         analysis_model="test",
         analysis_version="test",
-        content_type="official_notice",
-        primary_topic="patch",
     )
     db.add(item)
     db.commit()
@@ -76,6 +86,224 @@ def _mock_decisions(
         return decisions.pop(0)
 
     monkeypatch.setattr(LLMClient, "propose_event", propose_event)
+
+
+def test_semantic_candidate_annotation_binds_single_compatible_route() -> None:
+    decision = EventDecisionDraft(
+        memberships=[
+            EventMembershipDraft(
+                target="existing:145",
+                event_kind="player_activity",
+                aggregation_strategy="timeline",
+                product_scope="lol_pc",
+                aggregation_key="activity:lol_pc:经典战斗之夜",
+                identity_resolution="semantic_candidate",
+                timeline_note="战斗之夜皮肤现已开放领取",
+            )
+        ]
+    )
+    stabilized = stabilize_event_decision(
+        decision,
+        item={
+            "information_stage": "reminder",
+            "event_routes": [
+                {
+                    "event_kind": "player_activity",
+                    "aggregation_strategy": "timeline",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "activity:lol_pc:战斗之夜",
+                    "creation_policy": "existing_only",
+                    "assertion": "asserted",
+                    "membership_role": "primary",
+                }
+            ],
+        },
+        candidates=[
+            {
+                "event_id": 145,
+                "aggregation_key": "activity:lol_pc:经典战斗之夜",
+                "event_kind": "player_activity",
+                "aggregation_strategy": "timeline",
+                "product_scope": "lol_pc",
+                "deterministic_route_key": "activity:lol_pc:战斗之夜",
+                "reasons": ["发布时间相距 1 天", "实体重叠：战斗之夜"],
+            }
+        ],
+    )
+
+    assert len(stabilized.memberships) == 1
+    membership = stabilized.memberships[0]
+    assert membership.target == "existing:145"
+    assert membership.aggregation_key == "activity:lol_pc:战斗之夜"
+    assert membership.identity_resolution == "semantic_candidate"
+    assert membership.identity_rationale == "实体重叠：战斗之夜"
+    assert membership.evidence_stance == "context"
+    assert membership.update_kind == "context"
+
+
+def test_incompatible_cross_key_candidate_cannot_override_stable_identity() -> None:
+    decision = EventDecisionDraft(
+        memberships=[
+            EventMembershipDraft(
+                target="existing:911",
+                event_kind="cosmetic_release",
+                aggregation_strategy="release",
+                product_scope="lol_pc",
+                aggregation_key="release:lol_pc:经典皮肤",
+                identity_resolution="semantic_candidate",
+                identity_rationale="两个对象无关，因此不匹配",
+                timeline_note="经典皮肤随经典模式公布",
+            )
+        ]
+    )
+
+    stabilized = stabilize_event_decision(
+        decision,
+        item={
+            "title": "经典模式公布经典皮肤",
+            "summary": "经典皮肤随经典模式公布。",
+            "information_stage": "announcement",
+            "event_routes": [
+                {
+                    "event_kind": "cosmetic_release",
+                    "aggregation_strategy": "release",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "release:lol_pc:经典皮肤",
+                    "creation_policy": "allow",
+                    "assertion": "asserted",
+                    "membership_role": "component",
+                }
+            ],
+        },
+        candidates=[
+            {
+                "event_id": 911,
+                "aggregation_key": "release:lol_pc:快乐鳃",
+                "event_kind": "cosmetic_release",
+                "aggregation_strategy": "release",
+                "product_scope": "lol_pc",
+                "deterministic_route_key": None,
+                "match_level": "strong",
+                "reasons": ["标题相似度 0.17"],
+            }
+        ],
+    )
+
+    assert len(stabilized.memberships) == 1
+    assert stabilized.memberships[0].target == "new"
+    assert stabilized.memberships[0].aggregation_key == "release:lol_pc:经典皮肤"
+    assert [entry.event_id for entry in stabilized.candidate_rejections] == [911]
+
+
+def test_repost_without_an_exact_event_does_not_create_one() -> None:
+    stabilized = stabilize_event_decision(
+        EventDecisionDraft(),
+        item={
+            "title": "转发玩家同人作品",
+            "summary": "分享玩家作品。",
+            "information_stage": "announcement",
+            "content_form": "repost",
+            "event_routes": [
+                {
+                    "event_kind": "cosmetic_release",
+                    "aggregation_strategy": "release",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "release:lol_pc:剪纸仙灵",
+                    "creation_policy": "existing_only",
+                    "assertion": "asserted",
+                    "membership_role": "primary",
+                }
+            ],
+        },
+        candidates=[],
+    )
+
+    assert stabilized.memberships == []
+
+
+def test_component_scope_is_validated_against_its_route_not_parent_message() -> None:
+    route = {
+        "event_kind": "gameplay_release",
+        "aggregation_strategy": "release",
+        "product_scope": "tft",
+        "aggregation_key": "release:tft:恭喜发财",
+        "creation_policy": "allow",
+        "assertion": "asserted",
+        "membership_role": "component",
+    }
+    candidate = {
+        "event_id": 921,
+        "aggregation_key": "release:tft:恭喜发财",
+        "event_kind": "gameplay_release",
+        "aggregation_strategy": "release",
+        "product_scope": "tft",
+    }
+    decision = EventDecisionDraft(
+        memberships=[
+            EventMembershipDraft(
+                target="existing:921",
+                event_kind="gameplay_release",
+                aggregation_strategy="release",
+                product_scope="tft",
+                aggregation_key="release:tft:恭喜发财",
+                identity_resolution="exact_key",
+                membership_role="component",
+                timeline_note="恭喜发财模式回归",
+            )
+        ]
+    )
+
+    error = validate_event_decision_business(
+        decision,
+        item={"product_scope": "lol_pc", "event_routes": [route]},
+        candidates=[candidate],
+        allowed_new_keys={"release:tft:恭喜发财"},
+    )
+
+    assert error is None
+
+
+def test_resolved_hotfix_route_binds_without_model_selection() -> None:
+    candidates = [
+        {
+            "event_id": 146,
+            "aggregation_key": "hotfix:lol_pc:2026-08-05",
+            "event_kind": "gameplay_update",
+            "aggregation_strategy": "timeline",
+            "product_scope": "lol_pc",
+            "deterministic_route_key": "hotfix:lol_pc:2026-08-06",
+            "reasons": ["短窗口热更新连续：核心对象重叠：佛耶戈"],
+        }
+    ]
+    routes = resolve_aggregation_routes(
+        [
+            EventRoute(
+                event_kind="gameplay_update",
+                aggregation_strategy="timeline",
+                product_scope="lol_pc",
+                aggregation_key="hotfix:lol_pc:2026-08-06",
+            )
+        ],
+        candidates,
+    )
+    stabilized = stabilize_event_decision(
+        EventDecisionDraft(),
+        item={
+            "title": "8月6日不停机更新公告",
+            "summary": "佛耶戈等问题已修复。",
+            "information_stage": "active",
+            "event_routes": [asdict(route) for route in routes],
+        },
+        candidates=candidates,
+    )
+
+    assert len(stabilized.memberships) == 1
+    membership = stabilized.memberships[0]
+    assert membership.target == "existing:146"
+    assert membership.aggregation_key == "hotfix:lol_pc:2026-08-05"
+    assert membership.identity_resolution == "exact_key"
+    assert membership.identity_rationale == "稳定聚合键精确匹配"
+    assert membership.update_kind == "confirmation"
 
 
 @pytest.mark.anyio
@@ -94,8 +322,10 @@ async def test_create_draft_does_not_write_event_until_approved(
                 memberships=[
                     EventMembershipDraft(
                         target="new",
-                        event_type="patch_cycle",
-                        aggregation_key="patch:26.13",
+                        event_kind="gameplay_update",
+                        aggregation_strategy="patch_cycle",
+                        product_scope="lol_pc",
+                        aggregation_key="patch:lol_pc:26.13",
                         timeline_note="版本预览发布",
                         lifecycle_status="developing",
                     )
@@ -116,8 +346,9 @@ async def test_create_draft_does_not_write_event_until_approved(
     approve_event_review(db, review, note="确认")
 
     event = db.scalar(select(Event))
-    assert event.aggregation_key == "patch:26.13"
-    assert event.event_type == "patch_cycle"
+    assert event.aggregation_key == "patch:lol_pc:26.13"
+    assert event.event_kind == "gameplay_update"
+    assert event.aggregation_strategy == "patch_cycle"
     assert event.current_revision == 1
     assert run.status == "completed"
     assert run.outcome == "created"
@@ -135,11 +366,12 @@ async def test_update_can_only_apply_snapshotted_candidate(
     event = create_event(
         db,
         normalized_item_id=preview.id,
-        event_key="patch:26.13",
-        aggregation_key="patch:26.13",
+        aggregation_key="patch:lol_pc:26.13",
         title="26.13 版本预览",
         summary="初始",
-        category="版本更新",
+        event_kind="gameplay_update",
+        aggregation_strategy="patch_cycle",
+        product_scope="lol_pc",
     )
     full = _item(db, source, 1, "26.13 版本完整预览")
     _mock_decisions(
@@ -149,8 +381,10 @@ async def test_update_can_only_apply_snapshotted_candidate(
                 memberships=[
                     EventMembershipDraft(
                         target=f"existing:{event.id}",
-                        event_type="patch_cycle",
-                        aggregation_key="patch:26.13",
+                        event_kind="gameplay_update",
+                        aggregation_strategy="patch_cycle",
+                        product_scope="lol_pc",
+                        aggregation_key="patch:lol_pc:26.13",
                         timeline_note="公布完整数值",
                         lifecycle_status="developing",
                     )
@@ -209,12 +443,12 @@ async def test_correct_and_approve_executes_validated_human_membership_changes(
     db.add(source)
     db.commit()
     first = _item(db, source, 10, "26.13 版本预览")
-    event = create_event(db, normalized_item_id=first.id, aggregation_key="patch:26.13", title="26.13", summary="预览", category="版本更新", event_type="patch_cycle")
+    event = create_event(db, normalized_item_id=first.id, aggregation_key="patch:lol_pc:26.13", title="26.13", summary="预览", event_kind="gameplay_update", aggregation_strategy="patch_cycle", product_scope="lol_pc")
     update = _item(db, source, 11, "26.13 数值争议")
     _mock_decisions(monkeypatch, [EventDecisionDraft(memberships=[])])
     run = await start_event_aggregation(db, update)
     review = db.scalar(select(EventReviewTask).where(EventReviewTask.event_aggregation_run_id == run.id))
-    corrected = EventMembershipDraft(target=f"existing:{event.id}", event_type="patch_cycle", aggregation_key="patch:26.13", membership_role="component", evidence_stance="contradicts", update_kind="correction", timeline_note="人工修正为反对证据")
+    corrected = EventMembershipDraft(target=f"existing:{event.id}", event_kind="gameplay_update", aggregation_strategy="patch_cycle", product_scope="lol_pc", aggregation_key="patch:lol_pc:26.13", membership_role="component", evidence_stance="contradicts", update_kind="correction", timeline_note="人工修正为反对证据")
     correct_and_approve_event_review(review.id, EventReviewCorrectionApproval(decision_draft={"memberships": [corrected.model_dump(mode="json")], "candidate_rejections": []}), db)
     membership = db.get(EventMessage, (event.id, update.id))
     assert run.decision_draft["memberships"][0]["target"] == f"existing:{event.id}"
@@ -233,6 +467,23 @@ async def test_one_message_can_create_primary_and_component_memberships(
     db.add(source)
     db.commit()
     item = _item(db, source, 0, "26.13 更新公告：经典模式上线")
+    item.entities = [
+        {"name": "26.13", "type": "patch", "role": "core"},
+        {"name": "经典模式", "type": "game_mode", "role": "affected"},
+    ]
+    db.add(
+        Claim(
+            normalized_item_id=item.id,
+            subject={"name": "26.13", "type": "patch"},
+            predicate="adds_mode",
+            object_value={
+                "mode": {"name": "经典模式", "type": "game_mode"}
+            },
+            temporal_role="event",
+            extraction_model="test",
+        )
+    )
+    db.commit()
     _mock_decisions(
         monkeypatch,
         [
@@ -240,15 +491,19 @@ async def test_one_message_can_create_primary_and_component_memberships(
                 memberships=[
                     EventMembershipDraft(
                         target="new",
-                        event_type="patch_cycle",
-                        aggregation_key="patch:26.13",
+                        event_kind="gameplay_update",
+                        aggregation_strategy="patch_cycle",
+                        product_scope="lol_pc",
+                        aggregation_key="patch:lol_pc:26.13",
                         membership_role="primary",
                         timeline_note="26.13 更新公告发布",
                     ),
                     EventMembershipDraft(
                         target="new",
-                        event_type="major_gameplay_change",
-                        aggregation_key="gameplay:经典模式",
+                        event_kind="gameplay_release",
+                        aggregation_strategy="release",
+                        product_scope="lol_pc",
+                        aggregation_key="gameplay:lol_pc:经典模式",
                         membership_role="component",
                         timeline_note="经典模式随版本更新上线",
                     ),
@@ -277,9 +532,90 @@ async def test_one_message_can_create_primary_and_component_memberships(
         "component",
     }
     assert {
-        db.get(Event, message.event_id).event_type for message in messages
-    } == {"patch_cycle", "major_gameplay_change"}
+        db.get(Event, message.event_id).event_kind for message in messages
+    } == {"gameplay_update", "gameplay_release"}
     assert run.outcome == "created"
+
+
+@pytest.mark.anyio
+async def test_negated_release_does_not_create_event(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Source(name="Concept", connector_type="manual")
+    db.add(source)
+    db.commit()
+    item = _item(db, source, 10, "概念皮肤不会上线")
+    item.primary_topic = "skin"
+    item.subtopic = "skin_release"
+    item.entities = [
+        {"name": "概念皮肤", "type": "skin", "role": "core"}
+    ]
+    item.facets = {"event_assertion": "negated"}
+    db.commit()
+    _mock_decisions(monkeypatch, [EventDecisionDraft(memberships=[])])
+
+    run = await start_event_aggregation(db, item)
+    review = db.scalar(
+        select(EventReviewTask).where(
+            EventReviewTask.event_aggregation_run_id == run.id
+        )
+    )
+    approve_event_review(db, review, note=None)
+
+    assert run.outcome == "not_event"
+    assert db.scalar(select(func.count(Event.id))) == 0
+
+
+@pytest.mark.anyio
+async def test_event_approval_recovers_when_same_key_appears_after_review(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Source(name="Concurrent", connector_type="manual")
+    db.add(source)
+    db.commit()
+    update = _item(db, source, 10, "26.13 版本补充")
+    _mock_decisions(
+        monkeypatch,
+        [
+            EventDecisionDraft(
+                memberships=[
+                    EventMembershipDraft(
+                        target="new",
+                        event_kind="gameplay_update",
+                        aggregation_strategy="patch_cycle",
+                        product_scope="lol_pc",
+                        aggregation_key="patch:lol_pc:26.13",
+                        timeline_note="26.13 版本补充",
+                    )
+                ]
+            )
+        ],
+    )
+    run = await start_event_aggregation(db, update)
+    review = db.scalar(
+        select(EventReviewTask).where(
+            EventReviewTask.event_aggregation_run_id == run.id
+        )
+    )
+    first = _item(db, source, 11, "26.13 版本预览")
+    event = create_event(
+        db,
+        normalized_item_id=first.id,
+        aggregation_key="patch:lol_pc:26.13",
+        title="26.13 版本",
+        summary="版本预览",
+        event_kind="gameplay_update",
+        aggregation_strategy="patch_cycle",
+        product_scope="lol_pc",
+    )
+
+    approve_event_review(db, review, note=None)
+
+    assert db.get(EventMessage, (event.id, update.id)) is not None
+    assert db.scalar(select(func.count(Event.id))) == 1
+    assert run.outcome == "updated"
 
 
 @pytest.mark.anyio
@@ -299,8 +635,10 @@ async def test_reject_records_knowledge_and_retry_supersedes_run(
                 memberships=[
                     EventMembershipDraft(
                         target="new",
-                        event_type="patch_cycle",
-                        aggregation_key="patch:26.13",
+                        event_kind="gameplay_update",
+                        aggregation_strategy="patch_cycle",
+                        product_scope="lol_pc",
+                        aggregation_key="patch:lol_pc:26.13",
                         timeline_note="纠正后创建版本时间线",
                     )
                 ]

@@ -19,12 +19,9 @@ from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_publication import withdraw_raw_item_media
 from app.workflows.event_aggregation import start_event_aggregation
 from app.workflows.reviewed_pipeline import (
-    CLASSIFY_STAGE,
     CLAIM_STAGE,
     FACT_CLASSIFY_STAGE,
-    FACT_STAGE,
     IMPORTANCE_STAGE,
-    ITEM_STAGE,
     OCR_STAGE,
     RELEVANCE_STAGE,
     TRANSLATION_STAGE,
@@ -65,12 +62,9 @@ def _checkpoint_before(
     predecessor = {
         OCR_STAGE: RELEVANCE_STAGE,
         TRANSLATION_STAGE: OCR_STAGE,
-        FACT_STAGE: TRANSLATION_STAGE,
         FACT_CLASSIFY_STAGE: TRANSLATION_STAGE,
-        CLASSIFY_STAGE: FACT_STAGE,
         IMPORTANCE_STAGE: FACT_CLASSIFY_STAGE,
         CLAIM_STAGE: IMPORTANCE_STAGE,
-        ITEM_STAGE: CLAIM_STAGE,
         EVENT_STAGE: CLAIM_STAGE,
     }.get(restart_from_stage)
     if predecessor is None:
@@ -88,70 +82,70 @@ def _checkpoint_before(
 
 
 def _resume_context(
-    db: Session,
     *,
     source_run: ProcessingRun | None,
     checkpoint: ProcessingCheckpoint | None,
     restart_from_stage: str,
 ) -> dict[str, Any]:
-    if restart_from_stage in {RELEVANCE_STAGE, OCR_STAGE}:
+    if restart_from_stage == RELEVANCE_STAGE:
         return {}
     context = dict(source_run.context) if source_run is not None else {}
+    relevance_context = {
+        key: context[key]
+        for key in ("evidence_gate", "relevance_decision")
+        if key in context
+    }
+    if restart_from_stage == OCR_STAGE:
+        return relevance_context
     if restart_from_stage == TRANSLATION_STAGE:
         extraction_ids = context.get("approved_media_extraction_ids")
         if extraction_ids is None and checkpoint is not None:
             extraction_ids = checkpoint.artifact_references.get(
                 "approved_media_extraction_ids", []
             )
-        return {"approved_media_extraction_ids": extraction_ids or []}
+        return {
+            **relevance_context,
+            "approved_media_extraction_ids": extraction_ids or [],
+        }
     scoring_stages = {
-        FACT_STAGE,
         FACT_CLASSIFY_STAGE,
-        CLASSIFY_STAGE,
         IMPORTANCE_STAGE,
         CLAIM_STAGE,
-        ITEM_STAGE,
     }
     if restart_from_stage in scoring_stages:
         translation = context.get("approved_translation_proposal")
-        if translation is None and restart_from_stage in {
-            FACT_STAGE,
-            FACT_CLASSIFY_STAGE,
-        } and checkpoint is not None:
+        if (
+            translation is None
+            and restart_from_stage == FACT_CLASSIFY_STAGE
+            and checkpoint is not None
+        ):
             translation = checkpoint.output_snapshot
         if translation is None:
             raise ValueError(
                 "no approved translation checkpoint is available; restart from translation"
             )
         result = {
+            **relevance_context,
             "approved_media_extraction_ids": context.get(
                 "approved_media_extraction_ids", []
             ),
             "approved_translation_proposal": translation,
         }
-        if restart_from_stage in {
-            CLASSIFY_STAGE,
-            IMPORTANCE_STAGE,
-            CLAIM_STAGE,
-            ITEM_STAGE,
-        }:
+        if restart_from_stage in {IMPORTANCE_STAGE, CLAIM_STAGE}:
             facts = context.get("approved_fact_proposal")
             if (
                 facts is None
-                and restart_from_stage in {CLASSIFY_STAGE, IMPORTANCE_STAGE}
+                and restart_from_stage == IMPORTANCE_STAGE
                 and checkpoint is not None
             ):
                 facts = checkpoint.output_snapshot
             if facts is None:
                 raise ValueError(
-                    "no approved fact checkpoint is available; restart from fact_extract"
+                    "no approved fact checkpoint is available; "
+                    "restart from fact_classify"
                 )
             result["approved_fact_proposal"] = facts
-        if restart_from_stage in {
-            IMPORTANCE_STAGE,
-            CLAIM_STAGE,
-            ITEM_STAGE,
-        }:
+        if restart_from_stage in {IMPORTANCE_STAGE, CLAIM_STAGE}:
             classification = context.get("approved_classification_proposal")
             if (
                 classification is None
@@ -162,10 +156,10 @@ def _resume_context(
             if classification is None:
                 raise ValueError(
                     "no approved classification checkpoint is available; "
-                    "restart from classify"
+                    "restart from fact_classify"
                 )
             result["approved_classification_proposal"] = classification
-        if restart_from_stage in {CLAIM_STAGE, ITEM_STAGE}:
+        if restart_from_stage == CLAIM_STAGE:
             importance = context.get("approved_importance_proposal")
             if (
                 importance is None
@@ -179,16 +173,6 @@ def _resume_context(
                     "restart from importance"
                 )
             result["approved_importance_proposal"] = importance
-        if restart_from_stage == ITEM_STAGE:
-            claims = context.get("approved_claim_proposal")
-            if claims is None and checkpoint is not None:
-                claims = checkpoint.output_snapshot
-            if claims is None:
-                raise ValueError(
-                    "no approved claim checkpoint is available; "
-                    "restart from claim_gen"
-                )
-            result["approved_claim_proposal"] = claims
         return result
     return {}
 
@@ -295,7 +279,6 @@ async def create_and_start_correction(
         )
     resume_context = (
         _resume_context(
-            db,
             source_run=source_run,
             checkpoint=checkpoint,
             restart_from_stage=payload.restart_from_stage,
@@ -319,9 +302,6 @@ async def create_and_start_correction(
     _supersede_active_work(db, raw_item_id=item.raw_item_id, item_id=item.id)
     correction.original_event_ids = _withdraw_event_membership(
         db, item=item, correction=correction
-    )
-    correction.event_id = (
-        correction.original_event_ids[0] if correction.original_event_ids else None
     )
     if payload.restart_from_stage != EVENT_STAGE:
         item.publication_status = "withdrawn"
@@ -420,7 +400,6 @@ async def recover_failed_job(
             "image_ocr is not applicable to this raw item; restart from translation"
         )
     context = _resume_context(
-        db,
         source_run=source_run,
         checkpoint=checkpoint,
         restart_from_stage=payload.restart_from_stage,

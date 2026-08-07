@@ -8,16 +8,25 @@ from urllib.parse import urlsplit
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.core.config import settings
 from app.domain.importance import (
     AudienceRegion,
     CompetitionRegion,
     ImportanceScale,
-    ImportanceSubtype,
     Prominence,
     SkinTier,
+)
+from app.domain.ontology import (
+    ContentForm,
+    EntityType,
+    EventAssertion,
+    InformationStage,
+    PRIMARY_TOPICS,
+    PrimaryTopic,
+    SourceKind,
+    Subtopic,
 )
 from app.prompts import prompt_registry
 from app.prompts.registry import (
@@ -31,7 +40,14 @@ from app.prompts.registry import (
     TRANSLATION_OPERATION,
 )
 from app.schemas.event_workflow import EventDecisionDraft
-from app.services.event_decision import validate_event_decision_business
+from app.schemas.workflow import (
+    EventMentionDraft,
+    EventMentionTemporalDraft,
+)
+from app.services.event_decision import (
+    stabilize_event_decision,
+    validate_event_decision_business,
+)
 
 
 class LLMConfigurationError(RuntimeError):
@@ -44,70 +60,48 @@ class LLMAnalysisError(RuntimeError):
 
 class ExtractedEntity(BaseModel):
     name: str = Field(min_length=1)
-    type: str = Field(min_length=1)
+    type: EntityType
     canonical_name: str | None = None
 
 
 class FactExtractionResult(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     summary: str = Field(min_length=1)
-    category: str = Field(min_length=1, max_length=60)
-    entities: list[ExtractedEntity] = Field(max_length=5)
+    entities: list[ExtractedEntity] = Field(max_length=8)
 
 
 class ClassifiedEntityRole(BaseModel):
     name: str = Field(min_length=1)
-    type: str = Field(min_length=1)
+    type: EntityType
     role: Literal["core", "context", "affected"]
 
 
-class ClassificationTemporal(BaseModel):
-    is_recurring: bool
-    recurrence_window: Literal["daily", "weekly", "patch_cycle"] | None
-    certainty: Literal["confirmed", "likely", "speculative"]
-
-
 class ClassificationResult(BaseModel):
-    content_type: Literal[
-        "official_fact",
-        "official_notice",
-        "match_result",
-        "insider_rumor",
-        "insider_confirmed",
-        "data_mine",
-        "aggregation",
-        "community_noise",
-    ]
-    topic: Literal[
-        "patch",
-        "champion",
-        "game_mode",
-        "esports",
-        "roster",
-        "skin",
-        "activity",
-        "service",
-        "community",
-        "business",
-        "other",
-    ]
-    secondary_topics: list[
-        Literal[
-            "patch",
-            "champion",
-            "game_mode",
-            "esports",
-            "roster",
-            "skin",
-            "activity",
-            "service",
-            "community",
-            "business",
-            "other",
-        ]
-    ] = Field(default_factory=list, max_length=2)
+    source_kind: SourceKind
+    information_stage: InformationStage
+    content_form: ContentForm
+    topic: PrimaryTopic
+    subtopic: Subtopic
+    secondary_topics: list[PrimaryTopic] = Field(default_factory=list, max_length=2)
     entity_roles: list[ClassifiedEntityRole] = Field(default_factory=list)
-    temporal: ClassificationTemporal
+    event_mentions: list[EventMentionDraft] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+    event_assertion: EventAssertion = "asserted"
+    temporal: EventMentionTemporalDraft
+
+    @field_validator("secondary_topics", mode="before")
+    @classmethod
+    def discard_unknown_secondary_topics(cls, value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[str] = []
+        for entry in value:
+            topic = str(entry).strip().casefold()
+            if topic in PRIMARY_TOPICS and topic not in normalized:
+                normalized.append(topic)
+        return normalized[:2]
 
 
 class FactClaimDraft(BaseModel):
@@ -126,6 +120,7 @@ class FactClaimDraft(BaseModel):
         "buffs",
         "nerfs",
         "reworks",
+        "adjusts",
         "adds_mode",
         "wins",
         "loses",
@@ -139,6 +134,15 @@ class FactClaimDraft(BaseModel):
     temporal_role: Literal["state", "event", "prediction"]
     supersedes_hint: str | None = None
 
+    @field_validator("predicate", mode="before")
+    @classmethod
+    def normalize_predicate(cls, value: object) -> object:
+        return {
+            "changes": "adjusts",
+            "modifies": "adjusts",
+            "updates": "adjusts",
+        }.get(value, value)
+
 
 class ClaimAttributionDraft(BaseModel):
     claimed_by: str = Field(min_length=1)
@@ -147,20 +151,17 @@ class ClaimAttributionDraft(BaseModel):
 
 
 class ClaimGenerationResult(BaseModel):
-    fact_claims: list[FactClaimDraft] = Field(default_factory=list, max_length=20)
+    fact_claims: list[FactClaimDraft] = Field(default_factory=list, max_length=8)
     attribution: ClaimAttributionDraft
 
 
 class ImportanceResult(BaseModel):
-    editorial_subtype: ImportanceSubtype
     scale: ImportanceScale
     audience_region: AudienceRegion
     competition_region: CompetitionRegion
     prominence: Prominence
     skin_tier: SkinTier
     is_bulk_update: bool
-    is_first_concrete_disclosure: bool
-    is_duplicate_or_reminder: bool
     evidence: list[str] = Field(min_length=1, max_length=6)
 
 
@@ -201,9 +202,7 @@ class RelevanceResult(BaseModel):
 
 
 class OrganizedKnowledgeRule(BaseModel):
-    knowledge_type: Literal[
-        "analysis", "translation", "event_aggregation"
-    ]
+    knowledge_type: Literal["analysis", "translation", "event_aggregation"]
     scope: str = Field(min_length=1, max_length=160)
     rule_text: str = Field(min_length=1, max_length=1000)
     source_rule_ids: list[int] = Field(min_length=1)
@@ -282,6 +281,8 @@ class LLMClient:
             AsyncOpenAI(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
+                timeout=settings.llm_timeout_seconds,
+                max_retries=settings.llm_max_retries,
                 http_client=httpx.AsyncClient(trust_env=False),
             )
             if self.enabled
@@ -298,12 +299,18 @@ class LLMClient:
     ) -> FactExtractionResult:
         prompt = (
             "你是英雄联盟中文事实编辑。只根据当前输入提取事实，不判断重要性或可信度。"
-            "输出严格 JSON：title、summary、category、entities。展示文本使用简体中文，"
+            "输出严格 JSON：title、summary、entities。展示文本使用简体中文，"
             "不得遗漏明确的专有名词、数值、时间和事实状态，不得用规则中的旧案例补全事实。"
-            "entities 每项只含 name、type、canonical_name，保留最关键 2-4 个，最多 5 个；"
+            "entities 每项只含 name、type、canonical_name，type 必须是 champion、skin、"
+            "item、rune、patch、game_mode、team、player、coach、person、tournament、"
+            "league、activity、region、organization、product、system、other、unknown 之一。"
+            "保留最关键 2-6 个，最多 8 个。canonical_name 必须是跨消息稳定的身份名："
+            "职业选手优先常用比赛ID，战队优先官方简称，联赛去掉年份、赛段和轮次后缀；"
+            "不确定别名时保留原名，不得猜造。"
             "附属皮肤、礼包、截图或奖励必须同时保留文本明确指向的英雄、模式、赛事、版本或"
-            "活动父实体。批量版本图中的英雄和装备不能全部作为新闻核心实体。"
-            "category 只描述内容类别。approved_rules 仅约束抽取方式，不是事实来源。"
+            "活动父实体。同一公告批量发布同系列皮肤时，必须保留系列/套系父实体，单款皮肤"
+            "作为其组成对象。批量版本图中的英雄和装备不能全部作为新闻核心实体。"
+            "approved_rules 仅约束抽取方式，不是事实来源。"
         )
         return await self._validated_json_completion(
             prompt=prompt,
@@ -325,44 +332,74 @@ class LLMClient:
         extracted_facts: dict[str, object],
         source_context: dict[str, object] | None = None,
     ) -> ClassificationResult:
-        prompt = """你是英雄联盟中文资讯的分类器。只依据当前消息的文本与图片OCR结果分类，
+        prompt = """你是英雄联盟中文资讯的多轴分类器。只依据输入中明确列出的可用证据分类，
 不判断重要性、不判断可信度、不改写事实。
 
-输出严格 JSON：
-{
-  "content_type": <见下方枚举>,
-  "topic": <见下方枚举>,
-  "secondary_topics": [最多2个次要topic],
-  "entity_roles": [
-    {"name": 实体名, "type": 实体类型, "role": "core|context|affected"}
-  ],
-  "temporal": {
-    "is_recurring": bool,        // 是否属于周期性内容(如每日商城/每周活动)
-    "recurrence_window": "daily|weekly|patch_cycle|null",
-    "certainty": "confirmed|likely|speculative"  // 措辞确定性,不等于可信度
-  }
-}
-
-content_type 枚举与判定规则：
-- official_fact: 官方账号发布的既成事实（皮肤已上线、更新已生效）
-- official_notice: 官方预告、活动规则、赛程安排（尚未发生但官方确定）
-- match_result: 已结束比赛的比分结果
-- insider_rumor: 非官方账号的爆料，且措辞含试探性（"考虑中""据说""官宣为准"）
-- insider_confirmed: 非官方账号但措辞确定（"确认""已敲定"），仍非官方
-- data_mine: 测试服/客户端文件挖掘、开发者技术披露
-- aggregation: 明显转载/搬运其他来源的内容（含转发、引用官方原文）
-- community_noise: 抽奖、应援、纯个人感想，无新增事实
-
 判定要点：
-1. content_type 看"谁说的+怎么说的"，topic 看"说的是什么"，二者独立。
-2. certainty 只反映消息本身措辞的确定程度，不要因为是官方就填 confirmed——
+1. source_kind 只表示事实由谁直接声称：first_party 是权利主体直接发布；
+   attributed_report 是第三方报道；data_mined 是数据挖掘；community 是社区表达。
+   官方账号转发别人时不能因账号身份写 first_party。
+2. information_stage 表示事实所处阶段：announcement 是已确认但尚未开始，preview 是版本/测试服预览，
+   active 是已上线或正在发生，result 是已结束结果，update 是同一事件的新进展，correction 是更正，
+   rumor/speculation 是未确认消息，reminder 是无新事实提醒，commentary 是观点。
+   content_form 只表示证据组织方式：original、repost、roundup；推广或讨论不是 content_form。
+3. topic 是宽领域，subtopic 是可执行的细分类。云顶版本、云顶饰品、赛事票务、周免、
+   纪律安全、实体周边必须使用对应受控 subtopic，不得用 other 代替。新皮肤、单独报道的
+   新炫彩，以及国服新增的付费臻彩都使用 topic=skin、subtopic=skin_release；商城轮换、
+   返场和折扣仍使用 commerce 下对应的商城 subtopic。
+4. certainty 只反映消息措辞的确定程度，不等于可信度。
    官方预告未来的事仍是 confirmed（官方有权决定），爆料人的"确认"最多 likely。
-3. entity_roles 的 core 是新闻主角（转会的选手、更新的英雄、上线的皮肤、
+5. entity_roles 的 core 是新闻主角（转会的选手、更新的英雄、上线的皮肤、炫彩或臻彩、
    对阵的战队），context 是背景实体（赛事名、版本号、俱乐部），
    affected 是被波及实体（被修复bug涉及的皮肤）。批量版本图里的英雄列表
    不要全标 core。
-4. is_recurring=true 用于每日神话商城、每周活动这类会周期重复的内容，
-   供下游按时间窗口聚合。"""
+6. event_mentions 列出消息中每个可独立聚合的事件提及，不是关键词列表。每项都使用受控
+   topic/subtopic，并给出最小 identity_entities、独立 assertion、事件日期和成员角色：
+   - 转会按核心选手拆分；同一消息分别谈到多名选手时可有多项；
+   - 单场比赛保留两支队伍及联赛。同一赛程列出多场比赛时，每场各一项；
+   - 同一公告、同一上线批次的系列皮肤/炫彩只列一项，以系列/套系为 core 身份，单款对象
+     不是独立事件；该批外观的售价、签名礼包、销售期和未来商城去向都是发布属性，不另列
+     commerce 事件；赛事冠军、战队和选手等设计背景也不是当前公告主张的新赛事事件。
+     只有 roundup 中彼此独立的发布批次才拆分；
+   - 其他发布保留发布对象；版本保留版本号；活动保留活动或通行证本身；
+   - primary 是消息主事件，component 是同一消息明确发布的附属事件，cross_ref 只用于
+     消息确实提供上下文但不主张该事件的新事实。
+   canonical_name 使用跨语言、简称和全称都稳定的名称。可依据明确队伍归属和稳定领域知识
+   规范化联赛，但不得补充无法判断的参与者。没有可聚合事件时输出空数组。
+7. event_assertion 表示消息主叙事是否主张事件发生；每个 event_mention.assertion 单独表示
+   该事件提及的状态：asserted 是已发生或明确安排，
+   speculative 是爆料、推测或候选方案，negated 是明确表示不会发生/没有上线/已否认，
+   context_only 是只提到对象或发表讨论，没有新的事件主张。传闻仍用 speculative，
+   不要因为未官宣就写 context_only。
+8. temporal.event_date 填事件日期；相对日期可结合 published_at 解析。
+   只有完全没有日期线索时才留空，赛程不得用发布日期代替比赛日期。
+9. 主分类按消息主张的动作而不是附属奖励。只有明确出现通行证、宝典、战令、pass、购买等级、
+   付费解锁等级、等级奖励或里程碑进度机制时，才使用 topic=activity、subtopic=event_pass，皮肤等奖励
+   只作 affected。普通命名活动、口令参与活动、抽奖或概率奖池活动使用 in_game_activity；
+   抽奖活动无论免费还是付费氪金、是否另有累计抽数奖励，都不属于 event_pass，奖池中的皮肤、
+   炫彩或臻彩只作 affected。
+   商城礼包使用 commerce 下对应子主题。只有消息主要宣布新皮肤、新炫彩或国服新臻彩本身发布
+   时才是 skin_release；炫彩即使作为新皮肤的配套内容被单独报道，也属于同一发布档。
+   event_mentions 可同时保留其中明确的附属发布。
+   消息若只在推测或说明既有皮肤的获取方式，并明确指向通行证/宝典/战令，则主分类仍是
+   activity/event_pass，不能因列出皮肤名称改成 skin_release。
+10. 已确定可免费领取、兑换或开箱的皮肤等奖励使用 topic=activity、subtopic=free_reward。
+   第三方通知玩家“现已可领取”且没有新增活动规则时，information_stage=reminder；不能因
+   “开箱”“比惨”等社区化表达改成 community_post。若奖励属于命名活动，event_mentions
+   必须把该活动作为 core 身份实体，以便领取提醒加入原活动，而不是另建奖励事件。付费通行证、
+   商城购买、抽奖和概率奖励不适用本条。
+11. attributed_report 包括第三方转述可识别主体的官宣或报道；只有当前发布源本身就是
+   权利主体时才是 first_party。community 仅用于发布者自己的观点、玩笑或讨论。
+12. 可用证据只包括原文标题、正文和已确认的 designer_patch_changes。输入未提供的媒体内容不得猜测。
+13. “测试服/PBE”只决定证据来源和阶段，不决定内容主题：测试服英雄、装备或模式数值变动使用
+    patch/pbe_change；测试服礼包、商城目录、价格、获取方式、封面或商业物料使用
+    commerce/shop_offer。只有明确宣布玩法可用、上线或发布时才使用 game_mode_release。
+14. 非官方来源发布英雄、装备、模式、皮肤或其他内容更新时，无论措辞是否声称已经确认或上线，
+    都只能作为爆料处理：information_stage=preview、
+    event_assertion=speculative，各对应 event_mention 也必须是 speculative；不能把爆料人的确定语气
+    当作官方确认。只有设计师本人或游戏官方信源直接发布的更新才可作为正式更新。
+15. “不停机更新/无需停机更新/热修复/hotfix”统一使用 topic=patch、subtopic=hotfix，
+    受影响英雄、模式和系统只是 affected 实体，不得把它们改成主分类。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
@@ -370,7 +407,7 @@ content_type 枚举与判定规则：
                 "extracted_facts": extracted_facts,
                 "source_context": source_context or {},
             },
-            max_tokens=900,
+            max_tokens=1800,
             schema=ClassificationResult,
             operation=CLASSIFICATION_OPERATION,
         )
@@ -386,44 +423,24 @@ content_type 枚举与判定规则：
         prompt = """你是英雄联盟资讯编辑，只提取重要性规则需要的结构化特征，
 不输出最终分数，不判断可信度，也不评估行动紧迫性。最终分由程序按编辑政策确定性计算。
 
-editorial_subtype 必须从以下语义中选择最精确的一项：
-- shop_daily_standard：国服神话商城普通每日/每周轮换
-- shop_cosmetic_rotation：神话商城皮肤或炫彩轮换
-- shop_rare_cosmetic：明确涉及稀有、限定或神话炫彩轮换
-- shop_bulk_refresh：随版本批量上新大量商城内容
-- patch_preview：设计师或官方版本改动预览，但不是完整内容
-- patch_full_preview：设计师发布完整版本预览或完整改动表
-- patch_official_notes：正式官方完整版本更新公告
-- patch_hotfix：单英雄、小范围热修复或微补丁
-- new_champion / new_game_mode / major_gameplay_change：新英雄、新模式、重大玩法系统
-- activity_paid：主要是付费或氪金活动
-- activity_standard：普通游戏活动或一般免费奖励
-- activity_free_skin：明确可免费获得皮肤的活动；抽奖但不保证获得时不要选此项
-- riot_corporate / lol_universe：拳头公司事务 / 英雄联盟世界观
-- esports_regular / esports_playoffs / esports_final：赛区常规赛 / 季后赛 / 决赛
-- worlds_regular / worlds_key：世界赛普通比赛 / 焦点、晋级、淘汰或关键场次
-- roster_transfer：选手、教练转会或阵容变动
-- skin_release / service_incident / community / other：皮肤发布、服务故障、社区内容、其他
-
-其他字段：
+字段：
 - scale：minor / standard / major，仅表示同一子类型内的影响规模。
 - audience_region：国服内容用 cn；国服与其他服务器都会生效用 global；
   明确只影响外服、不影响国服用 international_only；信息不足用 unknown。
   Riot/X 来源不等于只影响外服，必须依据消息实际适用范围判断。
 - competition_region：仅赛事使用 lpl/lck/international/other，非赛事用 none。
 - prominence：涉及普通对象用 normal，知名队伍/选手用 notable，明星选手或顶级焦点队伍用 star。
-- skin_tier：仅新皮肤发布使用 standard / legendary / prestige_or_mythic / ultimate，
-  非新皮肤内容使用 none；必须依据消息明确写出的档次，不得凭空推断。
+- skin_tier：仅新皮肤、新炫彩和国服新臻彩发布使用 standard / legendary /
+  prestige_or_mythic / ultimate，非新外观发布使用 none；必须依据消息明确写出的档次，
+  不得凭空推断。"臻彩"不是"至臻皮肤"，仅因臻彩名称不得标为 prestige_or_mythic。
 - is_bulk_update：是否包含大量对象或批量新增。
-- is_first_concrete_disclosure：是否首次给出具体数值、名单、赛果或确定内容。
-- is_duplicate_or_reminder：是否只是重复提醒、无新增事实的转载或重复发布。
 - evidence：1-6条消息中的具体文本依据，不得编造。
 
 注意：
 - “官方”本身不决定重要性；完整版本内容、新英雄、新模式等内容属性才决定高分。
-- 完整预览与普通预览必须区分；单英雄热修复不能误判为完整版本更新。
 - 常规赛须区分赛区；转会须识别明星对象，但不要因消息未官宣而降低重要性，
-  未官宣只影响可信度。"""
+  未官宣只影响可信度。
+- 当前输入没有历史对照，不得猜测“首次披露”或“重复消息”。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
@@ -469,7 +486,7 @@ editorial_subtype 必须从以下语义中选择最精确的一项：
 谓词规范（转会类必须能串成时间线）：
 - transfers_to / considered_for / leaves / stays / retires  (转会)
 - releases / goes_live / previews / delays                   (上线/预告)
-- patches / buffs / nerfs / reworks / adds_mode              (版本)
+- patches / buffs / nerfs / reworks / adjusts / adds_mode    (版本)
 - wins / loses / advances / eliminated                       (赛事)
 - rotates / discounts / gifts                                (商城/活动)
 
@@ -484,8 +501,7 @@ editorial_subtype 必须从以下语义中选择最精确的一项：
 4. temporal_role: prediction 用于未发生的预告/传闻，event 用于已发生，
    state 用于持续状态。这决定时间线上的节点样式。
 5. supersedes_hint 帮助下游把"传闻 A 候选 → 官宣 B 入队"串成同一时间线。
-6. 版本预览图片如果只有增强/削弱名单、没有每个对象的具体数值，不要为每个英雄各写一条。
-   同一分组只生成一条断言，把完整名单放在 object.targets；有具体数值或机制变化时才拆开。"""
+6. 最多输出 8 条。版本和批量活动按变化方向或事实阶段分组，不要为对象列表逐项生成断言。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
@@ -494,7 +510,7 @@ editorial_subtype 必须从以下语义中选择最精确的一项：
                 "classification": classification,
                 "source_context": source_context,
             },
-            max_tokens=1800,
+            max_tokens=900,
             schema=ClaimGenerationResult,
             operation=CLAIM_GENERATION_OPERATION,
         )
@@ -504,118 +520,42 @@ editorial_subtype 必须从以下语义中选择最精确的一项：
         *,
         item: dict[str, object],
         candidates: list[dict[str, object]],
-        stable_event_key: str | None,
         knowledge_rules: list[str],
-        route_aggregation_keys: list[str] | None = None,
     ) -> EventDecisionDraft:
-        candidate_ids = {int(candidate["event_id"]) for candidate in candidates}
-        candidates_by_id = {
-            int(candidate["event_id"]): candidate for candidate in candidates
-        }
-        allowed_new_keys = set(route_aggregation_keys or [])
-        if stable_event_key:
-            allowed_new_keys.add(stable_event_key)
-        match_lifecycle_rank = {
-            "scheduled": 0,
-            "live": 1,
-            "completed": 2,
+        routes = [
+            route
+            for route in item.get("event_routes", [])
+            if isinstance(route, dict) and route.get("aggregation_key")
+        ]
+        allowed_new_keys = {
+            str(route["aggregation_key"])
+            for route in routes
+            if route.get("creation_policy") != "existing_only"
         }
 
         def validate_candidate(result: EventDecisionDraft) -> str | None:
-            shared_error = validate_event_decision_business(
+            if routes:
+                stabilize_event_decision(
+                    result,
+                    item=item,
+                    candidates=candidates,
+                )
+            return validate_event_decision_business(
                 result,
                 item=item,
                 candidates=candidates,
                 allowed_new_keys=allowed_new_keys,
             )
-            if shared_error:
-                return shared_error
-            for membership in result.memberships:
-                existing_event_id = membership.existing_event_id
-                if (
-                    existing_event_id is not None
-                    and existing_event_id not in candidate_ids
-                ):
-                    return "existing target 只能引用输入候选中的 event_id"
-                if (
-                    membership.target == "new"
-                    and allowed_new_keys
-                    and membership.aggregation_key not in allowed_new_keys
-                ):
-                    return "new membership 不能编造程序路由之外的 aggregation_key"
-                exact_candidate = next(
-                    (
-                        candidate
-                        for candidate in candidates
-                        if candidate.get("aggregation_key")
-                        == membership.aggregation_key
-                    ),
-                    None,
-                )
-                if membership.target == "new" and exact_candidate is not None:
-                    return (
-                        f"聚合键 {membership.aggregation_key} 已对应候选事件 "
-                        f"{exact_candidate['event_id']}，不能重复创建"
-                    )
-                candidate = candidates_by_id.get(existing_event_id or -1)
-                if (
-                    candidate is not None
-                    and membership.event_type
-                    in {"daily_matches", "major_match"}
-                    and candidate.get("event_type")
-                    in {"daily_matches", "major_match"}
-                    and membership.lifecycle_status in match_lifecycle_rank
-                    and candidate.get("lifecycle_status") in match_lifecycle_rank
-                    and match_lifecycle_rank[membership.lifecycle_status]
-                    < match_lifecycle_rank[
-                        str(candidate["lifecycle_status"])
-                    ]
-                ):
-                    membership.lifecycle_status = str(
-                        candidate["lifecycle_status"]
-                    )
-                    membership.update_kind = "context"
-                    membership.evidence_stance = "context"
-            policy = item.get("event_policy")
-            if isinstance(policy, dict) and policy.get("policy_type") == (
-                "mythic_shop_rotation"
-            ):
-                eligible = bool(policy.get("event_eligible"))
-                if eligible:
-                    if not result.memberships:
-                        return "国服神话商城轮换必须形成或更新 shop_rotation"
-                    for membership in result.memberships:
-                        membership.event_type = "shop_rotation"
-                        if policy.get("cadence") == "daily":
-                            membership.update_kind = "context"
-                            membership.evidence_stance = "context"
-                elif result.memberships:
-                    return "非国服神话商城轮换不进入事件层"
-            if any(
-                membership.target == "new"
-                for membership in result.memberships
-            ) and candidate_ids:
-                rejected_ids = {
-                    rejection.event_id
-                    for rejection in result.candidate_rejections
-                }
-                unknown_ids = rejected_ids - candidate_ids
-                if unknown_ids:
-                    return "candidate_rejections 只能引用输入候选"
-                missing_ids = candidate_ids - rejected_ids
-                if missing_ids:
-                    return (
-                        "存在候选时选择 new，必须在 candidate_rejections 中逐一说明"
-                        f"为何不是同一事件；缺少 event_id={sorted(missing_ids)}"
-                    )
-            return None
 
-        prompt = """你是英雄联盟事件编辑。给定一条已分析消息（含 fact_claims、content_type、
-topic、entities[].role）和若干候选事件，决定这条消息如何归属。
+        prompt = """你是英雄联盟事件编辑。给定一条已分析消息（含受控分类轴、
+        fact_claims 和 entities[].role）以及若干候选事件，决定这条消息如何归属。
 
 输入：
-- 当前消息：{title, summary, fact_claims, content_type, topic, entities, published_at}
-- 候选事件列表：每个含 {event_id, event_type, title, aggregation_key,
+- 当前消息：{title, summary, fact_claims, source_kind, information_stage,
+  content_form, topic, subtopic, product_scope, entities, event_mentions,
+  event_routes, published_at}
+- 候选事件列表：每个含 {event_id, event_kind, aggregation_strategy,
+  product_scope, title, aggregation_key,
   timeline节点摘要, lifecycle_status, 成员消息数}
 
 输出严格 JSON（一条消息可对多个事件产生 decision）：
@@ -623,8 +563,12 @@ topic、entities[].role）和若干候选事件，决定这条消息如何归属
   "memberships": [
     {
       "target": "existing:{event_id}" | "new",
-      "event_type": <见事件类型枚举>,
+      "event_kind": 事件的事实类型,
+      "aggregation_strategy": 时间线|版本周期|日历日|周期窗口|发布链|单点,
+      "product_scope": 产品范围,
       "aggregation_key": 该事件的聚合键,
+      "identity_resolution": "exact_key|semantic_candidate|new_event",
+      "identity_rationale": 语义同一事件的简短依据或null,
       "membership_role": "primary|component|cross_ref",
       "evidence_stance": "supports|contradicts|context",
       "update_kind": "new_fact|confirmation|refutation|correction|context|duplicate_evidence",
@@ -636,40 +580,54 @@ topic、entities[].role）和若干候选事件，决定这条消息如何归属
 }
 
 归属规则：
-1. 一条消息可同时归属多个事件。典型：官方大版本更新公告 → 以 primary 进入
-   patch_cycle 事件，其"经典模式"子事实以 component 进入 major_gameplay_change 事件。
+1. 一条消息可同时归属多个事件。典型：官方大版本更新公告以 primary 进入
+   gameplay_update + patch_cycle，其新模式子事实以 component 进入
+   gameplay_release + release。
    仅当消息确实包含该事件的核心事实时才归属，不要因沾边就挂靠。
 
-2. 时间线型事件（transfer_saga/patch_cycle/release_saga）：
+2. event_routes 是程序完成主题簇归并后生成的允许路由。事件数量和路由身份已经确定，模型
+   不能根据原始提及数量重新拆分，也不能修改其中的键或三个分类轴：
+   - 同键候选必须选择 existing，并标记 exact_key；不同 product_scope 必须分开
+   - 版本按 product+版本号，转会按年份+选手，活动/发布按命名主体或共同批次，
+     普通比赛日和重大单场分别使用程序给定的身份
+   - 没有同键候选时，若候选与当前路由的 event_kind、aggregation_strategy、product_scope
+     全部相同，且从标题、摘要、核心实体和时间线能判断只是同一对象的跨语言、简称、全称
+     或稳定同义名称差异，可以选择该 existing 候选，标记 semantic_candidate，并在
+     identity_rationale 说明依据。仅有主题相似、共享一个背景实体或时间接近都不够。
+   - 语义上不是同一事件时选择 new_event。不得为了减少事件数量强行语义合并。
+3. aggregation_strategy=timeline/patch_cycle/release 的事件：
    - 同一聚合键的新消息用 update，推进 lifecycle
    - 转会：传闻阶段 lifecycle=unconfirmed 且标题含"传闻"；官方确认→confirmed，
      update_kind=confirmation；官方否认→officially_refuted，update_kind=refutation
-   - 不要把同一转会的不同传闻拆成多个事件——只要聚合键(选手/位置)相同就是同一时间线
+   - 不要把同一选手转会的离队、加盟传闻和官宣拆成多个事件
 
-3. 周期窗口型事件（shop_rotation/daily_matches）：
+4. recurring_window/calendar_day 的事件：
    - 按 aggregation_key 的时间窗口归属：同一周的商城变动进同一事件，
      同一天同一赛区的比赛进同一事件
    - 跨窗口一律新建，不要跨周合并
 
-4. 单点型（major_match）：LPL/LCK总决赛、世界赛关键场单独成事件，
-   即使同一天也不并入 daily_matches
-
-5. certainty=speculative 的爆料只能 supports 一个 unconfirmed 事件，
-   不能直接把事件推进到 confirmed。"""
+5. esports_match 可以是 calendar_day 比赛日或 timeline 重大单场。预告、分场赛果、整日
+   总结和赛后评论使用程序给定的同一键；commentary 只作为 context，不推进已完成事件的
+   生命周期。
+6. certainty=speculative 的爆料只能 supports 一个 unconfirmed 事件，
+   不能直接把事件推进到 confirmed。
+7. 每条 creation_policy=allow 的路由都必须有归属；existing_only 路由只能加入语义同一的
+   已有候选，没有同一候选时省略。新建事件只能选择 event_routes 给出的稳定键和三个分类轴；
+   没有路由时返回空 memberships。
+   不得创建含 unknown 的聚合键。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
                 "item": item,
                 "candidates": candidates,
-                "stable_event_key": stable_event_key,
-                "route_aggregation_keys": route_aggregation_keys or [],
                 "approved_rules": knowledge_rules,
             },
-            max_tokens=1800,
+            max_tokens=2000,
             schema=EventDecisionDraft,
             operation=EVENT_AGGREGATION_OPERATION,
             business_validator=validate_candidate,
         )
+
     async def translate(
         self,
         *,
@@ -759,8 +717,7 @@ topic、entities[].role）和若干候选事件，决定这条消息如何归属
                     f"expected={sorted(expected_indexes)}, actual={sorted(actual_indexes)}"
                 )
             actual_extraction_ids = {
-                extraction.extraction_id
-                for extraction in result.translated_media_extractions
+                extraction.extraction_id for extraction in result.translated_media_extractions
             }
             if actual_extraction_ids != expected_extraction_ids:
                 return (
@@ -788,10 +745,12 @@ topic、entities[].role）和若干候选事件，决定这条消息如何归属
                     return f"结构化版本 target 结构发生变化：extraction_id={extraction_id}"
                 for path, (source_target, target_type) in source_targets.items():
                     translated_target = translated_targets[path][0]
-                    requires_localization = (
-                        target_type in {"champion", "item", "rune", "system"}
-                        and any(char.isascii() and char.isalpha() for char in source_target)
-                    )
+                    requires_localization = target_type in {
+                        "champion",
+                        "item",
+                        "rune",
+                        "system",
+                    } and any(char.isascii() and char.isalpha() for char in source_target)
                     if (
                         requires_localization
                         and translated_target.casefold() == source_target.casefold()
@@ -880,11 +839,7 @@ topic、entities[].role）和若干候选事件，决定这条消息如何归属
         source_by_id = {int(rule["id"]): rule for rule in rules}
 
         def validate_coverage(result: KnowledgeOrganizationResult) -> str | None:
-            output_ids = [
-                source_id
-                for rule in result.rules
-                for source_id in rule.source_rule_ids
-            ]
+            output_ids = [source_id for rule in result.rules for source_id in rule.source_rule_ids]
             expected_ids = sorted(source_by_id)
             if sorted(output_ids) != expected_ids:
                 return (
@@ -1014,9 +969,7 @@ topic、entities[].role）和若干候选事件，决定这条消息如何归属
                         "finish_reason": finish_reason,
                         "error_type": None,
                         "commit_sha": (
-                            os.getenv("GITHUB_SHA")
-                            or os.getenv("CODE_COMMIT_SHA")
-                            or None
+                            os.getenv("GITHUB_SHA") or os.getenv("CODE_COMMIT_SHA") or None
                         ),
                     },
                 )

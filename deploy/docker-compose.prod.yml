@@ -10,6 +10,8 @@ x-llm-environment: &llm-environment
   OPENAI_API_KEY: ${OPENAI_API_KEY}
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
   MODEL_NAME: ${MODEL_NAME}
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-1}
 
 x-collector-environment: &collector-environment
   X_COOKIE_FILE: /run/secrets/x-cookies.json

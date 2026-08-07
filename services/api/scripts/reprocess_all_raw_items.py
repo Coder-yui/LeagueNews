@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
+from app.evaluation.runner import load_jsonl
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
@@ -91,6 +93,21 @@ def _raw_item_ids(db: Session) -> list[int]:
             )
         )
     )
+
+
+def _dataset_raw_item_ids(db: Session, paths: list[Path]) -> list[int]:
+    requested = {
+        int(case["input"]["raw_item_id"])
+        for path in paths
+        for case in load_jsonl(path)
+        if case.get("task") == "ontology_v2"
+    }
+    ordered = _raw_item_ids(db)
+    selected = [raw_item_id for raw_item_id in ordered if raw_item_id in requested]
+    missing = requested - set(selected)
+    if missing:
+        raise RuntimeError(f"dataset references missing RawItems: {sorted(missing)}")
+    return selected
 
 
 def _latest_jobs(
@@ -242,14 +259,27 @@ async def main() -> None:
     )
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--expected-database", default="lol_daily_intel")
-    parser.add_argument("--expected-raw-items", type=int, default=609)
+    parser.add_argument("--expected-raw-items", type=int, default=737)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        action="append",
+        help=(
+            "process only RawItem ids referenced by ontology_v2 cases; "
+            "repeat to process the union of multiple regression datasets"
+        ),
+    )
     parser.add_argument("--status-interval-seconds", type=float, default=15)
     parser.add_argument("--idle-poll-seconds", type=float, default=2)
     args = parser.parse_args()
     workers = max(1, min(args.workers, 8))
     with SessionLocal() as db:
         state = _preflight(db)
-        raw_item_ids = _raw_item_ids(db)
+        raw_item_ids = (
+            _dataset_raw_item_ids(db, args.dataset)
+            if args.dataset
+            else _raw_item_ids(db)
+        )
     print(
         {
             "preflight": {
@@ -263,6 +293,7 @@ async def main() -> None:
             },
             "order": "oldest-to-newest by published_at/ingested_at",
             "workers": workers,
+            "selected_raw_items": len(raw_item_ids),
             "model": settings.model_name,
         },
         flush=True,

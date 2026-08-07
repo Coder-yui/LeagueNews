@@ -109,7 +109,6 @@ class KnowledgeRule(Base):
         ForeignKey("event_review_tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
     version: Mapped[int] = mapped_column(default=1)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     lifecycle_status: Mapped[str] = mapped_column(
         String(20), default="draft", index=True
     )
@@ -132,10 +131,6 @@ class KnowledgeRule(Base):
         CheckConstraint(
             "lifecycle_status IN ('draft', 'evaluated', 'active', 'retired')",
             name="ck_knowledge_rules_lifecycle",
-        ),
-        CheckConstraint(
-            "(lifecycle_status = 'active') = is_active",
-            name="ck_knowledge_rules_active_lifecycle",
         ),
     )
 

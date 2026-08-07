@@ -14,19 +14,21 @@ RawItem immutable blocks
   -> read-only MCP tools
 ```
 
-`ontology_version=lol-news-v1` controls primary topic, secondary topics, facets, and entity types. Existing
+`ontology_version=lol-news-v6` controls primary topic, secondary topics, facets, and entity types. Existing
 rows are mapped conservatively by migration 037; unknown identities remain unknown. No LLM runs in a
 migration. `python -m scripts.backfill_claims` is dry-run by default; after a database/media backup and
 review, `--apply` creates one evidence-linked Claim for each published item that has no active Claim and
 also restores missing EventClaim links for active EventMessage memberships. The command reports Claim and
 EventClaim counts separately and is idempotent. Withdrawn items and memberships are never re-linked.
 
-Importance analysis extracts an editorial subtype, scale, competition region, subject prominence,
-information value, and duplicate/reminder status. `importance-v3-editorial-baselines` computes the final
-score from versioned editorial baselines, bounded modifiers, and subtype score bands. Urgency is not part
-of importance. Content explicitly limited to non-CN servers receives a type-specific audience penalty;
-global content does not. Source reliability never increases importance. Event credibility is a separate
-deterministic projection and deduplicates reposts by upstream URL when present.
+Importance analysis extracts controlled scale, audience, competition-region, prominence, skin-tier, and
+bulk-update features. `importance-v7-cosmetic-releases` computes intrinsic importance from versioned
+editorial baselines, bounded modifiers, and subtype score bands. New skins, standalone new chromas, and
+CN-exclusive paid chromas share the cosmetic-release band; guaranteed free-skin claim reminders use the
+high-value free-skin activity band. Information stage, repost form, and non-CN-only scope affect the
+separate message-priority projection, not intrinsic importance. Source reliability never increases
+importance. Event credibility is a separate deterministic projection and deduplicates reposts by upstream
+URL when present.
 
 Daily and weekly digests validate an IANA timezone, interpret naive cutoffs as local wall time, calculate
 one or seven local days (including DST transitions), and then persist/query the UTC window. Titles use the

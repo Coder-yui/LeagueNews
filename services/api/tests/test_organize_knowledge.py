@@ -16,7 +16,7 @@ def _session() -> Session:
     return Session(engine, expire_on_commit=False)
 
 
-def test_ai_organization_replaces_active_rules_with_traceable_compact_rules(
+def test_ai_organization_creates_traceable_compact_rules(
     monkeypatch,
 ) -> None:
     captured_rules: list[dict[str, object]] = []
@@ -46,21 +46,12 @@ def test_ai_organization_replaces_active_rules_with_traceable_compact_rules(
                         scope="global",
                         rule_text="这条推文有很多英雄，但我觉得应该提取版本号。",
                         lifecycle_status="active",
-                        is_active=True,
                 ),
                 KnowledgeRule(
                     knowledge_type="analysis",
                         scope="global",
                         rule_text="完整预览也应该作为实体，不要提取一堆英雄。",
                         lifecycle_status="active",
-                        is_active=True,
-                ),
-                KnowledgeRule(
-                    knowledge_type="relevance",
-                        scope="global",
-                        rule_text="不要看到设计师账号就直接判断相关，要看内容。",
-                        lifecycle_status="active",
-                        is_active=True,
                 ),
             ]
         )
@@ -69,20 +60,14 @@ def test_ai_organization_replaces_active_rules_with_traceable_compact_rules(
         organized = asyncio.run(organize_active_knowledge_rules(db))
 
         assert len(captured_rules) == 2
-        assert all(
-            rule["knowledge_type"] != "relevance" for rule in captured_rules
-        )
         assert [rule.rule_text for rule in organized] == [
             "版本预览资讯的核心实体应为版本号和预览类型。",
         ]
         assert organized[0].correction_data["organized_from_rule_ids"] == [1, 2]
         all_rules = list(db.scalars(select(KnowledgeRule).order_by(KnowledgeRule.id)))
-        assert all(rule.is_active for rule in all_rules[:3])
-        assert all(rule.version == 1 for rule in all_rules[:3])
-        assert all(not rule.is_active for rule in all_rules[3:])
-        assert all(
-            rule.lifecycle_status == "draft" for rule in all_rules[3:]
-        )
+        assert all(rule.lifecycle_status == "active" for rule in all_rules[:2])
+        assert all(rule.version == 1 for rule in all_rules[:2])
+        assert all(rule.lifecycle_status == "draft" for rule in all_rules[2:])
 
 
 def test_knowledge_organization_requires_active_rules() -> None:
@@ -92,7 +77,7 @@ def test_knowledge_organization_requires_active_rules() -> None:
                 knowledge_type="analysis",
                 scope="global",
                 rule_text="停用规则",
-                is_active=False,
+                lifecycle_status="retired",
             )
         )
         db.commit()

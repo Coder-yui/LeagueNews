@@ -17,19 +17,24 @@ class NormalizedItem(Base):
     normalized_title: Mapped[str] = mapped_column(String(500))
     normalized_text: Mapped[str] = mapped_column(Text)
     summary: Mapped[str] = mapped_column(Text)
-    category: Mapped[str] = mapped_column(String(60), index=True)
     entities: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    content_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     primary_topic: Mapped[str] = mapped_column(String(40), default="other", index=True)
+    subtopic: Mapped[str] = mapped_column(String(40), default="other", index=True)
     secondary_topics: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_kind: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
+    information_stage: Mapped[str] = mapped_column(String(30), default="update", index=True)
+    content_form: Mapped[str] = mapped_column(String(30), default="original")
+    product_scope: Mapped[str] = mapped_column(String(40), default="uncertain", index=True)
     facets: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    ontology_version: Mapped[str] = mapped_column(String(40), default="lol-news-v1")
+    ontology_version: Mapped[str] = mapped_column(String(40), default="lol-news-v6")
     importance_score: Mapped[float] = mapped_column(Float, index=True)
     importance_dimensions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     importance_policy_version: Mapped[str] = mapped_column(
-        String(80), default="importance-v3-editorial-baselines"
+        String(80), default="importance-v7-cosmetic-releases"
     )
     importance_calculation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    priority_score: Mapped[float] = mapped_column(Float, default=0.5, index=True)
+    priority_calculation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     source_language: Mapped[str | None] = mapped_column(String(30), nullable=True)
     target_language: Mapped[str] = mapped_column(String(30), default="zh-CN")
@@ -70,6 +75,10 @@ class NormalizedItem(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "priority_score >= 0 AND priority_score <= 1",
+            name="ck_normalized_items_priority_score",
+        ),
         CheckConstraint(
             "current_revision >= 1",
             name="ck_normalized_items_current_revision_positive",

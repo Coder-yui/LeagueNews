@@ -5,8 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import settings
+from app.schemas.workflow import EventMentionTemporalDraft
 from app.services.llm import (
     ClassificationResult,
+    FactClaimDraft,
     LLMAnalysisError,
     LLMClient,
     LLMConfigurationError,
@@ -15,6 +17,39 @@ from app.services.llm import (
     execution_metadata,
 )
 from app.workflows.translate_item import build_translation, detect_language
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [("yearly", "annual"), ("fortnightly", "biweekly")],
+)
+def test_recurrence_window_aliases_are_normalized(
+    source: str, expected: str
+) -> None:
+    temporal = EventMentionTemporalDraft.model_validate(
+        {
+            "is_recurring": True,
+            "recurrence_window": source,
+            "certainty": "confirmed",
+            "event_date": "2026-06-01",
+        }
+    )
+
+    assert temporal.recurrence_window == expected
+
+
+@pytest.mark.parametrize("source", ["changes", "modifies", "updates"])
+def test_generic_change_predicates_normalize_to_adjusts(source: str) -> None:
+    claim = FactClaimDraft.model_validate(
+        {
+            "subject": {"name": "符文系统", "type": "system"},
+            "predicate": source,
+            "object": {"summary": "数值调整"},
+            "temporal_role": "event",
+        }
+    )
+
+    assert claim.predicate == "adjusts"
 
 
 def test_missing_api_key_raises_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,8 +70,11 @@ def test_missing_api_key_raises_configuration_error(monkeypatch: pytest.MonkeyPa
 def test_classification_uses_registered_dual_axis_prompt() -> None:
     response = json.dumps(
         {
-            "content_type": "insider_rumor",
+            "source_kind": "attributed_report",
+            "information_stage": "rumor",
+            "content_form": "original",
             "topic": "roster",
+            "subtopic": "roster_move",
             "secondary_topics": ["esports"],
             "entity_roles": [
                 {"name": "WBG", "type": "team", "role": "core"}
@@ -45,6 +83,7 @@ def test_classification_uses_registered_dual_axis_prompt() -> None:
                 "is_recurring": False,
                 "recurrence_window": None,
                 "certainty": "speculative",
+                "event_date": None,
             },
         }
     )
@@ -56,7 +95,6 @@ def test_classification_uses_registered_dual_axis_prompt() -> None:
             extracted_facts={
                 "title": "WBG打野传闻",
                 "summary": "WBG正在考虑新打野。",
-                "category": "转会",
                 "entities": [{"name": "WBG", "type": "team"}],
             },
             source_context={"source_name": "_尧阿尧y_"},
@@ -64,15 +102,42 @@ def test_classification_uses_registered_dual_axis_prompt() -> None:
     )
 
     assert isinstance(result, ClassificationResult)
-    assert result.content_type == "insider_rumor"
+    assert result.source_kind == "attributed_report"
+    assert result.information_stage == "rumor"
     assert result.topic == "roster"
     metadata = execution_metadata(result)
     assert metadata["prompt_name"] == "classification"
-    assert metadata["prompt_version"] == "v1"
+    assert metadata["prompt_version"] == "v6-cosmetic-releases"
     messages = completions.calls[0]["messages"]
     assert isinstance(messages, list)
-    assert "content_type 看\"谁说的+怎么说的\"" in messages[0]["content"]
-    assert "is_recurring=true 用于每日神话商城" in messages[0]["content"]
+    assert "source_kind 只表示事实由谁直接声称" in messages[0]["content"]
+    assert "赛程不得用发布日期代替比赛日期" in messages[0]["content"]
+    assert "同一赛程列出多场比赛时，每场各一项" in messages[0]["content"]
+    assert "现已可领取" in messages[0]["content"]
+    assert "新皮肤、单独报道的" in messages[0]["content"]
+    assert "国服新增的付费臻彩" in messages[0]["content"]
+
+
+def test_classification_discards_unknown_optional_secondary_topics() -> None:
+    result = ClassificationResult.model_validate(
+        {
+            "source_kind": "data_mined",
+            "information_stage": "preview",
+            "content_form": "original",
+            "topic": "patch",
+            "subtopic": "pbe_change",
+            "secondary_topics": ["champion", "balance_change", "champion"],
+            "entity_roles": [],
+            "temporal": {
+                "is_recurring": False,
+                "recurrence_window": None,
+                "certainty": "likely",
+                "event_date": None,
+            },
+        }
+    )
+
+    assert result.secondary_topics == ["champion"]
 
 
 def test_language_detection() -> None:
@@ -259,15 +324,12 @@ def _client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeComple
 def test_importance_prompt_uses_editorial_policy_contract() -> None:
     response = json.dumps(
         {
-            "editorial_subtype": "activity_standard",
             "scale": "standard",
             "audience_region": "global",
             "competition_region": "none",
             "prominence": "normal",
             "skin_tier": "none",
             "is_bulk_update": False,
-            "is_first_concrete_disclosure": True,
-            "is_duplicate_or_reminder": False,
             "evidence": ["消息公布了活动规则。"],
         }
     )
@@ -286,11 +348,11 @@ def test_importance_prompt_uses_editorial_policy_contract() -> None:
     assert isinstance(messages, list)
     prompt = messages[0]["content"]
     assert "不评估行动紧迫性" in prompt
-    assert "patch_full_preview" in prompt
-    assert "shop_daily_standard" in prompt
     assert "international_only" in prompt
-    assert "单英雄热修复不能误判为完整版本更新" in prompt
+    assert "不输出最终分数" in prompt
+    assert "当前输入没有历史对照" in prompt
     assert "evidence：1-6条消息中的具体文本依据，不得编造" in prompt
+    assert '"臻彩"不是"至臻皮肤"' in prompt
 
 
 def test_claim_generation_uses_atomic_timeline_contract() -> None:
@@ -319,7 +381,8 @@ def test_claim_generation_uses_atomic_timeline_contract() -> None:
             content="爆料人称 WBG 正在考虑 Beichuan 作为打野候选。",
             extracted_facts={"title": "WBG 打野候选"},
             classification={
-                "content_type": "insider_rumor",
+                "source_kind": "attributed_report",
+                "information_stage": "rumor",
                 "topic": "roster",
             },
             source_context={"source_name": "爆料人"},
@@ -346,8 +409,10 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
             "memberships": [
                 {
                     "target": "new",
-                    "event_type": "release_saga",
-                    "aggregation_key": "release:retro-bundle",
+                    "event_kind": "cosmetic_release",
+                    "aggregation_strategy": "release",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "release:lol_pc:retro-bundle",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
@@ -363,8 +428,10 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
             "memberships": [
                 {
                     "target": "existing:8",
-                    "event_type": "major_gameplay_change",
-                    "aggregation_key": "gameplay:经典模式",
+                    "event_kind": "gameplay_release",
+                    "aggregation_strategy": "release",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "gameplay:lol_pc:经典模式",
                     "membership_role": "component",
                     "evidence_stance": "context",
                     "update_kind": "context",
@@ -382,18 +449,31 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
             item={
                 "title": "测试服怀旧玩法礼包封面",
                 "summary": "测试服出现相关礼包封面。",
+                "product_scope": "lol_pc",
+                "information_stage": "preview",
+                "event_assertion": "context_only",
+                "event_routes": [
+                    {
+                        "event_kind": "gameplay_release",
+                        "aggregation_strategy": "release",
+                        "product_scope": "lol_pc",
+                        "aggregation_key": "gameplay:lol_pc:经典模式",
+                    }
+                ],
             },
             candidates=[
                 {
                     "event_id": 8,
-                    "aggregation_key": "gameplay:经典模式",
+                    "aggregation_key": "gameplay:lol_pc:经典模式",
                     "title": "经典玩法正式公布",
                     "summary": "拳头公布经典玩法。",
                     "core_entities": ["classic mode"],
                     "match_level": "broad",
+                    "event_kind": "gameplay_release",
+                    "aggregation_strategy": "release",
+                    "product_scope": "lol_pc",
                 }
             ],
-            stable_event_key=None,
             knowledge_rules=[],
         )
     )
@@ -403,13 +483,77 @@ def test_event_create_with_candidates_requires_explicit_rejections() -> None:
     assert result.memberships[0].evidence_stance == "context"
     metadata = execution_metadata(result)
     assert metadata["prompt_name"] == "event-decision"
-    assert metadata["prompt_version"] == "v4-multi-membership"
+    assert metadata["prompt_version"] == "v7-semantic-candidate-binding"
     assert metadata["json_schema_version"] == "EventDecisionDraft:v1"
     assert str(metadata["prompt_hash"]).startswith("sha256:")
-    assert len(completions.calls) == 2
-    retry_messages = completions.calls[1]["messages"]
-    assert isinstance(retry_messages, list)
-    assert "candidate_rejections" in retry_messages[-1]["content"]
+    assert len(completions.calls) == 1
+
+
+def test_event_decision_can_semantically_bind_compatible_alias_candidate() -> None:
+    semantic_update = json.dumps(
+        {
+            "memberships": [
+                {
+                    "target": "existing:8",
+                    "event_kind": "gameplay_release",
+                    "aggregation_strategy": "release",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "release:lol_pc:经典模式",
+                    "identity_resolution": "semantic_candidate",
+                    "identity_rationale": "联盟经典模式与经典模式是同一玩法的全称和简称",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "confirmation",
+                    "lifecycle_status": "live",
+                    "timeline_note": "国服确认经典模式上线",
+                }
+            ],
+            "candidate_rejections": [],
+        }
+    )
+    client, completions = _client_with_responses([semantic_update])
+
+    result = asyncio.run(
+        client.propose_event(
+            item={
+                "title": "经典模式正式上线",
+                "summary": "国服确认经典模式正式上线。",
+                "product_scope": "lol_pc",
+                "information_stage": "active",
+                "event_assertion": "asserted",
+                "event_routes": [
+                    {
+                        "event_kind": "gameplay_release",
+                        "aggregation_strategy": "release",
+                        "product_scope": "lol_pc",
+                        "aggregation_key": "release:lol_pc:经典模式",
+                        "creation_policy": "allow",
+                        "assertion": "asserted",
+                    }
+                ],
+            },
+            candidates=[
+                {
+                    "event_id": 8,
+                    "aggregation_key": "release:lol_pc:联盟经典模式",
+                    "title": "联盟经典模式即将上线",
+                    "summary": "Riot公布联盟经典模式。",
+                    "core_entities": ["联盟经典模式"],
+                    "match_level": "strong",
+                    "event_kind": "gameplay_release",
+                    "aggregation_strategy": "release",
+                    "product_scope": "lol_pc",
+                    "deterministic_route_key": "release:lol_pc:经典模式",
+                }
+            ],
+            knowledge_rules=[],
+        )
+    )
+
+    assert result.memberships[0].target == "existing:8"
+    assert result.memberships[0].identity_resolution == "semantic_candidate"
+    assert result.memberships[0].identity_rationale
+    assert len(completions.calls) == 1
 
 
 def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
@@ -418,8 +562,10 @@ def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
             "memberships": [
                 {
                     "target": "new",
-                    "event_type": "daily_matches",
-                    "aggregation_key": "lpl:2026-07-26",
+                    "event_kind": "esports_match",
+                    "aggregation_strategy": "calendar_day",
+                    "product_scope": "lol_esports",
+                    "aggregation_key": "matchday:lpl:2026-07-26",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
@@ -437,8 +583,10 @@ def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
             "memberships": [
                 {
                     "target": "existing:21",
-                    "event_type": "daily_matches",
-                    "aggregation_key": "lpl:2026-07-26",
+                    "event_kind": "esports_match",
+                    "aggregation_strategy": "calendar_day",
+                    "product_scope": "lol_esports",
+                    "aggregation_key": "matchday:lpl:2026-07-26",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
@@ -458,24 +606,34 @@ def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
             item={
                 "title": "2026LPL第三赛段7月26日赛程预告",
                 "summary": "LNG对阵NIP、TT对阵EDG、AL对阵BLG。",
+                "product_scope": "lol_esports",
+                "information_stage": "preview",
+                "event_routes": [
+                    {
+                        "event_kind": "esports_match",
+                        "aggregation_strategy": "calendar_day",
+                        "product_scope": "lol_esports",
+                        "aggregation_key": "matchday:lpl:2026-07-26",
+                    }
+                ],
             },
             candidates=[
                 {
                     "event_id": 21,
-                    "event_key": "matchday:lpl:2026-07-26",
-                    "aggregation_key": "lpl:2026-07-26",
+                    "aggregation_key": "matchday:lpl:2026-07-26",
                     "title": "2026LPL第三赛段7月26日赛果",
                     "summary": "当日三场比赛已经结束。",
-                    "event_type": "daily_matches",
+                    "event_kind": "esports_match",
+                    "aggregation_strategy": "calendar_day",
+                    "product_scope": "lol_esports",
                     "lifecycle_status": "completed",
                 }
             ],
-            stable_event_key="lpl:2026-07-26",
             knowledge_rules=[],
         )
     )
 
-    assert len(completions.calls) == 2
+    assert len(completions.calls) == 1
     membership = result.memberships[0]
     assert membership.target == "existing:21"
     assert membership.lifecycle_status == "completed"
@@ -483,7 +641,7 @@ def test_event_create_cannot_duplicate_exact_stable_key_candidate() -> None:
     assert membership.evidence_stance == "context"
 
 
-def test_event_prompt_explains_lpl_matchday_lifecycle() -> None:
+def test_event_prompt_explains_topic_cluster_lifecycle() -> None:
     response = json.dumps(
         {
             "memberships": [],
@@ -496,7 +654,6 @@ def test_event_prompt_explains_lpl_matchday_lifecycle() -> None:
         client.propose_event(
             item={"title": "测试", "summary": "测试"},
             candidates=[],
-            stable_event_key=None,
             knowledge_rules=[],
         )
     )
@@ -504,11 +661,12 @@ def test_event_prompt_explains_lpl_matchday_lifecycle() -> None:
     messages = completions.calls[0]["messages"]
     assert isinstance(messages, list)
     prompt = messages[0]["content"]
-    assert "周期窗口型事件（shop_rotation/daily_matches）" in prompt
-    assert "总决赛、世界赛关键场单独成事件" in prompt
+    assert "recurring_window/calendar_day" in prompt
+    assert "event_routes 是程序完成主题簇归并后生成的允许路由" in prompt
+    assert "esports_match 可以是 calendar_day 比赛日或 timeline 重大单场" in prompt
 
 
-def test_cn_mythic_shop_policy_rejects_empty_membership() -> None:
+def test_shop_rotation_route_rejects_empty_membership() -> None:
     invalid = json.dumps(
         {
             "memberships": [],
@@ -520,8 +678,10 @@ def test_cn_mythic_shop_policy_rejects_empty_membership() -> None:
             "memberships": [
                 {
                     "target": "new",
-                    "event_type": "shop_rotation",
-                    "aggregation_key": "mythic_shop:cn:2026-W30",
+                    "event_kind": "commercial_offer",
+                    "aggregation_strategy": "recurring_window",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "shop_rotation:lol_pc:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
@@ -533,35 +693,40 @@ def test_cn_mythic_shop_policy_rejects_empty_membership() -> None:
         }
     )
     client, completions = _client_with_responses([invalid, valid])
-    policy = {
-        "policy_type": "mythic_shop_rotation",
-        "event_eligible": True,
-        "region": "cn",
-        "cadence": "weekly",
-        "importance_range": [0.45, 0.70],
-    }
-
     result = asyncio.run(
         client.propose_event(
-            item={"title": "神话商城每周轮换", "event_policy": policy},
+            item={
+                "title": "神话商城每周轮换",
+                "product_scope": "lol_pc",
+                "event_routes": [
+                    {
+                        "event_kind": "commercial_offer",
+                        "aggregation_strategy": "recurring_window",
+                        "product_scope": "lol_pc",
+                        "aggregation_key": "shop_rotation:lol_pc:2026-W30",
+                    }
+                ],
+            },
             candidates=[],
-            stable_event_key="mythic_shop:cn:2026-W30",
             knowledge_rules=[],
         )
     )
 
-    assert result.memberships[0].event_type == "shop_rotation"
-    assert len(completions.calls) == 2
+    assert result.memberships[0].event_kind == "commercial_offer"
+    assert result.memberships[0].aggregation_strategy == "recurring_window"
+    assert len(completions.calls) == 1
 
 
-def test_cn_mythic_shop_policy_normalizes_required_event_type() -> None:
-    response = json.dumps(
+def test_shop_rotation_route_retries_wrong_controlled_event_axes() -> None:
+    invalid = json.dumps(
         {
             "memberships": [
                 {
                     "target": "new",
-                    "event_type": "other",
-                    "aggregation_key": "mythic_shop:cn:2026-W30",
+                    "event_kind": "other",
+                    "aggregation_strategy": "singleton",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "shop_rotation:lol_pc:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
@@ -572,37 +737,61 @@ def test_cn_mythic_shop_policy_normalizes_required_event_type() -> None:
             "candidate_rejections": [],
         }
     )
-    client, completions = _client_with_responses([response])
+    valid = json.dumps(
+        {
+            "memberships": [
+                {
+                    "target": "new",
+                    "event_kind": "commercial_offer",
+                    "aggregation_strategy": "recurring_window",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "shop_rotation:lol_pc:2026-W30",
+                    "membership_role": "primary",
+                    "evidence_stance": "supports",
+                    "update_kind": "new_fact",
+                    "lifecycle_status": "live",
+                    "timeline_note": "本周轮换内容公布",
+                }
+            ],
+            "candidate_rejections": [],
+        }
+    )
+    client, completions = _client_with_responses([invalid, valid])
 
     result = asyncio.run(
         client.propose_event(
             item={
                 "title": "神话商城每周轮换",
-                "event_policy": {
-                    "policy_type": "mythic_shop_rotation",
-                    "event_eligible": True,
-                    "required_event_type": "activity",
-                    "importance_range": [0.45, 0.70],
-                },
+                "product_scope": "lol_pc",
+                "event_routes": [
+                    {
+                        "event_kind": "commercial_offer",
+                        "aggregation_strategy": "recurring_window",
+                        "product_scope": "lol_pc",
+                        "aggregation_key": "shop_rotation:lol_pc:2026-W30",
+                    }
+                ],
             },
             candidates=[],
-            stable_event_key="mythic_shop:cn:2026-W30",
             knowledge_rules=[],
         )
     )
 
-    assert result.memberships[0].event_type == "shop_rotation"
+    assert result.memberships[0].event_kind == "commercial_offer"
+    assert result.memberships[0].aggregation_strategy == "recurring_window"
     assert len(completions.calls) == 1
 
 
-def test_international_mythic_shop_policy_requires_not_event() -> None:
+def test_missing_program_route_requires_not_event() -> None:
     invalid = json.dumps(
         {
             "memberships": [
                 {
                     "target": "new",
-                    "event_type": "shop_rotation",
-                    "aggregation_key": "mythic_shop:cn:2026-W30",
+                    "event_kind": "commercial_offer",
+                    "aggregation_strategy": "recurring_window",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "shop_rotation:lol_pc:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
@@ -625,16 +814,10 @@ def test_international_mythic_shop_policy_requires_not_event() -> None:
         client.propose_event(
             item={
                 "title": "Mythic Shop weekly rotation",
-                "event_policy": {
-                    "policy_type": "mythic_shop_rotation",
-                    "event_eligible": False,
-                    "region": "international",
-                    "cadence": "weekly",
-                    "importance_range": [0.25, 0.50],
-                },
+                "product_scope": "lol_pc",
+                "event_routes": [],
             },
             candidates=[],
-            stable_event_key=None,
             knowledge_rules=[],
         )
     )
@@ -643,14 +826,16 @@ def test_international_mythic_shop_policy_requires_not_event() -> None:
     assert len(completions.calls) == 2
 
 
-def test_cn_daily_mythic_shop_update_must_be_context() -> None:
-    invalid = json.dumps(
+def test_shop_rotation_exact_key_must_update_existing_event() -> None:
+    response = json.dumps(
         {
             "memberships": [
                 {
                     "target": "existing:12",
-                    "event_type": "shop_rotation",
-                    "aggregation_key": "mythic_shop:cn:2026-W30",
+                    "event_kind": "commercial_offer",
+                    "aggregation_strategy": "recurring_window",
+                    "product_scope": "lol_pc",
+                    "aggregation_key": "shop_rotation:lol_pc:2026-W30",
                     "membership_role": "primary",
                     "evidence_stance": "supports",
                     "update_kind": "new_fact",
@@ -661,35 +846,40 @@ def test_cn_daily_mythic_shop_update_must_be_context() -> None:
             "candidate_rejections": [],
         }
     )
-    client, completions = _client_with_responses([invalid])
+    client, completions = _client_with_responses([response])
 
     result = asyncio.run(
         client.propose_event(
             item={
                 "title": "神话商城每日轮换",
-                "event_policy": {
-                    "policy_type": "mythic_shop_rotation",
-                    "event_eligible": True,
-                    "region": "cn",
-                    "cadence": "daily",
-                    "importance_range": [0.45, 0.70],
-                },
+                "product_scope": "lol_pc",
+                "information_stage": "update",
+                "event_routes": [
+                    {
+                        "event_kind": "commercial_offer",
+                        "aggregation_strategy": "recurring_window",
+                        "product_scope": "lol_pc",
+                        "aggregation_key": "shop_rotation:lol_pc:2026-W30",
+                    }
+                ],
             },
             candidates=[
                 {
                     "event_id": 12,
                     "title": "本周国服神话商城轮换",
-                    "aggregation_key": "mythic_shop:cn:2026-W30",
+                    "aggregation_key": "shop_rotation:lol_pc:2026-W30",
+                    "event_kind": "commercial_offer",
+                    "aggregation_strategy": "recurring_window",
+                    "product_scope": "lol_pc",
                 }
             ],
-            stable_event_key="mythic_shop:cn:2026-W30",
             knowledge_rules=[],
         )
     )
 
     assert result.memberships[0].target == "existing:12"
-    assert result.memberships[0].update_kind == "context"
-    assert result.memberships[0].evidence_stance == "context"
+    assert result.memberships[0].update_kind == "new_fact"
+    assert result.memberships[0].evidence_stance == "supports"
     assert len(completions.calls) == 1
 
 

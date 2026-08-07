@@ -51,8 +51,9 @@ export default async function EventsPage({
         {visibleEvents.map((event) => (
           <article className="public-event-card" key={event.id}>
             <div className="event-topline">
-              <span>{event.category}</span>
-              <span>{eventTypeLabel(event.event_type)}</span>
+              <span>{event.product_scope}</span>
+              <span>{eventTypeLabel(event.event_kind)}</span>
+              <span>{event.aggregation_strategy}</span>
               <span className={`event-state ${event.lifecycle_status}`}>
                 {lifecycleLabel(event.lifecycle_status)}
               </span>

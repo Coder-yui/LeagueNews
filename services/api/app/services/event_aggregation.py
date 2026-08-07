@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -6,9 +7,14 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.content_blocks import has_quoted_post
+from app.content_blocks import has_repost_evidence, text_from_content_blocks
 from app.core.config import settings
-from app.domain.ontology import TIMELINE_EVENT_TYPES
+from app.domain.event_importance import (
+    EVENT_IMPORTANCE_POLICY_VERSION,
+    calculate_event_importance,
+    membership_importance_contribution,
+)
+from app.domain.ontology import TIMELINE_EVENT_KINDS
 from app.models.event import Event, EventMessage, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.services.claims import (
@@ -103,16 +109,29 @@ def _refresh_publish_range(db: Session, event: Event) -> None:
 
 
 def _default_independence_key(item: NormalizedItem) -> str | None:
+    source_text = text_from_content_blocks(item.raw_item.content_blocks)
+    repost_match = re.match(r"(?i)^\s*RT\s+@([A-Z0-9_]+)\s*:", source_text)
+    if repost_match:
+        return f"x-account:{repost_match.group(1).casefold()}"
     for block in item.raw_item.content_blocks:
         if block.get("embed_kind") != "quoted_post" or not block.get("source_url"):
             continue
         parsed = urlsplit(str(block["source_url"]))
         if parsed.hostname:
             host = parsed.hostname.casefold().removeprefix("www.")
+            if host in {"x.com", "twitter.com"}:
+                account = parsed.path.strip("/").split("/", 1)[0].casefold()
+                if account:
+                    return f"x-account:{account}"
             path = parsed.path.rstrip("/") or "/"
             return f"upstream:{host}{path}"
-    if has_quoted_post(item.raw_item.content_blocks):
+    if has_repost_evidence(item.raw_item.content_blocks):
         return None
+    if (
+        item.raw_item.source.connector_type == "x_twitter"
+        and item.raw_item.source.external_key
+    ):
+        return f"x-account:{item.raw_item.source.external_key.casefold()}"
     return f"source:{item.raw_item.source_id}"
 
 
@@ -222,6 +241,7 @@ def refresh_event_metrics(db: Session, event: Event) -> None:
     """Refresh public event projections after an explicit membership change."""
     _refresh_publish_range(db, event)
     _refresh_editorial_metrics(db, event)
+    _refresh_event_importance(db, event)
 
 
 def _refresh_event_importance(db: Session, event: Event) -> None:
@@ -248,31 +268,35 @@ def _refresh_event_importance(db: Session, event: Event) -> None:
             )
         )
     }
-    eligible = [
-        membership
-        for membership in memberships
-        if items[membership.normalized_item_id].publication_status == "published"
-        if membership.evidence_stance != "context"
-        and membership.update_kind not in {"context", "duplicate_evidence"}
-    ]
-    significant = [membership for membership in eligible if membership.is_significant_update]
-    considered = significant or eligible
-    if not considered:
-        event.importance_score = 0
-        event.importance_evidence = []
-        return
-    best = max(
-        considered,
-        key=lambda membership: (
-            items[membership.normalized_item_id].importance_score,
-            membership.normalized_item_id,
-        ),
+    contributions = []
+    for membership in memberships:
+        item = items[membership.normalized_item_id]
+        if item.publication_status != "published":
+            membership.importance_contribution = 0
+            membership.importance_contribution_evidence = ["消息已撤回"]
+            continue
+        contribution, evidence = membership_importance_contribution(
+            item,
+            event_kind=event.event_kind,
+            membership_role=membership.membership_role,
+            evidence_stance=membership.evidence_stance,
+            update_kind=membership.update_kind,
+        )
+        membership.importance_contribution = contribution
+        membership.importance_contribution_evidence = evidence
+        contributions.append(contribution)
+    score, dimensions, evidence = calculate_event_importance(
+        event_kind=event.event_kind,
+        aggregation_strategy=event.aggregation_strategy,
+        product_scope=event.product_scope,
+        aggregation_key=event.aggregation_key,
+        contributions=contributions,
+        independent_source_count=event.independent_source_count,
     )
-    base_item = items[best.normalized_item_id]
-    event.importance_score = round(base_item.importance_score, 6)
-    event.importance_evidence = [
-        f"成员消息 {base_item.id} 的编辑重要性最高值={base_item.importance_score:.3f}",
-    ]
+    event.importance_score = score
+    event.importance_dimensions = dimensions
+    event.importance_evidence = evidence
+    event.importance_policy_version = EVENT_IMPORTANCE_POLICY_VERSION
 
 
 def expire_stale_unconfirmed_events(
@@ -297,7 +321,7 @@ def expire_stale_unconfirmed_events(
         db.scalars(
             select(Event).where(
                 Event.status == "active",
-                Event.event_type.in_(TIMELINE_EVENT_TYPES),
+                Event.event_kind.in_(TIMELINE_EVENT_KINDS),
                 Event.lifecycle_status.in_(
                     ["unconfirmed", "expired_unconfirmed"]
                 ),
@@ -372,19 +396,17 @@ def create_event(
     normalized_item_id: int,
     title: str,
     summary: str,
-    category: str,
-    event_key: str | None = None,
     aggregation_key: str | None = None,
     status: str = "active",
-    event_type: str = "other",
+    event_kind: str = "other",
+    aggregation_strategy: str = "singleton",
+    product_scope: str = "uncertain",
     lifecycle_status: str = "developing",
     membership_role: str = "primary",
     evidence_stance: str = "supports",
     independence_key: str | None = None,
     timeline_note: str = "",
     update_kind: str = "new_fact",
-    importance_score: float | None = None,
-    importance_evidence: list[str] | None = None,
     latest_development: str | None = None,
     change_note: str = "创建事件",
     evidence: dict[str, Any] | None = None,
@@ -395,37 +417,37 @@ def create_event(
     try:
         official_evidence = (
             item.raw_item.source.is_official
-            and not has_quoted_post(item.raw_item.content_blocks)
+            and not has_repost_evidence(item.raw_item.content_blocks)
             and evidence_stance in {"supports", "contradicts"}
             and update_kind != "context"
         )
         event = Event(
-            event_key=event_key,
             aggregation_key=aggregation_key,
             title=title,
             summary=summary,
-            category=category,
             status=status,
-            event_type=event_type,
+            event_kind=event_kind,
+            aggregation_strategy=aggregation_strategy,
+            product_scope=product_scope,
             lifecycle_status=lifecycle_status,
-            importance_score=(
-                item.importance_score
-                if importance_score is None
-                else importance_score
-            ),
-            importance_evidence=importance_evidence or [
-                f"由首条成员消息的重要性 {item.importance_score:.0%} 初始化"
-            ],
+            importance_score=0,
+            importance_evidence=[],
             latest_development=latest_development or change_note,
             current_revision=1,
         )
         db.add(event)
         db.flush()
+        contribution, contribution_evidence = membership_importance_contribution(
+            item,
+            event_kind=event.event_kind,
+            membership_role=membership_role,
+            evidence_stance=evidence_stance,
+            update_kind=update_kind,
+        )
         db.add(
             EventMessage(
                 event_id=event.id,
                 normalized_item_id=item.id,
-                relation_type="primary",
                 membership_role=membership_role,
                 evidence_stance=evidence_stance,
                 independence_key=independence_key or _default_independence_key(item),
@@ -437,6 +459,8 @@ def create_event(
                     evidence_stance != "context"
                     and update_kind not in {"context", "duplicate_evidence"}
                 ),
+                importance_contribution=contribution,
+                importance_contribution_evidence=contribution_evidence,
                 source_published_at=item.raw_item.published_at,
             )
         )
@@ -467,9 +491,10 @@ def create_event(
         if commit:
             db.commit()
     except IntegrityError as exc:
-        db.rollback()
+        if commit:
+            db.rollback()
         raise EventMembershipConflictError(
-            "event key or normalized item membership already exists"
+            "aggregation key or normalized item membership already exists"
         ) from exc
     if commit:
         db.refresh(event)
@@ -490,8 +515,6 @@ def add_message_to_event(
     timeline_note: str = "",
     update_kind: str = "new_fact",
     is_significant_update: bool = True,
-    importance_score: float | None = None,
-    importance_evidence: list[str] | None = None,
     latest_development: str | None = None,
     change_note: str = "新增事件消息",
     evidence: dict[str, Any] | None = None,
@@ -523,7 +546,7 @@ def add_message_to_event(
     if locked_membership is not None:
         return event, False
     lifecycle_regression = (
-        event.event_type == "match"
+        event.event_kind == "esports_match"
         and event.lifecycle_status in _MATCH_LIFECYCLE_RANK
         and lifecycle_status in _MATCH_LIFECYCLE_RANK
         and _MATCH_LIFECYCLE_RANK[lifecycle_status]
@@ -553,7 +576,7 @@ def add_message_to_event(
             )
         official_evidence = (
             item.raw_item.source.is_official
-            and not has_quoted_post(item.raw_item.content_blocks)
+            and not has_repost_evidence(item.raw_item.content_blocks)
             and evidence_stance in {"supports", "contradicts"}
             and update_kind != "context"
         )
@@ -564,7 +587,6 @@ def add_message_to_event(
             )
         )
         membership_values = {
-            "relation_type": "primary",
             "membership_role": membership_role,
             "evidence_stance": evidence_stance,
             "independence_key": independence_key or _default_independence_key(item),
@@ -579,6 +601,19 @@ def add_message_to_event(
             "withdrawal_reason": None,
             "source_correction_id": None,
         }
+        contribution, contribution_evidence = membership_importance_contribution(
+            item,
+            event_kind=event.event_kind,
+            membership_role=membership_role,
+            evidence_stance=evidence_stance,
+            update_kind=update_kind,
+        )
+        membership_values.update(
+            {
+                "importance_contribution": contribution,
+                "importance_contribution_evidence": contribution_evidence,
+            }
+        )
         if historical_membership is None:
             db.add(EventMessage(
                 event_id=event.id,
@@ -598,10 +633,6 @@ def add_message_to_event(
             if lifecycle_status is not None:
                 event.lifecycle_status = lifecycle_status
             event.latest_development = latest_development or change_note
-        if importance_score is not None:
-            event.importance_score = max(event.importance_score, importance_score)
-        if importance_evidence:
-            event.importance_evidence = importance_evidence
         db.flush()
         link_item_claims_to_event(
             db,

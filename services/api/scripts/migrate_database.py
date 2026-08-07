@@ -40,6 +40,8 @@ DEFAULT_SOURCES = (
         "external_key": "lol.qq.com",
         "base_url": "https://lol.qq.com/",
         "connector_config": {"target": "24"},
+        "is_official": True,
+        "reliability_score": 1.0,
     },
     {
         "name": "Riot Games Official",
@@ -47,6 +49,8 @@ DEFAULT_SOURCES = (
         "external_key": "leagueoflegends.com",
         "base_url": "https://www.leagueoflegends.com/en-us/news/",
         "connector_config": {},
+        "is_official": True,
+        "reliability_score": 1.0,
     },
     {
         "name": "Matt Leung-Harrison (@RiotPhroxzon)",
@@ -63,6 +67,8 @@ DEFAULT_SOURCES = (
         "external_key": "lolesports",
         "base_url": "https://x.com/lolesports",
         "connector_config": {},
+        "is_official": True,
+        "reliability_score": 1.0,
     },
     {
         "name": "Spideraxe (@Spideraxe30)",
@@ -70,6 +76,8 @@ DEFAULT_SOURCES = (
         "external_key": "spideraxe30",
         "base_url": "https://x.com/Spideraxe30",
         "connector_config": {},
+        "is_official": False,
+        "reliability_score": 0.8,
     },
     {
         "name": "SkinSpotlights (@SkinSpotlights)",
@@ -77,6 +85,8 @@ DEFAULT_SOURCES = (
         "external_key": "skinspotlights",
         "base_url": "https://x.com/SkinSpotlights",
         "connector_config": {},
+        "is_official": False,
+        "reliability_score": 0.8,
     },
     {
         "name": "League of Legends (@LeagueofLegends)",
@@ -84,6 +94,8 @@ DEFAULT_SOURCES = (
         "external_key": "leagueoflegends",
         "base_url": "https://x.com/LeagueofLegends",
         "connector_config": {},
+        "is_official": True,
+        "reliability_score": 1.0,
     },
     {
         "name": "英雄联盟赛事",
@@ -91,6 +103,8 @@ DEFAULT_SOURCES = (
         "external_key": "5756404150",
         "base_url": "https://weibo.com/u/5756404150",
         "connector_config": {"include_reposts": True},
+        "is_official": True,
+        "reliability_score": 1.0,
     },
     {
         "name": "英雄联盟",
@@ -98,6 +112,8 @@ DEFAULT_SOURCES = (
         "external_key": "5720474518",
         "base_url": "https://weibo.com/u/5720474518",
         "connector_config": {"include_reposts": True},
+        "is_official": True,
+        "reliability_score": 1.0,
     },
     {
         "name": "恋恋红茶_244",

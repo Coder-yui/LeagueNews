@@ -33,7 +33,6 @@ def test_conflicting_active_glossary_and_rules_are_reported() -> None:
                     rule_text="常规赛最高 0.60",
                     correction_data={"constraint_key": "lpl_regular_importance"},
                     lifecycle_status="active",
-                    is_active=True,
                 ),
                 KnowledgeRule(
                     knowledge_type="analysis",
@@ -41,7 +40,6 @@ def test_conflicting_active_glossary_and_rules_are_reported() -> None:
                     rule_text="常规赛最高 0.80",
                     correction_data={"constraint_key": "lpl_regular_importance"},
                     lifecycle_status="active",
-                    is_active=True,
                 ),
             ]
         )
@@ -64,7 +62,6 @@ def test_knowledge_rule_requires_evaluation_before_activation() -> None:
                     knowledge_type="analysis",
                     rule_text="Never publish directly",
                     lifecycle_status="active",
-                    is_active=True,
                 ),
                 db,
             )
@@ -98,7 +95,6 @@ def test_knowledge_rule_requires_evaluation_before_activation() -> None:
             db,
         )
         assert evaluated.lifecycle_status == "evaluated"
-        assert evaluated.is_active is False
 
         active = update_knowledge_rule(
             rule.id,
@@ -106,30 +102,3 @@ def test_knowledge_rule_requires_evaluation_before_activation() -> None:
             db,
         )
         assert active.lifecycle_status == "active"
-        assert active.is_active is True
-
-
-def test_historical_relevance_rule_is_read_only() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        rule = KnowledgeRule(
-            knowledge_type="relevance",
-            scope="global",
-            rule_text="历史规则",
-            lifecycle_status="active",
-            is_active=True,
-        )
-        db.add(rule)
-        db.commit()
-
-        with pytest.raises(HTTPException, match="read-only"):
-            update_knowledge_rule(
-                rule.id,
-                KnowledgeRuleUpdate(rule_text="不得修改"),
-                db,
-            )
-
-        db.refresh(rule)
-        assert rule.rule_text == "历史规则"
-        assert rule.is_active is True

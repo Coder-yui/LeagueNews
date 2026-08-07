@@ -70,8 +70,8 @@ def test_new_raw_revision_supersedes_active_downstream_projection() -> None:
             normalized_title="First version",
             normalized_text="First version",
             summary="First version",
-            category="测试",
             entities=[],
+            primary_topic="other",
             importance_score=0.5,
             target_language="zh-CN",
             translated_title="第一版",
@@ -88,7 +88,8 @@ def test_new_raw_revision_supersedes_active_downstream_projection() -> None:
             normalized_item_id=item.id,
             title="Versioned event",
             summary="Initial evidence",
-            category="测试",
+            event_kind="other",
+            aggregation_strategy="singleton",
         )
         item_run = ProcessingRun(
             raw_item_id=first.id,

@@ -80,16 +80,20 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         "raw_item_id": item.raw_item_id,
         "title": item.translated_title or item.normalized_title,
         "summary": item.summary,
-        "category": item.category,
         "entities": item.entities,
-        "content_type": item.content_type,
         "primary_topic": item.primary_topic,
+        "subtopic": item.subtopic,
         "secondary_topics": item.secondary_topics,
+        "source_kind": item.source_kind,
+        "information_stage": item.information_stage,
+        "content_form": item.content_form,
+        "product_scope": item.product_scope,
         "facets": item.facets,
         "ontology_version": item.ontology_version,
         "importance_score": item.importance_score,
         "importance_dimensions": item.importance_dimensions,
         "importance_policy_version": item.importance_policy_version,
+        "priority_score": item.priority_score,
         "source_id": source.id,
         "source_name": source.name,
         "source_base_url": source.base_url,
@@ -124,7 +128,9 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
             {
                 "event_id": membership.event_id,
                 "event_title": membership.event.title,
-                "event_type": membership.event.event_type,
+                "event_kind": membership.event.event_kind,
+                "aggregation_strategy": membership.event.aggregation_strategy,
+                "product_scope": membership.event.product_scope,
                 "membership_role": membership.membership_role,
                 "evidence_stance": membership.evidence_stance,
             }
@@ -172,9 +178,10 @@ def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 @router.get("/published-page", response_model=PublishedItemPageRead)
 def list_published_items_page(
     primary_topic: str | None = None,
-    content_type: str | None = None,
+    subtopic: str | None = None,
+    information_stage: str | None = None,
     search: str | None = None,
-    sort_by: str = Query(default="time", pattern="^(time|importance)$"),
+    sort_by: str = Query(default="time", pattern="^(time|priority|intrinsic)$"),
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -186,12 +193,10 @@ def list_published_items_page(
     ]
     if primary_topic:
         conditions.append(NormalizedItem.primary_topic == primary_topic)
-    if content_type:
-        conditions.append(
-            NormalizedItem.content_type.is_(None)
-            if content_type == "null"
-            else NormalizedItem.content_type == content_type
-        )
+    if subtopic:
+        conditions.append(NormalizedItem.subtopic == subtopic)
+    if information_stage:
+        conditions.append(NormalizedItem.information_stage == information_stage)
     if search:
         search_value = search.strip()
         if search_value.isdigit():
@@ -213,7 +218,8 @@ def list_published_items_page(
     total = db.scalar(count_statement) or 0
     sort_column = {
         "time": func.coalesce(RawItem.published_at, RawItem.ingested_at),
-        "importance": NormalizedItem.importance_score,
+        "priority": NormalizedItem.priority_score,
+        "intrinsic": NormalizedItem.importance_score,
     }[sort_by]
     ordering = (
         (sort_column.asc(), NormalizedItem.id.asc())
@@ -241,28 +247,32 @@ def list_published_items_page(
         )
         if value
     ]
-    content_type_options = [
+    subtopic_options = [
         value
         for value in db.scalars(
-            select(NormalizedItem.content_type)
+            select(NormalizedItem.subtopic)
             .where(*option_conditions)
             .distinct()
-            .order_by(NormalizedItem.content_type)
+            .order_by(NormalizedItem.subtopic)
         )
         if value
     ]
-    if db.scalar(
-        select(func.count(NormalizedItem.id)).where(
-            *option_conditions,
-            NormalizedItem.content_type.is_(None),
+    information_stage_options = [
+        value
+        for value in db.scalars(
+            select(NormalizedItem.information_stage)
+            .where(*option_conditions)
+            .distinct()
+            .order_by(NormalizedItem.information_stage)
         )
-    ):
-        content_type_options.append("null")
+        if value
+    ]
     return {
         "items": [_published_payload(item) for item in db.scalars(statement)],
         "total": total,
         "topic_options": topic_options,
-        "content_type_options": content_type_options,
+        "subtopic_options": subtopic_options,
+        "information_stage_options": information_stage_options,
     }
 
 

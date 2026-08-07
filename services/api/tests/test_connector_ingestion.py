@@ -10,6 +10,7 @@ from app.connectors.base import RawItemCandidate
 from app.content_blocks import content_hash, text_from_content_blocks
 from app.core.database import Base
 from app.models.media_asset import MediaAsset
+from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.services.ingestion import ingest_connector_items
 
@@ -20,6 +21,29 @@ class PassThroughMediaStorage:
     ) -> tuple[list[dict[str, object]], list[Path]]:
         assert namespace == "test_web"
         return [dict(block) for block in blocks], []
+
+    def remove_files(self, paths: list[Path]) -> None:
+        assert paths == []
+
+
+class RepairingMediaStorage:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def materialize_blocks(
+        self, blocks: list[dict[str, object]], *, namespace: str
+    ) -> tuple[list[dict[str, object]], list[Path]]:
+        assert namespace == "test_web"
+        self.calls += 1
+        digest = "a" * 64
+        return [
+            {
+                **block,
+                "storage_path": f"/api/v1/media-assets/files/test_web/{digest}.jpg",
+                "mime_type": "image/jpeg",
+            }
+            for block in blocks
+        ], []
 
     def remove_files(self, paths: list[Path]) -> None:
         assert paths == []
@@ -215,3 +239,72 @@ def test_ingestion_ignores_semantically_volatile_tieba_media_urls() -> None:
         assert skipped.skipped[0].id == first.created[0].id
         assert len(revised.revised) == 1
         assert revised.revised[0].revision == 2
+
+
+def test_duplicate_ingestion_repairs_missing_media_without_new_revision() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Repair source", connector_type="test_web")
+        db.add(source)
+        db.commit()
+        item = RawItemCandidate(
+            external_id="repair-1",
+            native_title="Repair media",
+            canonical_url="https://example.com/repair-1",
+            content_kind="article",
+            author_name="Author",
+            language="en",
+            published_at=None,
+            content_blocks=[
+                {
+                    "type": "image",
+                    "source_url": "https://cdn.example.com/repair.jpg",
+                    "mime_type": "image/jpeg",
+                }
+            ],
+            provenance={"fixture": "repair"},
+        )
+
+        first = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[item],
+                media_storage=PassThroughMediaStorage(),
+            )
+        )
+        assert len(first.created) == 1
+        assert first.created[0].media_assets[0].storage_path is None
+
+        storage = RepairingMediaStorage()
+        repeated = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[item],
+                media_storage=storage,
+            )
+        )
+        repeated_again = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[item],
+                media_storage=storage,
+            )
+        )
+
+        raw_items = list(db.scalars(select(RawItem)))
+        media = db.scalar(select(MediaAsset))
+        assert len(raw_items) == 1
+        assert repeated.created == []
+        assert repeated.skipped[0].id == first.created[0].id
+        assert repeated_again.created == []
+        assert storage.calls == 1
+        assert media is not None
+        assert media.storage_path == (
+            "/api/v1/media-assets/files/test_web/" + "a" * 64 + ".jpg"
+        )
+        assert media.sha256 == "a" * 64
+        assert "storage_path" not in raw_items[0].content_blocks[0]

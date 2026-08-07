@@ -26,7 +26,7 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
       <div className="message-card-index">{String(index + 1).padStart(2, "0")}</div>
       <div className="message-card-copy">
         <div className="message-card-meta">
-          <span>{item.category}</span>
+          <span>{item.primary_topic} · {item.subtopic}</span>
           <time dateTime={publishedAt}>
             {new Date(publishedAt).toLocaleString("zh-CN", {
               month: "numeric",

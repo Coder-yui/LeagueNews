@@ -53,7 +53,8 @@ export default async function Home() {
           <h2><Link href={`/messages/${topItem.id}`}>{topItem.title}</Link></h2>
           <p>{topItem.summary}</p>
           <div className="tag-row">
-            <span>{topItem.category}</span>
+            <span>{topItem.primary_topic}</span>
+            <span>{topItem.subtopic}</span>
           </div>
         </section>
       )}

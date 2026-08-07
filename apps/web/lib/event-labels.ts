@@ -21,15 +21,21 @@ const credibilityLabels: Record<string, string> = {
 };
 
 const eventTypeLabels: Record<string, string> = {
-  patch: "版本",
-  major_gameplay_change: "重大玩法改动",
-  match: "比赛",
-  transfer: "转会",
-  roster: "阵容",
-  release: "发布",
-  activity: "活动",
-  incident: "事件",
-  tournament: "赛事节点",
+  gameplay_update: "玩法更新",
+  gameplay_release: "玩法发布",
+  cosmetic_release: "外观发布",
+  roster_change: "阵容变动",
+  esports_match: "赛事对局",
+  esports_schedule: "赛事日程",
+  qualification_change: "晋级变化",
+  commercial_offer: "商业内容",
+  player_activity: "玩家活动",
+  service_incident: "服务事件",
+  disciplinary_action: "纪律处罚",
+  security_notice: "安全公告",
+  media_release: "媒体发布",
+  corporate_announcement: "公司公告",
+  community_activity: "社区活动",
   other: "资讯事件",
 };
 

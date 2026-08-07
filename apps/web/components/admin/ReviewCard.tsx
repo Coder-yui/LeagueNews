@@ -8,15 +8,23 @@ type ReviewKind = "message" | "event";
 type Proposal = Record<string, unknown>;
 
 const stageLabels: Record<string, string> = {
+  relevance: "相关性与产品范围审核",
   translation: "翻译与术语审核",
-  fact_extract: "事实抽取审核",
-  classify: "分类与实体角色审核",
   fact_classify: "事实抽取与分类审核",
   importance: "重要性审核",
   claim_gen: "事实断言审核",
-  item_analysis: "最终消息审核",
   event_decision: "事件归属审核",
 };
+
+const correctionOptions = {
+  sourceKind: ["first_party", "attributed_report", "data_mined", "community", "unknown"],
+  informationStage: ["announcement", "preview", "active", "result", "update", "correction", "rumor", "speculation", "reminder", "commentary"],
+  contentForm: ["original", "repost", "roundup"],
+  eventAssertion: ["asserted", "speculative", "negated", "context_only"],
+  primaryTopic: ["patch", "esports", "roster", "champion", "skin", "activity", "game_mode", "tft", "commerce", "service", "community", "business", "universe", "media", "other"],
+  subtopic: ["patch_notes", "patch_preview", "hotfix", "pbe_change", "champion_release", "champion_update", "item_rune_system", "game_mode_release", "game_mode_update", "tft_set", "tft_patch", "skin_release", "tft_cosmetic", "shop_rotation", "shop_offer", "free_rotation", "free_reward", "event_pass", "in_game_activity", "ticketing", "match_schedule", "match_result", "standings_qualification", "roster_move", "disciplinary", "maintenance", "outage", "security", "merch", "partnership", "corporate", "lore", "music_video", "community_event", "gameplay_guide", "community_post", "other"],
+  productScope: ["lol_pc", "lol_esports", "tft", "lol_universe", "riot_corporate", "lol_merch_music", "wild_rift", "2xko", "unrelated", "uncertain"],
+} as const;
 
 const dimensionLabels: Record<string, string> = {
   editorial_subtype: "编辑类型",
@@ -100,6 +108,52 @@ function ReviewField({
   );
 }
 
+function CorrectionSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: readonly string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label>
+      {label}
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option} value={option}>{option}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function RelevanceReview({ proposal }: { proposal: Proposal }) {
+  const gate = objectValue(proposal.evidence_gate);
+  return (
+    <section className="review-content-panel">
+      <ReviewField label="处理结论">
+        <strong>{proposal.is_lol_relevant === true ? "保留" : "排除"}</strong>
+      </ReviewField>
+      <ReviewField label="产品范围">
+        <strong>{textValue(proposal.product_scope)}</strong>
+      </ReviewField>
+      <ReviewField label="置信度">
+        <strong>{scoreValue(proposal.confidence)}</strong>
+      </ReviewField>
+      <ReviewField label="依据" wide>
+        <p>{textValue(proposal.reason)}</p>
+      </ReviewField>
+      <ReviewField label="可用证据" wide>
+        <p>{textList(gate.evidence_sources)}</p>
+      </ReviewField>
+    </section>
+  );
+}
+
 function TranslationReview({ proposal }: { proposal: Proposal }) {
   const media = objectList(proposal.translated_media_extractions);
   return (
@@ -136,71 +190,33 @@ function TranslationReview({ proposal }: { proposal: Proposal }) {
   );
 }
 
-function FactReview({ proposal }: { proposal: Proposal }) {
-  const entities = objectList(proposal.entities);
+function EventMentionsReview({ proposal }: { proposal: Proposal }) {
+  const mentions = objectList(proposal.event_mentions);
   return (
-    <section className="review-content-panel">
-      <ReviewField label="事实标题" wide>
-        <strong>{textValue(proposal.title)}</strong>
-      </ReviewField>
-      <ReviewField label="事实摘要" wide>
-        <p>{textValue(proposal.summary)}</p>
-      </ReviewField>
-      <ReviewField label="分类">
-        <strong>{textValue(proposal.category)}</strong>
-      </ReviewField>
-      <ReviewField label="实体" wide>
-        <div className="review-entity-list">
-          {entities.length > 0 ? (
-            entities.map((entity, index) => (
-              <code key={`${entityLabel(entity)}-${index}`}>
-                {entityLabel(entity)}
+    <ReviewField label="可聚合事件提及" wide>
+      <div className="review-entity-list merged-entity-list">
+        {mentions.length > 0 ? (
+          mentions.map((mention, index) => {
+            const temporal = objectValue(mention.temporal);
+            const identities = objectList(mention.identity_entities)
+              .map((entity) => textValue(entity.canonical_name ?? entity.name))
+              .join("、");
+            return (
+              <code key={`${textValue(mention.subtopic)}-mention-${index}`}>
+                <span>
+                  {textValue(mention.topic)} / {textValue(mention.subtopic)} · {identities}
+                </span>
+                <b>
+                  {textValue(mention.assertion)} · {textValue(mention.membership_role)} · {textValue(temporal.event_date)}
+                </b>
               </code>
-            ))
-          ) : (
-            <em>未提取实体</em>
-          )}
-        </div>
-      </ReviewField>
-    </section>
-  );
-}
-
-function ClassificationReview({ proposal }: { proposal: Proposal }) {
-  const temporal = objectValue(proposal.temporal);
-  const roles = objectList(proposal.entity_roles);
-  return (
-    <section className="review-content-panel">
-      <ReviewField label="内容类型">
-        <strong>{textValue(proposal.content_type)}</strong>
-      </ReviewField>
-      <ReviewField label="主主题">
-        <strong>{textValue(proposal.topic)}</strong>
-      </ReviewField>
-      <ReviewField label="次主题">
-        <strong>{textList(proposal.secondary_topics)}</strong>
-      </ReviewField>
-      <ReviewField label="时间属性" wide>
-        <p>
-          确定性：{textValue(temporal.certainty)}；周期内容：
-          {temporal.is_recurring === true ? "是" : "否"}；周期：
-          {textValue(temporal.recurrence_window)}
-        </p>
-      </ReviewField>
-      <ReviewField label="实体角色" wide>
-        <div className="review-entity-list">
-          {roles.length > 0 ? (
-            roles.map((role, index) => (
-              <code key={`${entityLabel(role)}-${index}`}>
-                {entityLabel(role)}
-              </code>
-            ))
-          ) : (
-            <em>未分配实体角色</em>
-          )}
-        </div>
-      </ReviewField>
-    </section>
+            );
+          })
+        ) : (
+          <em>无可聚合事件提及</em>
+        )}
+      </div>
+    </ReviewField>
   );
 }
 
@@ -235,17 +251,20 @@ function CombinedFactClassificationReview({
         </ReviewField>
       </div>
       <div className="review-content-panel review-four-columns">
-        <ReviewField label="分类">
-          <strong>{textValue(proposal.category)}</strong>
+        <ReviewField label="来源性质">
+          <strong>{textValue(proposal.source_kind)}</strong>
         </ReviewField>
-        <ReviewField label="内容类型">
-          <strong>{textValue(proposal.content_type)}</strong>
+        <ReviewField label="信息阶段">
+          <strong>{textValue(proposal.information_stage)}</strong>
+        </ReviewField>
+        <ReviewField label="内容形式">
+          <strong>{textValue(proposal.content_form)}</strong>
         </ReviewField>
         <ReviewField label="主主题">
           <strong>{textValue(proposal.topic)}</strong>
         </ReviewField>
-        <ReviewField label="次主题">
-          <strong>{textList(proposal.secondary_topics)}</strong>
+        <ReviewField label="子主题">
+          <strong>{textValue(proposal.subtopic)}</strong>
         </ReviewField>
       </div>
       <div className="review-content-panel review-temporal-row">
@@ -257,6 +276,9 @@ function CombinedFactClassificationReview({
         </ReviewField>
         <ReviewField label="周期">
           <strong>{textValue(temporal.recurrence_window)}</strong>
+        </ReviewField>
+        <ReviewField label="事件断言">
+          <strong>{textValue(proposal.event_assertion)}</strong>
         </ReviewField>
       </div>
       <div className="review-content-panel">
@@ -279,6 +301,9 @@ function CombinedFactClassificationReview({
             {entities.length === 0 && <em>未提取实体</em>}
           </div>
         </ReviewField>
+      </div>
+      <div className="review-content-panel">
+        <EventMentionsReview proposal={proposal} />
       </div>
     </section>
   );
@@ -396,46 +421,6 @@ function ClaimsReview({ proposal }: { proposal: Proposal }) {
   );
 }
 
-function FinalItemReview({ proposal }: { proposal: Proposal }) {
-  const entities = objectList(proposal.entities);
-  const claims = objectList(proposal.fact_claims);
-  return (
-    <section className="review-content-panel">
-      <ReviewField label="最终标题" wide>
-        <strong>{textValue(proposal.normalized_title)}</strong>
-      </ReviewField>
-      <ReviewField label="最终摘要" wide>
-        <p>{textValue(proposal.summary)}</p>
-      </ReviewField>
-      <ReviewField label="分类">
-        <strong>{textValue(proposal.category)}</strong>
-      </ReviewField>
-      <ReviewField label="内容类型">
-        <strong>{textValue(proposal.content_type)}</strong>
-      </ReviewField>
-      <ReviewField label="主主题">
-        <strong>{textValue(proposal.primary_topic)}</strong>
-      </ReviewField>
-      <ReviewField label="重要性">
-        <strong>{scoreValue(proposal.importance_score)}</strong>
-      </ReviewField>
-      <ReviewField label="实体" wide>
-        <div className="review-entity-list">
-          {entities.map((entity, index) => (
-            <code key={`${entityLabel(entity)}-${index}`}>
-              {entityLabel(entity)}
-            </code>
-          ))}
-          {entities.length === 0 && <em>未提取实体</em>}
-        </div>
-      </ReviewField>
-      <ReviewField label="事实断言">
-        <strong>{claims.length} 条</strong>
-      </ReviewField>
-    </section>
-  );
-}
-
 function EventDecisionReview({ proposal }: { proposal: Proposal }) {
   const item = objectValue(proposal.item);
   const decision = objectValue(proposal.decision);
@@ -453,7 +438,7 @@ function EventDecisionReview({ proposal }: { proposal: Proposal }) {
           <strong>{textValue(item.title)}</strong>
           <p>{textValue(item.summary)}</p>
         </div>
-        <b>{textValue(item.category)}</b>
+        <b>{textValue(item.primary_topic)} · {textValue(item.subtopic)}</b>
       </div>
       <div className="event-review-decision-head">
         <div>
@@ -497,12 +482,17 @@ function EventDecisionReview({ proposal }: { proposal: Proposal }) {
                   <strong>{textValue(membership.timeline_note)}</strong>
                 </div>
                 <dl>
-                  <div><dt>事件类型</dt><dd>{textValue(membership.event_type)}</dd></div>
+                  <div><dt>事件事实</dt><dd>{textValue(membership.event_kind)}</dd></div>
+                  <div><dt>聚合策略</dt><dd>{textValue(membership.aggregation_strategy)}</dd></div>
                   <div><dt>消息角色</dt><dd>{textValue(membership.membership_role)}</dd></div>
+                  <div><dt>身份解析</dt><dd>{textValue(membership.identity_resolution)}</dd></div>
                   <div><dt>证据立场</dt><dd>{textValue(membership.evidence_stance)}</dd></div>
                   <div><dt>更新类型</dt><dd>{textValue(membership.update_kind)}</dd></div>
                   <div><dt>事件状态</dt><dd>{textValue(membership.lifecycle_status)}</dd></div>
                 </dl>
+                {Boolean(membership.identity_rationale) && (
+                  <p>{textValue(membership.identity_rationale)}</p>
+                )}
                 <code>{textValue(membership.aggregation_key)}</code>
               </article>
             );
@@ -540,7 +530,7 @@ function EventDecisionReview({ proposal }: { proposal: Proposal }) {
                 <div>
                   <span>
                     Event #{textValue(candidate.event_id)} ·{" "}
-                    {textValue(candidate.event_type)}
+                    {textValue(candidate.event_kind)}
                   </span>
                   <strong>{textValue(candidate.title)}</strong>
                   <p>{textValue(candidate.summary)}</p>
@@ -550,7 +540,7 @@ function EventDecisionReview({ proposal }: { proposal: Proposal }) {
                   <span>
                     匹配 {textValue(candidate.match_level)} ·{" "}
                     {typeof candidate.score === "number"
-                      ? `${Math.round(candidate.score * 100)}%`
+                      ? `${candidate.score.toFixed(1)} 分`
                       : "—"}
                   </span>
                   <small>
@@ -577,11 +567,8 @@ function ProposalPreview({
   stage: string;
   proposal: Proposal;
 }) {
+  if (stage === "relevance") return <RelevanceReview proposal={proposal} />;
   if (stage === "translation") return <TranslationReview proposal={proposal} />;
-  if (stage === "fact_extract") return <FactReview proposal={proposal} />;
-  if (stage === "classify") {
-    return <ClassificationReview proposal={proposal} />;
-  }
   if (stage === "fact_classify") {
     return <CombinedFactClassificationReview proposal={proposal} />;
   }
@@ -589,9 +576,6 @@ function ProposalPreview({
     return <ImportanceReview proposal={proposal} />;
   }
   if (stage === "claim_gen") return <ClaimsReview proposal={proposal} />;
-  if (stage === "item_analysis") {
-    return <FinalItemReview proposal={proposal} />;
-  }
   return (
     <div className="review-content-panel">
       <ReviewField label="审核内容" wide>
@@ -624,14 +608,52 @@ export function ReviewCard({
     },
   ]);
   const stage = "stage" in review ? review.stage : "event_decision";
-  const [contentType, setContentType] = useState(
-    typeof review.proposal.content_type === "string"
-      ? review.proposal.content_type
+  const [sourceKind, setSourceKind] = useState(
+    typeof review.proposal.source_kind === "string"
+      ? review.proposal.source_kind
+      : "",
+  );
+  const [productScope, setProductScope] = useState(
+    typeof review.proposal.product_scope === "string"
+      ? review.proposal.product_scope
+      : "uncertain",
+  );
+  const [isRelevant, setIsRelevant] = useState(
+    review.proposal.is_lol_relevant === true,
+  );
+  const [informationStage, setInformationStage] = useState(
+    typeof review.proposal.information_stage === "string"
+      ? review.proposal.information_stage
+      : "",
+  );
+  const [contentForm, setContentForm] = useState(
+    typeof review.proposal.content_form === "string"
+      ? review.proposal.content_form
+      : "",
+  );
+  const [eventAssertion, setEventAssertion] = useState(
+    typeof review.proposal.event_assertion === "string"
+      ? review.proposal.event_assertion
+      : "asserted",
+  );
+  const [eventMentionsDraft, setEventMentionsDraft] = useState(
+    JSON.stringify(objectList(review.proposal.event_mentions), null, 2),
+  );
+  const [primaryTopic, setPrimaryTopic] = useState(
+    typeof review.proposal.primary_topic === "string"
+      ? review.proposal.primary_topic
+      : typeof review.proposal.topic === "string"
+        ? review.proposal.topic
+        : "",
+  );
+  const [subtopic, setSubtopic] = useState(
+    typeof review.proposal.subtopic === "string"
+      ? review.proposal.subtopic
       : "",
   );
   const [importance, setImportance] = useState(
     typeof review.proposal.importance_score === "number"
-      ? String(review.proposal.importance_score)
+      ? String(Math.round(review.proposal.importance_score * 100))
       : "",
   );
   const [eventDraft, setEventDraft] = useState(
@@ -642,7 +664,7 @@ export function ReviewCard({
   const isOcrStage = kind === "message" && stage === "image_ocr";
   const canCorrect =
     kind === "event" ||
-    ["classify", "fact_classify", "importance", "item_analysis"].includes(stage);
+    ["relevance", "fact_classify", "importance"].includes(stage);
 
   const act = async (action: "approve" | "reject") => {
     setBusy(action);
@@ -709,15 +731,24 @@ export function ReviewCard({
               note: null,
             }
           : {
-              content_type:
-                ["classify", "fact_classify", "item_analysis"].includes(stage) &&
-                contentType
-                  ? contentType
+              product_scope: stage === "relevance" ? productScope : null,
+              is_lol_relevant: stage === "relevance" ? isRelevant : null,
+              source_kind: sourceKind || null,
+              information_stage: informationStage || null,
+              content_form: contentForm || null,
+              event_assertion:
+                stage === "fact_classify"
+                  ? eventAssertion
                   : null,
+              event_mentions:
+                stage === "fact_classify"
+                  ? (JSON.parse(eventMentionsDraft) as Proposal[])
+                  : null,
+              primary_topic: primaryTopic || null,
+              subtopic: subtopic || null,
               importance_score:
-                ["importance", "item_analysis"].includes(stage) &&
-                importance !== ""
-                  ? Number(importance)
+                stage === "importance" && importance !== ""
+                  ? Number(importance) / 100
                   : null,
               note: null,
             };
@@ -767,25 +798,47 @@ export function ReviewCard({
       )}
       {editing && canCorrect && kind === "message" && (
         <div className="admin-correction-grid">
-          {["classify", "fact_classify", "item_analysis"].includes(stage) && (
-            <label>
-              内容类型
-              <input
-                value={contentType}
-                onChange={(event) => setContentType(event.target.value)}
-              />
-            </label>
+          {stage === "relevance" && (
+            <>
+              <CorrectionSelect label="产品范围" value={productScope} options={correctionOptions.productScope} onChange={(value) => {
+                setProductScope(value);
+                setIsRelevant(["lol_pc", "lol_esports", "tft", "lol_universe", "riot_corporate", "lol_merch_music"].includes(value));
+              }} />
+              <label>
+                保留为英雄联盟资讯
+                <input type="checkbox" checked={isRelevant} onChange={(event) => setIsRelevant(event.target.checked)} />
+              </label>
+            </>
           )}
-          {["importance", "item_analysis"].includes(stage) && (
+          {stage === "fact_classify" && (
+            <>
+              <CorrectionSelect label="来源性质" value={sourceKind} options={correctionOptions.sourceKind} onChange={setSourceKind} />
+              <CorrectionSelect label="信息阶段" value={informationStage} options={correctionOptions.informationStage} onChange={setInformationStage} />
+              <CorrectionSelect label="内容形式" value={contentForm} options={correctionOptions.contentForm} onChange={setContentForm} />
+              <CorrectionSelect label="事件断言" value={eventAssertion} options={correctionOptions.eventAssertion} onChange={setEventAssertion} />
+              <CorrectionSelect label="主主题" value={primaryTopic} options={correctionOptions.primaryTopic} onChange={setPrimaryTopic} />
+              <CorrectionSelect label="子主题" value={subtopic} options={correctionOptions.subtopic} onChange={setSubtopic} />
+            </>
+          )}
+          {stage === "importance" && (
             <label>
-              重要性 0–1
+              重要性 0–100
               <input
                 type="number"
                 min="0"
-                max="1"
-                step="0.01"
+                max="100"
+                step="1"
                 value={importance}
                 onChange={(event) => setImportance(event.target.value)}
+              />
+            </label>
+          )}
+          {stage === "fact_classify" && (
+            <label className="admin-review-note">
+              修改事件提及 JSON
+              <textarea
+                value={eventMentionsDraft}
+                onChange={(event) => setEventMentionsDraft(event.target.value)}
               />
             </label>
           )}
@@ -908,8 +961,8 @@ export function ReviewCard({
             ? "批准中…"
             : kind === "event"
               ? "批准事件决策"
-              : stage === "item_analysis"
-                ? "批准并完成处理"
+              : stage === "claim_gen"
+                ? "批准并发布消息"
                 : "批准并进入下一阶段"}
         </button>
         {!isOcrStage && (

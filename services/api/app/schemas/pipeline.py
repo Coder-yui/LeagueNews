@@ -8,12 +8,9 @@ PipelineStage = Literal[
     "relevance",
     "image_ocr",
     "translation",
-    "fact_extract",
-    "classify",
     "fact_classify",
     "importance",
     "claim_gen",
-    "item_analysis",
     "event_decision",
 ]
 
@@ -30,7 +27,6 @@ class PipelineCorrectionRead(BaseModel):
     id: int
     raw_item_id: int
     normalized_item_id: int | None
-    event_id: int | None
     original_event_ids: list[int]
     source_processing_run_id: int | None
     source_event_run_id: int | None

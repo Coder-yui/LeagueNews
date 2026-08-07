@@ -10,7 +10,7 @@ export function MultiMembershipView({ events, onRemove }: { events: EventDetail[
   for (const event of events) for (const message of event.messages) {
     const row = rows.get(message.normalized_item_id) ?? { itemId: message.normalized_item_id, title: message.title, primary: [], component: [] };
     const target = message.membership_role === "component" ? row.component : row.primary;
-    target.push({ id: event.id, title: event.title, type: event.event_type }); rows.set(message.normalized_item_id, row);
+    target.push({ id: event.id, title: event.title, type: event.event_kind }); rows.set(message.normalized_item_id, row);
   }
   const visible = [...rows.values()].filter((row) => row.component.length > 0);
   if (!visible.length) return <div className="admin-empty">当前结果中没有 component 多归属消息。</div>;

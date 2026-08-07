@@ -56,7 +56,8 @@ class RawItemRead(BaseModel):
     source_name: str
     source_connector_type: str
     normalized_item_id: int | None = None
-    content_type: str | None = None
+    subtopic: str | None = None
+    information_stage: str | None = None
     summary: str | None = None
     importance_score: float | None = None
     current_pipeline_stage: str | None = None
@@ -85,4 +86,4 @@ class RawItemAdminPageRead(BaseModel):
     total_items: int
     status_counts: dict[str, int]
     source_options: list[dict[str, Any]]
-    content_type_options: list[str]
+    subtopic_options: list[str]

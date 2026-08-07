@@ -53,8 +53,8 @@ def _event(db: Session):
         normalized_title="Digest input",
         normalized_text="Digest input",
         summary="Digest input",
-        category="news",
         entities=[],
+        primary_topic="other",
         importance_score=0.5,
         analysis_model="test",
     )
@@ -65,7 +65,8 @@ def _event(db: Session):
         normalized_item_id=item.id,
         title="Digest event",
         summary="Digest event summary",
-        category="news",
+        event_kind="other",
+        aggregation_strategy="singleton",
     )
 
 

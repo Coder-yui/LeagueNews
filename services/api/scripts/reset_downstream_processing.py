@@ -7,11 +7,35 @@ import app.models  # noqa: F401
 from app.core.database import engine
 from app.models.event import Event, EventAggregationRun
 from app.models.intelligence import Claim, Digest
+from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem
+from app.models.ocr_lab import OCRProfile, OCRTestRun
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
-from app.models.workflow import KnowledgeRule, ProcessingRun, ReviewTask
+from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
+
+
+DERIVED_TABLES = (
+    "event_claims",
+    "claims",
+    "digest_revisions",
+    "digests",
+    "event_review_tasks",
+    "event_aggregation_runs",
+    "event_revisions",
+    "event_messages",
+    "events",
+    "normalized_item_media_extractions",
+    "normalized_item_revisions",
+    "pipeline_jobs",
+    "processing_checkpoints",
+    "pipeline_corrections",
+    "review_tasks",
+    "processing_runs",
+    "media_extractions",
+    "normalized_items",
+)
 
 
 def _counts(db: Session) -> dict[str, int]:
@@ -24,16 +48,38 @@ def _counts(db: Session) -> dict[str, int]:
         PipelineCorrection,
         ProcessingCheckpoint,
         MediaExtraction,
+        OCRTestRun,
         Event,
         EventAggregationRun,
         Claim,
         Digest,
         KnowledgeRule,
+        GlossaryTerm,
+        OCRProfile,
     )
-    return {
+    counts = {
         model.__tablename__: int(db.scalar(select(func.count()).select_from(model)) or 0)
         for model in models
     }
+    counts["media_assets_with_ocr"] = int(
+        db.scalar(
+            select(func.count()).select_from(MediaAsset).where(MediaAsset.ocr_text.is_not(None))
+        )
+        or 0
+    )
+    counts["published_media_assets"] = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MediaAsset)
+            .where(
+                (MediaAsset.public_path.is_not(None))
+                | (MediaAsset.visibility != "private")
+                | (MediaAsset.published_at.is_not(None))
+            )
+        )
+        or 0
+    )
+    return counts
 
 
 def _validate_target(
@@ -76,7 +122,7 @@ def main() -> None:
     parser.add_argument(
         "--expected-raw-items",
         type=int,
-        default=609,
+        default=737,
         help="hard safety check before destructive execution",
     )
     args = parser.parse_args()
@@ -102,38 +148,12 @@ def main() -> None:
             expected_database=args.expected_database,
             expected_raw_items=args.expected_raw_items,
         )
-        # OCR profiles are reusable configuration and are intentionally kept.
-        # A profile may reference the test run it was promoted from, so use
-        # DELETE and let ON DELETE SET NULL clear that provenance pointer.
+        # OCR profiles, rules, and glossary terms are reusable configuration.
+        # Test runs, extracted text, publication state, and every message-level
+        # projection are derived data and must be rebuilt from RawItem evidence.
         db.execute(text("DELETE FROM ocr_test_runs"))
-        db.execute(
-            text(
-                """
-                TRUNCATE TABLE
-                    event_claims,
-                    claims,
-                    digest_revisions,
-                    digests,
-                    event_review_tasks,
-                    event_aggregation_runs,
-                    event_revisions,
-                    event_messages,
-                    events,
-                    normalized_item_media_extractions,
-                    normalized_item_revisions,
-                    pipeline_jobs,
-                    processing_checkpoints,
-                    pipeline_corrections,
-                    review_tasks,
-                    processing_runs,
-                    media_extractions,
-                    knowledge_rules,
-                    glossary_terms,
-                    normalized_items
-                RESTART IDENTITY
-                """
-            )
-        )
+        for table in DERIVED_TABLES:
+            db.execute(text(f"DELETE FROM {table}"))
         db.execute(
             text(
                 """
@@ -142,6 +162,10 @@ def main() -> None:
                     public_path = NULL,
                     visibility = 'private',
                     published_at = NULL
+                WHERE ocr_text IS NOT NULL
+                   OR public_path IS NOT NULL
+                   OR visibility <> 'private'
+                   OR published_at IS NOT NULL
                 """
             )
         )

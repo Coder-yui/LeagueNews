@@ -1,7 +1,5 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
-from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,6 +14,11 @@ from app.models.raw_item import RawItem
 from app.models.raw_item_source_payload import RawItemSourcePayload
 from app.models.source import Source
 from app.services.automatic_pipeline import enqueue_pipeline_job
+from app.services.media_repair import (
+    MediaStorageProtocol,
+    repair_raw_item_media,
+    storage_digest,
+)
 from app.services.media_storage import MediaStorage
 from app.services.raw_item_revision_lifecycle import (
     supersede_previous_raw_revision,
@@ -27,14 +30,6 @@ class IngestionResult:
     created: list[RawItem] = field(default_factory=list)
     revised: list[RawItem] = field(default_factory=list)
     skipped: list[RawItem] = field(default_factory=list)
-
-
-class MediaStorageProtocol(Protocol):
-    async def materialize_blocks(
-        self, blocks: list[dict[str, object]], *, namespace: str
-    ) -> tuple[list[dict[str, object]], list[Path]]: ...
-
-    def remove_files(self, paths: list[Path]) -> None: ...
 
 
 async def ingest_connector_items(
@@ -67,6 +62,14 @@ async def ingest_connector_items(
                 content_hash=content_hash,
             )
             if existing:
+                repair = await repair_raw_item_media(
+                    db,
+                    raw_item=existing,
+                    namespace=source.connector_type,
+                    candidate_blocks=blocks,
+                    media_storage=storage,
+                )
+                created_files.extend(repair.created_files)
                 result.skipped.append(existing)
                 continue
 
@@ -108,7 +111,7 @@ async def ingest_connector_items(
                         block_index=block_index,
                         source_url=block.get("source_url"),
                         storage_path=block.get("storage_path"),
-                        sha256=_storage_digest(block.get("storage_path")),
+                        sha256=storage_digest(block.get("storage_path")),
                         mime_type=block.get("mime_type"),
                         alt_text=block.get("alt_text"),
                         caption=block.get("caption"),
@@ -168,15 +171,3 @@ def _find_existing(
         if hash_content_blocks(existing.content_blocks) == content_hash:
             return existing, existing
     return None, None
-
-
-def _storage_digest(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    stem = Path(urlparse(value).path).stem
-    return (
-        stem
-        if len(stem) == 64
-        and all(character in "0123456789abcdef" for character in stem)
-        else None
-    )

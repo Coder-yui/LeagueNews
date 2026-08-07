@@ -1,4 +1,4 @@
-import { objectNumber, score } from "./admin-utils";
+import { objectNumber, pointScore, score } from "./admin-utils";
 
 const legacyDimensions = [["scope", "范围"], ["magnitude", "幅度"], ["actionability", "行动"], ["duration", "持续"], ["novelty", "新颖"]] as const;
 const editorialDimensions = [
@@ -21,7 +21,7 @@ export function ImportanceDimensions({ scoreValue, dimensions: values }: { score
   if ("editorial_subtype" in values) {
     return (
       <section className="admin-breakdown importance" aria-label="重要性编辑特征">
-        <header><span>重要性</span><strong>{score(scoreValue)}</strong></header>
+        <header><span>重要性</span><strong>{pointScore(scoreValue)} / 100</strong></header>
         {editorialDimensions.map(([key, label]) => {
           const feature = objectValue(values[key]);
           return <div key={key}><span>{label}</span><em>{String(feature.value ?? "—")}</em></div>;
@@ -31,7 +31,7 @@ export function ImportanceDimensions({ scoreValue, dimensions: values }: { score
   }
   return (
     <section className="admin-breakdown importance" aria-label="旧版重要性维度">
-      <header><span>重要性</span><strong>{score(scoreValue)}</strong></header>
+      <header><span>重要性</span><strong>{pointScore(scoreValue)} / 100</strong></header>
       {legacyDimensions.map(([key, label]) => {
         const aliases: Record<string, string> = { scope: "impact_scope", magnitude: "mag", actionability: "act", duration: "dur", novelty: "nov" };
         const value = objectNumber(values[key] ?? values[aliases[key]]);

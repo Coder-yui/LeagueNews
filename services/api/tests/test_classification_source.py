@@ -7,7 +7,7 @@ from app.domain.message_taxonomy import classification_catalog
 from app.models.raw_item import RawItem
 from app.models.raw_item_source_payload import RawItemSourcePayload
 from app.models.source import Source
-from app.services.classification_source import resolve_classification_source
+from app.services.classification_source import _normal_url, resolve_classification_source
 
 
 def _session() -> Session:
@@ -145,3 +145,41 @@ def test_quote_and_original_use_current_source_kind() -> None:
             assert "game_patch_notes" not in {
                 value["code"] for value in candidates["message_types"]
             }
+
+
+def test_upstream_url_normalization_security_boundaries() -> None:
+    assert _normal_url("https://x.com/LeagueOfLegends/status/123") == (
+        "https://x.com/LeagueOfLegends/status/123"
+    )
+    assert _normal_url("https://user:secret@x.com/LeagueOfLegends/status/123") is None
+    assert _normal_url(
+        "https://x.com/LeagueOfLegends/status/123?token=secret&utm_source=test#reply"
+    ) == "https://x.com/LeagueOfLegends/status/123"
+
+
+def test_normalized_upstream_url_still_matches_source() -> None:
+    with _session() as db:
+        db.add(
+            Source(
+                name="Riot official",
+                connector_type="x_twitter",
+                external_key="leagueoflegends",
+                base_url="https://x.com/LeagueOfLegends",
+                is_official=True,
+            )
+        )
+        raw = _raw(
+            db,
+            current_official=False,
+            upstream_url=(
+                "https://x.com/LeagueOfLegends/status/123?token=secret#tracking"
+            ),
+        )
+
+        result = resolve_classification_source(db, raw, content_form="repost")
+
+        assert result["source_kind"] == "official"
+        assert result["basis"] == "upstream"
+        assert result["upstream_source_url"] == (
+            "https://x.com/LeagueOfLegends/status/123"
+        )

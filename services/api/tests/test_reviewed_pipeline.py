@@ -75,6 +75,72 @@ def test_manual_importance_override_keeps_calculation_auditable() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("proposal", "content_form", "expected_error"),
+    [
+        (
+            {
+                "title": "",
+                "summary": "",
+                "entities": [],
+                "products": ["unknown"],
+                "content_form": "media_only",
+            },
+            "original",
+            "必须生成标题",
+        ),
+        (
+            {
+                "title": "已有标题",
+                "summary": "",
+                "entities": [],
+                "products": ["unknown"],
+                "content_form": "media_only",
+            },
+            "repost",
+            "必须生成摘要",
+        ),
+    ],
+)
+def test_manual_content_form_correction_rejects_missing_content_fields(
+    proposal: dict[str, object],
+    content_form: str,
+    expected_error: str,
+) -> None:
+    review = ReviewTask(
+        processing_run_id=1,
+        stage="message_analysis",
+        proposal=proposal,
+    )
+
+    with pytest.raises(ValueError, match=f"{expected_error}.*重新运行消息分析"):
+        _corrected_review_proposal(
+            review,
+            ReviewCorrectionApproval(content_form=content_form),
+        )
+
+
+def test_manual_content_correction_keeps_complete_message_valid() -> None:
+    review = ReviewTask(
+        processing_run_id=1,
+        stage="message_analysis",
+        proposal={
+            "title": "完整标题",
+            "summary": "完整摘要",
+            "entities": [],
+            "products": ["lol_pc"],
+            "content_form": "original",
+        },
+    )
+
+    corrected = _corrected_review_proposal(
+        review,
+        ReviewCorrectionApproval(content_form="quote"),
+    )
+
+    assert corrected["content_form"] == "quote"
+
+
 def test_importance_scoring_uses_approved_title_and_body() -> None:
     content = reviewed_pipeline._importance_scoring_content(
         {"translated_content_blocks": [{"id": "b0001", "type": "paragraph", "text": "第1楼"}]},
@@ -723,6 +789,83 @@ def test_importance_stage_combines_filtered_classification_and_scoring(
         assert review.proposal["importance_score"] == 0.86
 
 
+def test_importance_upgrades_legacy_analysis_source_and_final_projection(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class ClassificationImportanceClient:
+        async def classify_and_score_importance(self, **payload):
+            captured.update(payload)
+            return MessageClassificationImportanceResult(
+                message_type="game_community_discussion",
+                topics=["balance_gameplay"],
+                scale="minor",
+                audience_region="unknown",
+                competition_region="none",
+                prominence="normal",
+                skin_tier="none",
+                is_bulk_update=False,
+                evidence=["社区转发了版本改动讨论。"],
+            )
+
+    monkeypatch.setattr(reviewed_pipeline, "LLMClient", ClassificationImportanceClient)
+    with _session() as db:
+        raw = _raw_item(db, language="zh-CN")
+        translation = {
+            "normalized_text": "Patch discussion.",
+            "translated_title": "版本讨论",
+            "translated_text": "社区转发了版本改动讨论。",
+            "translated_content_blocks": [
+                {"type": "paragraph", "text": "社区转发了版本改动讨论。"}
+            ],
+            "translation_status": "not_required",
+        }
+        legacy_analysis = {
+            "title": "版本讨论",
+            "summary": "社区转发了版本改动讨论。",
+            "entities": [],
+            "products": ["lol_pc"],
+            "content_form": "repost",
+            "classification_version": "message-taxonomy-v2",
+            "knowledge_rules": [],
+        }
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="running",
+            current_stage="importance",
+            context={
+                "approved_translation_proposal": translation,
+                "approved_message_analysis_proposal": legacy_analysis,
+            },
+        )
+        db.add(run)
+        db.commit()
+
+        asyncio.run(reviewed_pipeline._generate_importance_review(db, run))
+
+        db.refresh(run)
+        upgraded = run.context["approved_message_analysis_proposal"]
+        assert upgraded["classification_version"] == "message-taxonomy-v3"
+        assert upgraded["classification_source"]["source_kind"] == "unknown"
+        assert captured["source_context"]["classification_source_kind"] == "unknown"
+        review = db.scalar(
+            select(ReviewTask).where(
+                ReviewTask.processing_run_id == run.id,
+                ReviewTask.stage == "importance",
+            )
+        )
+        proposal = reviewed_pipeline._build_item_proposal(
+            raw_item=raw,
+            translation_proposal=translation,
+            analysis_proposal=upgraded,
+            importance_proposal=review.proposal,
+        )
+        assert proposal["classification_version"] == "message-taxonomy-v3"
+        assert proposal["facets"]["classification_source"]["basis"] == "unresolved"
+
+
 def test_analysis_assembles_only_approved_stage_outputs() -> None:
     with _session() as db:
         raw = _raw_item(db)
@@ -749,6 +892,12 @@ def test_analysis_assembles_only_approved_stage_outputs() -> None:
             importance_proposal={
                 "message_type": "game_official_preview",
                 "topics": ["balance_gameplay", "champions"],
+                "classification_source": {
+                    "current_source_kind": "official",
+                    "source_kind": "official",
+                    "basis": "current",
+                    "upstream_source_url": None,
+                },
                 "importance_score": 0.8,
                 "importance_dimensions": {},
                 "importance_policy_version": "importance-v11-repost-weekly-rotation",
@@ -765,6 +914,7 @@ def test_analysis_assembles_only_approved_stage_outputs() -> None:
     assert proposal["products"] == ["lol_pc"]
     assert proposal["message_type"] == "game_official_preview"
     assert proposal["topics"] == ["balance_gameplay", "champions"]
+    assert proposal["facets"]["classification_source"]["source_kind"] == "official"
     assert proposal["facets"]["relevance"]["decision"] == "relevant"
 
 

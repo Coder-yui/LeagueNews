@@ -4,6 +4,7 @@ import {
   ArrowUpRight,
   ImageIcon,
 } from "lucide-react";
+import { contentFormLabel } from "@/lib/content-form-labels";
 import { importanceLevel } from "@/lib/importance-labels";
 import type { PublishedItem } from "@/lib/types";
 
@@ -28,6 +29,9 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
               minute: "2-digit",
             })}
           </time>
+          <span className="content-form-badge">
+            {contentFormLabel(item.content_form)}
+          </span>
           <span>
             {item.source_name} · 信源可信度 {Math.round(item.source_reliability_score * 100)}
           </span>

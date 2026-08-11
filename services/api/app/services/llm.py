@@ -29,7 +29,7 @@ from app.domain.message_taxonomy import (
     classification_catalog,
     classification_error,
     content_analysis_catalog,
-    content_analysis_error,
+    message_content_error,
 )
 from app.domain.message_entities import EntityType
 from app.prompts import prompt_registry
@@ -66,21 +66,19 @@ class MessageContentAnalysisResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_controlled_classification(self) -> "MessageContentAnalysisResult":
-        error = content_analysis_error(
-            products=list(self.products),
-            content_form=self.content_form,
-        )
-        if error:
-            raise ValueError(error)
         self.title = self.title.strip()
         if self.content_form in {"media_only", "link_only"}:
             self.summary = ""
             self.entities = []
-        else:
-            if not self.title:
-                raise ValueError("可处理消息必须生成标题")
-            if not self.summary.strip():
-                raise ValueError("可处理消息必须生成摘要")
+        error = message_content_error(
+            products=list(self.products),
+            content_form=self.content_form,
+            title=self.title,
+            summary=self.summary,
+            entities=list(self.entities),
+        )
+        if error:
+            raise ValueError(error)
         return self
 
 

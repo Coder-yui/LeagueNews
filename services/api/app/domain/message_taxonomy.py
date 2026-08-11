@@ -527,6 +527,27 @@ def content_analysis_error(*, products: list[str], content_form: str) -> str | N
     return None
 
 
+def message_content_error(
+    *,
+    products: list[str],
+    content_form: str,
+    title: str,
+    summary: str,
+    entities: list[object],
+) -> str | None:
+    if error := content_analysis_error(products=products, content_form=content_form):
+        return error
+    if content_form in {"media_only", "link_only"}:
+        if summary.strip() or entities:
+            return "纯媒体或纯链接消息的摘要和实体必须为空"
+        return None
+    if not title.strip():
+        return "可处理消息必须生成标题"
+    if not summary.strip():
+        return "可处理消息必须生成摘要"
+    return None
+
+
 def classification_error(
     *,
     products: list[str],

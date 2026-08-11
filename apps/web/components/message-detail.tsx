@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Languages,
 } from "lucide-react";
+import { contentFormLabel } from "@/lib/content-form-labels";
 import type {
   ContentBlock,
   PublishedItem,
@@ -190,6 +191,9 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
           <div>
             <span>来源</span>
             <strong>{item.source_name}</strong>
+            <span className="content-form-badge">
+              {contentFormLabel(item.content_form)}
+            </span>
             <span>· 信源可信度 {Math.round(item.source_reliability_score * 100)}</span>
             {item.author && <span>· {item.author}</span>}
             {item.published_at && (

@@ -79,6 +79,7 @@ nav a.active { color: var(--ink); border-color: var(--ink); }
 .cred.rumor { color: #9a5c16; }
 .entity { padding: 4px 7px; background: #e5e5dc; color: #555e55; font-size: 11px; }
 .topic-badge { padding: 4px 7px; background: #e5e9f7; color: #394b82; font-size: 11px; font-weight: 700; letter-spacing: 0; text-transform: none; }
+.content-form-badge { display: inline-flex; align-items: center; padding: 3px 6px; border: 1px solid #c8cfc7; background: #f0f3ed; color: #4d5b50; font-size: 10px; font-weight: 800; letter-spacing: 0; text-transform: none; }
 .source-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 16px; color: var(--muted); font-size: 12px; }
 .source-line > span:first-child { font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .source-line a { display: inline-flex; align-items: center; gap: 4px; color: var(--blue); font-weight: 700; }

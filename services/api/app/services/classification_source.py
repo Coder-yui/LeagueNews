@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -68,10 +68,15 @@ def _upstream_source_url(raw_item: RawItem) -> str | None:
 def _normal_url(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    parsed = urlsplit(value.strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    try:
+        parsed = urlsplit(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+    except ValueError:
         return None
-    return value.strip()
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
 def _match_source(db: Session, upstream_url: str) -> Source | None:

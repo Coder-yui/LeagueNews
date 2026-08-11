@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
-from app.domain.message_taxonomy import classification_error, content_analysis_error
+from app.domain.message_taxonomy import classification_error, message_content_error
 from app.models.media_extraction import MediaExtraction
 from app.models.pipeline import ProcessingCheckpoint
 from app.models.workflow import ProcessingRun, ReviewTask
@@ -43,12 +43,15 @@ def _corrected_review_proposal(
         raise ValueError(f"stage={review.stage} 不支持修正字段: {', '.join(sorted(unsupported))}")
     proposal = {**review.proposal, **corrections}
     if review.stage == "message_analysis":
-        error = content_analysis_error(
+        error = message_content_error(
             products=list(proposal.get("products") or []),
             content_form=str(proposal.get("content_form") or ""),
+            title=str(proposal.get("title") or ""),
+            summary=str(proposal.get("summary") or ""),
+            entities=list(proposal.get("entities") or []),
         )
         if error:
-            raise ValueError(error)
+            raise ValueError(f"{error}；请重新运行消息分析")
     if review.stage == "importance" and (
         payload.message_type is not None or payload.topics is not None
     ):

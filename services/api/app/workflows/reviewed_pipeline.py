@@ -774,6 +774,15 @@ async def _generate_importance_review(
                 run.raw_item,
                 content_form=content_form,
             )
+            analysis = {
+                **analysis,
+                "classification_source": classification_source,
+                "classification_version": CLASSIFICATION_VERSION,
+            }
+            run.context = {
+                **run.context,
+                "approved_message_analysis_proposal": analysis,
+            }
         assert_execution_owned(db, execution_guard)
         db.commit()
         client = LLMClient()
@@ -901,6 +910,11 @@ def _build_item_proposal(
         "priority_score": 0.0,
         "priority_calculation": {"skipped_reason": classification.get("content_form")},
     }
+    classification_source = dict(
+        classification.get("classification_source")
+        or importance.get("classification_source")
+        or {}
+    )
     return {
         **translation_proposal,
         "normalized_title": _normalized_title(
@@ -926,9 +940,7 @@ def _build_item_proposal(
         "facets": {
             "products": list(classification.get("products") or ["unknown"]),
             "message_type": str(importance.get("message_type") or "unknown"),
-            "classification_source": dict(
-                classification.get("classification_source") or {}
-            ),
+            "classification_source": classification_source,
             "evidence_gate": dict(evidence_gate or {}),
             "relevance": dict(relevance_proposal or {}),
         },

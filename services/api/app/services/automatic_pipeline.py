@@ -24,6 +24,7 @@ from app.services.raw_item_versions import (
     is_latest_raw_item,
     latest_raw_item_condition,
 )
+from app.workflows.event_aggregation import aggregate_normalized_item
 from app.workflows.reviewed_pipeline import (
     approve_review,
     resume_item_processing,
@@ -187,6 +188,8 @@ async def execute_pipeline_job(
     item = raw_item.normalized_item
     if item is None or item.publication_status != "published":
         raise RuntimeError("automatic item pipeline did not publish a normalized item")
+    if settings.event_aggregation_enabled:
+        await aggregate_normalized_item(db, item)
 
 
 def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob | None:

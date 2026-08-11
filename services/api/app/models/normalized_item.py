@@ -71,6 +71,9 @@ class NormalizedItem(Base):
         cascade="all, delete-orphan",
         order_by="NormalizedItemRevision.revision",
     )
+    event_mentions: Mapped[list["EventMention"]] = relationship(  # noqa: F821
+        back_populates="normalized_item"
+    )
 
     __table_args__ = (
         CheckConstraint(

@@ -35,11 +35,13 @@ from app.domain.message_entities import EntityType
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
+    EVENT_AGGREGATION_OPERATION,
     IMPORTANCE_SCORING_OPERATION,
     KNOWLEDGE_ORGANIZATION_OPERATION,
     RELEVANCE_OPERATION,
     TRANSLATION_OPERATION,
 )
+from app.schemas.event_aggregation import EventAggregationResult
 
 
 class LLMConfigurationError(RuntimeError):
@@ -58,7 +60,7 @@ class ExtractedEntity(BaseModel):
 
 class MessageContentAnalysisResult(BaseModel):
     title: str = Field(default="", max_length=500)
-    summary: str = ""
+    summary: str
     entities: list[ExtractedEntity] = Field(default_factory=list, max_length=8)
     products: list[Product] = Field(min_length=1, max_length=3)
     content_form: MessageContentForm
@@ -218,7 +220,9 @@ class LLMClient:
    title 可以为空，禁止为了满足字段而编造标题；不能根据媒体、链接地址、账号或常识猜测内容，
    但必须使用输入标题中明确写出的语义。
 4. unknown 与其他 product 互斥，products 按目录顺序输出。
-5. title 与 summary 使用简体中文。summary 忠实概括消息的主要事实、观点或提醒，不写重要性和可信度。
+5. title 与 summary 使用简体中文。original、repost、quote 都必须输出非空 title 和 summary；
+   repost 的摘要忠实概括被转发消息的可读内容。summary 概括消息的主要事实、观点或提醒，
+   不写重要性和可信度。
 6. entities 最多 8 个，只提取文本明确出现且有检索价值的实体。每项包含 name、type、canonical_name；
    type 必须是既有受控实体类型。canonical_name 不确定时保留原名，不能猜造。
 7. 开发者报告、开发日志和路线图中针对英雄联盟端游的未来改动属于 lol_pc，不属于公司业务。
@@ -339,6 +343,79 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             schema=MessageClassificationImportanceResult,
             operation=IMPORTANCE_SCORING_OPERATION,
             business_validator=validate_classification,
+        )
+
+    async def aggregate_events(
+        self,
+        *,
+        message: dict[str, object],
+        admission_decision: str,
+        family_hints: list[str],
+        candidates: list[dict[str, object]],
+    ) -> EventAggregationResult:
+        candidate_by_id = {int(candidate["event_id"]): candidate for candidate in candidates}
+
+        def validate_event_decisions(result: EventAggregationResult) -> str | None:
+            for mention in result.mentions:
+                if admission_decision == "update_existing_only" and mention.action == "create":
+                    return "update_existing_only 不允许 create"
+                if mention.action == "update":
+                    candidate = candidate_by_id.get(int(mention.candidate_event_id or 0))
+                    if candidate is None:
+                        return f"update 只能指向输入候选：{mention.candidate_event_id}"
+                    if candidate.get("event_family") != mention.event_family:
+                        return "update 的 event_family 必须与候选一致"
+                if mention.action == "create":
+                    strong_ids = {
+                        int(candidate["event_id"])
+                        for candidate in candidates
+                        if candidate.get("event_family") == mention.event_family
+                        and int(candidate.get("match_score") or 0) >= 60
+                    }
+                    rejected_ids = {value.event_id for value in mention.candidate_rejections}
+                    if not strong_ids <= rejected_ids:
+                        return (
+                            "create 必须逐一解释同 family 强候选："
+                            f"missing={sorted(strong_ids - rejected_ids)}"
+                        )
+            return None
+
+        prompt = """你是 LeagueNews 的事件编辑器。输入是一条已经完成翻译、摘要、产品、消息类型、
+主题、实体和消息重要性处理的标准化消息，以及程序确定性召回的候选事件。一次响应必须处理整条
+消息，返回全部独立 EventMention；禁止按 topic 或候选重复分析，也不要重做消息分类、翻译、OCR、
+通用摘要、实体提取或消息重要性。
+
+事件是可验证的现实状态变化，不是相似消息文件夹。一个 topic 不等于一个事件。同一批平衡的多个
+英雄改动通常是一个 gameplay_balance；同批皮肤系列通常是一个 cosmetic_release；版本公告中的
+平衡、活动和皮肤可以是三个独立 mention。宣传、观点、复述和附属素材没有独立状态变化时 ignore。
+
+规则：
+1. action=create 仅在存在稳定身份锚点且没有同一真实候选时使用；逐一填写同 family 强候选的
+   candidate_rejections。action=update 必须引用提供的 candidate_event_id。admission_decision 为
+   update_existing_only 时只能 update 或 ignore。
+2. relation 使用 reports/supports/confirms/denies/corrects/mentions。responsible_official 仅用于当前
+   原创官方来源在其职责范围内的直接表述；官方账号转发别人不是官方确认。
+3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
+   进展、关键事实、未决点和 impact。普通佐证用 corroboration_only，重复用 duplicate，上下文用
+   context_only，后三者不得改写事件投影。
+4. impact 分别评价每个事件本身的 scope/magnitude/duration/urgency，不复制整条消息重要性，不因
+   官方身份、消息数量、热度或可信度改变。
+5. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
+   英雄、皮肤系列、战队、选手、比赛、赛区或时间范围；不得虚构。
+6. mention_index 从 0 连续递增。一个响应可以同时更新多个事件、创建其他事件并忽略非独立内容。
+只输出符合 schema 的 JSON。"""
+        return await self._validated_json_completion(
+            prompt=prompt,
+            payload={
+                "admission_decision": admission_decision,
+                "family_hints": family_hints,
+                "message": message,
+                "candidate_events": candidates,
+            },
+            max_tokens=6000,
+            schema=EventAggregationResult,
+            operation=EVENT_AGGREGATION_OPERATION,
+            business_validator=validate_event_decisions,
         )
 
     async def translate(

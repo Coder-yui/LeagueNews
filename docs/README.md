@@ -20,6 +20,18 @@
 - [`OCR_CONFIGURATION.md`](OCR_CONFIGURATION.md)：OCR Profile、参数、启用方式与保留边界。
 - [`PROMPT_RULE_GOVERNANCE.md`](PROMPT_RULE_GOVERNANCE.md)：Prompt、KnowledgeRule、术语与评测治理。
 
+## 事件聚合
+
+- [`EVENT_AGGREGATION.md`](EVENT_AGGREGATION.md)：Phase 0 现状审查、总体架构和分阶段实施计划。
+- [`EVENT_ADMISSION_AND_GRANULARITY.md`](EVENT_ADMISSION_AND_GRANULARITY.md)：零调用准入、事件粒度、候选召回和单次结构化调用。
+- [`EVENT_IMPORTANCE.md`](EVENT_IMPORTANCE.md)：事件自身影响的确定性评分。
+- [`EVENT_CREDIBILITY.md`](EVENT_CREDIBILITY.md)：来源角色、独立证据和确认/否认规则。
+- [`EVENT_HEAT.md`](EVENT_HEAT.md)：消息传播、时间衰减、去重和按需刷新。
+- [`EVENT_PRESENTATION.md`](EVENT_PRESENTATION.md)：当前事件投影、时间线、API 和前端展示。
+
+上述文档是当前事件运行时的规则来源。历史事件方案仍只在 [`history/`](history/README.md) 中作为
+审计材料，不能替代当前 v1 文档。
+
 ## 运行与部署
 
 - [`LOCAL_RUNBOOK.md`](LOCAL_RUNBOOK.md)：本地启动、停止、验证与排障。

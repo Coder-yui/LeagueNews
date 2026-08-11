@@ -148,6 +148,98 @@ export type PublishedItemPage = {
   topic_options: string[];
 };
 
+export type EventSource = {
+  message_id: number;
+  source_id: number;
+  source_name: string;
+  source_url: string | null;
+  published_at: string | null;
+};
+
+export type EventCard = {
+  id: number;
+  title: string;
+  current_summary: string;
+  products: string[];
+  event_family: string;
+  lifecycle_status: string;
+  importance_score: number;
+  importance_level: string;
+  credibility_score: number;
+  credibility_level: string;
+  heat_score: number;
+  heat_level: string;
+  message_count_total: number;
+  message_count_24h: number;
+  unique_sources_24h: number;
+  last_material_update_at: string | null;
+  primary_source: EventSource | null;
+  best_media_url: string | null;
+};
+
+export type EventTimelineNode = {
+  mention_id: number;
+  message_id: number;
+  message_revision: number;
+  occurred_at: string;
+  relation: string;
+  title: string;
+  note: string;
+  structured_fact_changes: Record<string, unknown>;
+  source_id: number;
+  source_name: string;
+};
+
+export type EventEvidence = {
+  mention_id: number;
+  message_id: number;
+  message_revision: number;
+  relation: string;
+  source_role: string;
+  materiality: string;
+  independence_group: string | null;
+  evidence_excerpt: string;
+  source_id: number;
+  source_name: string;
+  source_url: string | null;
+  published_at: string | null;
+  content_form: string;
+};
+
+export type EventRelatedMessage = {
+  message_id: number;
+  title: string;
+  summary: string;
+  source_id: number;
+  source_name: string;
+  source_url: string | null;
+  published_at: string | null;
+  content_form: string;
+};
+
+export type EventDetail = EventCard & {
+  latest_development: string;
+  key_facts: Array<Record<string, unknown>>;
+  unresolved_points: Array<Record<string, unknown>>;
+  canonical_anchors: Record<string, unknown>;
+  importance_breakdown: Record<string, unknown>;
+  credibility_breakdown: Record<string, unknown>;
+  heat_breakdown: Record<string, unknown>;
+  timeline: EventTimelineNode[];
+  evidence: EventEvidence[];
+  related_messages: EventRelatedMessage[];
+  references: Record<string, number | null>;
+};
+
+export type EventPage = {
+  items: EventCard[];
+  total: number;
+  product_options: string[];
+  event_family_options: string[];
+  lifecycle_options: string[];
+  credibility_options: string[];
+};
+
 export type PipelineJob = {
   id: number;
   raw_item_id: number;

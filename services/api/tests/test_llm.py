@@ -60,7 +60,7 @@ def test_message_content_analysis_only_receives_first_stage_catalog() -> None:
     assert result.products == ["lol_esports"]
     metadata = execution_metadata(result)
     assert metadata["prompt_name"] == "message-content-analysis"
-    assert metadata["prompt_version"] == "v7-empty-title-content-form"
+    assert metadata["prompt_version"] == "v8-required-summary"
     assert metadata["json_schema_version"] == "MessageContentAnalysisResult:v2"
     messages = completions.calls[0]["messages"]
     assert isinstance(messages, list)
@@ -92,7 +92,12 @@ def test_media_only_forces_all_semantic_axes_to_unknown() -> None:
 @pytest.mark.parametrize("content_form", ["media_only", "link_only"])
 def test_nonsemantic_content_forms_allow_empty_title(content_form: str) -> None:
     result = MessageContentAnalysisResult.model_validate(
-        {"title": "", "products": ["unknown"], "content_form": content_form}
+        {
+            "title": "",
+            "summary": "",
+            "products": ["unknown"],
+            "content_form": content_form,
+        }
     )
     assert result.title == ""
 
@@ -105,6 +110,18 @@ def test_original_content_requires_title() -> None:
                 "summary": "有摘要",
                 "products": ["lol_pc"],
                 "content_form": "original",
+            }
+        )
+
+
+def test_original_content_requires_summary() -> None:
+    with pytest.raises(ValueError, match="可处理消息必须生成摘要"):
+        MessageContentAnalysisResult.model_validate(
+            {
+                "title": "可用标题",
+                "summary": "",
+                "products": ["lol_pc"],
+                "content_form": "repost",
             }
         )
 

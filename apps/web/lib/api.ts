@@ -1,4 +1,4 @@
-import type { PublishedItem, PublishedItemPage } from "./types";
+import type { EventDetail, EventPage, PublishedItem, PublishedItemPage } from "./types";
 
 export const apiUrl =
   process.env.INTERNAL_API_URL ??
@@ -68,6 +68,38 @@ export async function getPublishedItem(id: number): Promise<PublishedItem | null
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`API returned ${response.status}`);
     return (await response.json()) as PublishedItem;
+  } catch {
+    return null;
+  }
+}
+
+export async function getEventsPage(): Promise<EventPage> {
+  try {
+    const response = await fetch(`${apiUrl}/events?limit=100`, {
+      next: { revalidate: 30 },
+    });
+    if (!response.ok) throw new Error(`API returned ${response.status}`);
+    return (await response.json()) as EventPage;
+  } catch {
+    return {
+      items: [],
+      total: 0,
+      product_options: [],
+      event_family_options: [],
+      lifecycle_options: [],
+      credibility_options: [],
+    };
+  }
+}
+
+export async function getEvent(id: number): Promise<EventDetail | null> {
+  try {
+    const response = await fetch(`${apiUrl}/events/${id}`, {
+      next: { revalidate: 30 },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`API returned ${response.status}`);
+    return (await response.json()) as EventDetail;
   } catch {
     return null;
   }

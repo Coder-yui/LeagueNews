@@ -51,7 +51,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "062_update_message_taxonomy_v3.sql"
+    assert files[-1].name == "063_replace_event_system_with_v1.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -89,3 +89,13 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     current_taxonomy = (MIGRATIONS / "062_update_message_taxonomy_v3.sql").read_text()
     assert "message-taxonomy-v3" in current_taxonomy
     assert "message-processing-v1.1" in current_taxonomy
+
+    event_schema = (MIGRATIONS / "063_replace_event_system_with_v1.sql").read_text()
+    assert "DROP TABLE IF EXISTS event_messages" in event_schema
+    assert "DROP TABLE IF EXISTS event_review_tasks" in event_schema
+    assert "DROP COLUMN IF EXISTS original_event_ids" in event_schema
+    assert "CREATE TABLE event_mentions" in event_schema
+    assert "normalized_item_revision integer NOT NULL" in event_schema
+    assert "impact_snapshot jsonb NOT NULL" in event_schema
+    assert "uq_event_mentions_item_index_policy" in event_schema
+    assert "event-aggregation-v1" in event_schema

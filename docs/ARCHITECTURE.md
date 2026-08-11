@@ -15,12 +15,20 @@ Source 调度或手工触发
   -> message_analysis
   -> importance
   -> NormalizedItem 发布
-  -> stop
+  -> automatic event admission
+  -> optional single-call EventMention[] aggregation
+  -> Event current projection + evidence
 ```
 
 当前运行时包含 Connector、共享 ingestion、RawItem 修订、媒体落盘、自动任务、人工审核、
-OCR、翻译、受控消息分类、实体/摘要提取、重要性算法、公开消息页和管理台。消息处理发布
-NormalizedItem 后结束；更高层聚合不属于当前运行时。
+OCR、翻译、受控消息分类、实体/摘要提取、消息重要性算法、事件聚合、公开消息/事件页和管理台。
+消息处理自身以 NormalizedItem 为输出边界，事件 worker 只消费该发布结果。
+
+新的事件层已完成 Phase 0–5：已有事件 ORM、追加迁移、确定性准入/召回、单次多 mention 模型接口、
+事务应用，以及相互独立的重要性/可信度/热度投影。自动 worker 在 NormalizedItem 发布后调用它。
+事件列表、详情 API 和现有 Next.js 栈内的公开页面已经接入。
+总设计与当前字段映射见 [`EVENT_AGGREGATION.md`](EVENT_AGGREGATION.md)；事件继续位于
+NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段。
 
 公开消息投影同时返回已批准的 `topics` 和 Source 的 `reliability_score`；消息流与详情页直接
 展示这两个字段。可信度只用于说明信源属性，不参与消息重要性加分。
@@ -60,6 +68,8 @@ NormalizedItem 后结束；更高层聚合不属于当前运行时。
 ```text
 /                         已发布消息
 /messages/{id}            消息详情
+/events                   事件列表
+/events/{id}              事件详情
 /admin                    管理台
 /admin/messages           消息列表
 /admin/messages/{id}      消息详情与原文
@@ -75,6 +85,7 @@ NormalizedItem 后结束；更高层聚合不属于当前运行时。
 /api/v1/raw-items
 /api/v1/workflows
 /api/v1/normalized-items
+/api/v1/events
 /api/v1/pipeline
 /api/v1/knowledge
 /api/v1/ocr-lab
@@ -93,10 +104,12 @@ NormalizedItem 后结束；更高层聚合不属于当前运行时。
 | `pipeline_jobs` / `pipeline_corrections` | 自动任务、恢复和按阶段重跑 |
 | `knowledge_rules` / `glossary_terms` | 分析规则与术语 |
 | `normalized_items` / `normalized_item_revisions` | 当前发布投影与历史 |
+| `events` / `event_mentions` / `event_revisions` | 事件当前投影、mention 证据与历史修订 |
+| `event_aggregation_runs` | 准入、候选、调用次数、结构化决定和应用结果审计 |
 
-最新迁移为 `062_update_message_taxonomy_v3.sql`。ORM、API 和工作流只访问上表列出的
-当前运行时表；升级数据库可能保留迁移兼容对象，但它们不属于运行时模型，也不得绕过追加迁移
-直接修改。
+最新迁移为 `063_replace_event_system_with_v1.sql`。它明确删除退役事件层并创建唯一的 v1 事件模型；
+事件聚合已在自动消息 worker 中运行，事件 API 和前端页面已经接入。不得绕过追加迁移直接修改。
+全新初始化与旧 031→063 顺序升级已在可销毁 PostgreSQL 16 上验证。
 
 ## 验证
 

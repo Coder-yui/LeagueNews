@@ -3,6 +3,7 @@ import pytest
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
+    EVENT_AGGREGATION_OPERATION,
     PRODUCTION_LLM_OPERATIONS,
     TRANSLATION_OPERATION,
 )
@@ -24,7 +25,7 @@ def test_production_prompt_registry_contract() -> None:
         schema_version="MessageContentAnalysisResult:v2",
     )
     assert classification.name == "message-content-analysis"
-    assert classification.version == "v7-empty-title-content-form"
+    assert classification.version == "v8-required-summary"
     translation = prompt_registry.resolve(
         operation=TRANSLATION_OPERATION,
         content="single request translation",
@@ -32,6 +33,13 @@ def test_production_prompt_registry_contract() -> None:
     )
     assert translation.name == "translation"
     assert translation.version == "v4-optional-source-title"
+    events = prompt_registry.resolve(
+        operation=EVENT_AGGREGATION_OPERATION,
+        content="multi mention contract",
+        schema_version="EventAggregationResult:v1",
+    )
+    assert events.name == "event-aggregation"
+    assert events.version == "v1-multi-mention-single-call"
 
 
 def test_unregistered_operations_require_explicit_experimental_opt_in() -> None:

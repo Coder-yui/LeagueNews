@@ -201,6 +201,32 @@ nav a.active { color: var(--ink); border-color: var(--ink); }
 .pipeline-flow i::after { content: ""; position: absolute; right: 0; top: -2px; border-left: 5px solid var(--ink); border-top: 2px solid transparent; border-bottom: 2px solid transparent; }
 footer { display: flex; justify-content: space-between; padding: 26px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 
+.event-hero { padding-bottom: 54px; }
+.event-card .importance-badge { background: #fff0d8; color: #7d4a0d; }
+.event-detail { max-width: 1040px; }
+.event-metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 28px; border: 1px solid var(--ink); background: var(--ink); }
+.event-metric-grid > div { display: grid; gap: 4px; padding: 16px; background: var(--panel); }
+.event-metric-grid span, .event-metric-grid small { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+.event-metric-grid strong { font-size: 28px; }
+.event-section { padding: 30px 0; border-bottom: 1px solid var(--line); }
+.event-section h2 { margin: 0 0 18px; font-size: 28px; }
+.event-section > p { color: var(--muted); font-size: 16px; line-height: 1.8; }
+.event-two-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; }
+.event-fact-list { margin: 0; padding-left: 20px; }
+.event-fact-list li { margin-bottom: 10px; line-height: 1.7; }
+.event-empty-copy { color: var(--muted); }
+.event-timeline { display: grid; gap: 0; }
+.event-timeline article { display: grid; grid-template-columns: 180px 1fr; gap: 22px; padding: 18px 0; border-top: 1px solid var(--line); }
+.event-timeline time { color: var(--muted); font: 11px monospace; }
+.event-timeline p { margin: 6px 0; color: var(--muted); }
+.event-timeline a, .event-evidence-list a { color: var(--blue); font-size: 12px; font-weight: 800; }
+.event-evidence-list { display: grid; gap: 10px; }
+.event-evidence-list article { padding: 16px; border: 1px solid var(--line); background: var(--panel); }
+.event-evidence-list article > span { color: var(--blue); font: 10px monospace; text-transform: uppercase; }
+.event-evidence-list p { margin: 8px 0 12px; }
+.event-evidence-list article > div { display: flex; flex-wrap: wrap; gap: 14px; }
+.event-evidence-list article > div a { display: inline-flex; align-items: center; gap: 4px; }
+
 
 .admin-shell { padding-bottom: 70px; }
 .admin-header { display: flex; justify-content: space-between; gap: 40px; align-items: flex-start; padding: 58px 0 38px; border-bottom: 1px solid var(--ink); }

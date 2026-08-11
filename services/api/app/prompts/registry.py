@@ -5,6 +5,7 @@ IMPORTANCE_SCORING_OPERATION = "重要性评分"
 RELEVANCE_OPERATION = "相关性判断"
 TRANSLATION_OPERATION = "翻译"
 KNOWLEDGE_ORGANIZATION_OPERATION = "知识整理"
+EVENT_AGGREGATION_OPERATION = "事件聚合"
 PRODUCTION_LLM_OPERATIONS = frozenset(
     {
         CLASSIFICATION_OPERATION,
@@ -12,6 +13,7 @@ PRODUCTION_LLM_OPERATIONS = frozenset(
         RELEVANCE_OPERATION,
         TRANSLATION_OPERATION,
         KNOWLEDGE_ORGANIZATION_OPERATION,
+        EVENT_AGGREGATION_OPERATION,
     }
 )
 
@@ -28,7 +30,7 @@ class PromptRegistry:
     _versions = {
         CLASSIFICATION_OPERATION: (
             "message-content-analysis",
-            "v7-empty-title-content-form",
+            "v8-required-summary",
         ),
         IMPORTANCE_SCORING_OPERATION: (
             "message-classification-importance",
@@ -39,6 +41,10 @@ class PromptRegistry:
         KNOWLEDGE_ORGANIZATION_OPERATION: (
             "knowledge-organization",
             "v2-evaluation-gated",
+        ),
+        EVENT_AGGREGATION_OPERATION: (
+            "event-aggregation",
+            "v1-multi-mention-single-call",
         ),
         "图片结构化": ("media-structure", "v1"),
     }

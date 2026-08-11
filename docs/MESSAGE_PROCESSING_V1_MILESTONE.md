@@ -1,6 +1,6 @@
 # 消息处理 v1 里程碑
 
-- 状态：当前稳定基线
+- 状态：消息处理子层的稳定基线；整体当前架构见 `ARCHITECTURE.md`
 - 日期：2026-08-11
 - 分支：`codex/architecture-remediation-exploration`
 
@@ -20,8 +20,9 @@ Source / Connector
   -> NormalizedItem publication
 ```
 
-RawItem 及其原始证据保持不可变。当前运行时不生成 Claim、事件成员关系、事件聚合或日报；这些能力
-只有在重新设计并通过独立审查后才能重新进入主链路。
+RawItem 及其原始证据保持不可变。本里程碑建立时运行时不生成 Claim、事件成员关系、事件聚合或
+日报；事件能力现已按独立设计完成审查并作为 NormalizedItem 之上的后续层进入运行时，消息处理
+字段和枚举仍保持本里程碑边界。
 
 ## 固定版本
 
@@ -36,7 +37,7 @@ RawItem 及其原始证据保持不可变。当前运行时不生成 Claim、事
 | 翻译 Prompt | `translation / v4-optional-source-title` |
 | 内容分析 Schema | `MessageContentAnalysisResult:v2` |
 | 翻译 Schema | `TranslationResult:v2` |
-| 数据库迁移头 | `062_update_message_taxonomy_v3` |
+| 本里程碑数据库迁移头 | `062_update_message_taxonomy_v3` |
 
 ## 已确认的处理边界
 
@@ -79,6 +80,5 @@ Local public feed and message detail visual QA: passed
 
 ## 后续演进规则
 
-此文档记录 v1 基线，不替代各专项权威文档。分类、重要性或 Prompt 改动仍须同步代码、测试、迁移
-和对应专项文档。若未来引入事件层，应建立新的架构里程碑，并将本文整体迁入 `docs/history/`，不得
-在本文件中持续叠加已不属于 v1 的设计。
+此文档只记录消息处理 v1 子层，不替代当前架构或事件专项文档。分类、消息重要性或 Prompt 改动仍
+须同步代码、测试、迁移和对应专项文档；事件规则以 `EVENT_AGGREGATION.md` 及其子文档为准。

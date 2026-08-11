@@ -4,32 +4,22 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.event import EventAggregationRun, EventMessage, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun
 from app.schemas.pipeline import PipelineCorrectionCreate
-from app.services.claims import (
-    unlink_item_claims_from_event,
-    withdraw_active_claims,
-)
-from app.services.event_aggregation import refresh_event_projection
 from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_publication import withdraw_raw_item_media
-from app.workflows.event_aggregation import start_event_aggregation
 from app.workflows.reviewed_pipeline import (
-    CLAIM_STAGE,
-    FACT_CLASSIFY_STAGE,
     IMPORTANCE_STAGE,
+    MESSAGE_ANALYSIS_STAGE,
     OCR_STAGE,
     RELEVANCE_STAGE,
     TRANSLATION_STAGE,
     start_item_processing,
 )
 from app.workflows.understand_media import is_patch_preview
-
-EVENT_STAGE = "event_decision"
 
 
 def _latest_processing_run(db: Session, raw_item_id: int) -> ProcessingRun | None:
@@ -44,15 +34,6 @@ def _latest_processing_run(db: Session, raw_item_id: int) -> ProcessingRun | Non
     )
 
 
-def _latest_event_run(db: Session, item_id: int) -> EventAggregationRun | None:
-    return db.scalar(
-        select(EventAggregationRun)
-        .where(EventAggregationRun.normalized_item_id == item_id)
-        .order_by(EventAggregationRun.id.desc())
-        .limit(1)
-    )
-
-
 def _checkpoint_before(
     db: Session,
     *,
@@ -62,10 +43,8 @@ def _checkpoint_before(
     predecessor = {
         OCR_STAGE: RELEVANCE_STAGE,
         TRANSLATION_STAGE: OCR_STAGE,
-        FACT_CLASSIFY_STAGE: TRANSLATION_STAGE,
-        IMPORTANCE_STAGE: FACT_CLASSIFY_STAGE,
-        CLAIM_STAGE: IMPORTANCE_STAGE,
-        EVENT_STAGE: CLAIM_STAGE,
+        MESSAGE_ANALYSIS_STAGE: TRANSLATION_STAGE,
+        IMPORTANCE_STAGE: MESSAGE_ANALYSIS_STAGE,
     }.get(restart_from_stage)
     if predecessor is None:
         return None
@@ -91,32 +70,23 @@ def _resume_context(
         return {}
     context = dict(source_run.context) if source_run is not None else {}
     relevance_context = {
-        key: context[key]
-        for key in ("evidence_gate", "relevance_decision")
-        if key in context
+        key: context[key] for key in ("evidence_gate", "relevance_decision") if key in context
     }
     if restart_from_stage == OCR_STAGE:
         return relevance_context
     if restart_from_stage == TRANSLATION_STAGE:
         extraction_ids = context.get("approved_media_extraction_ids")
         if extraction_ids is None and checkpoint is not None:
-            extraction_ids = checkpoint.artifact_references.get(
-                "approved_media_extraction_ids", []
-            )
+            extraction_ids = checkpoint.artifact_references.get("approved_media_extraction_ids", [])
         return {
             **relevance_context,
             "approved_media_extraction_ids": extraction_ids or [],
         }
-    scoring_stages = {
-        FACT_CLASSIFY_STAGE,
-        IMPORTANCE_STAGE,
-        CLAIM_STAGE,
-    }
-    if restart_from_stage in scoring_stages:
+    if restart_from_stage in {MESSAGE_ANALYSIS_STAGE, IMPORTANCE_STAGE}:
         translation = context.get("approved_translation_proposal")
         if (
             translation is None
-            and restart_from_stage == FACT_CLASSIFY_STAGE
+            and restart_from_stage == MESSAGE_ANALYSIS_STAGE
             and checkpoint is not None
         ):
             translation = checkpoint.output_snapshot
@@ -126,58 +96,24 @@ def _resume_context(
             )
         result = {
             **relevance_context,
-            "approved_media_extraction_ids": context.get(
-                "approved_media_extraction_ids", []
-            ),
+            "approved_media_extraction_ids": context.get("approved_media_extraction_ids", []),
             "approved_translation_proposal": translation,
         }
-        if restart_from_stage in {IMPORTANCE_STAGE, CLAIM_STAGE}:
-            facts = context.get("approved_fact_proposal")
-            if (
-                facts is None
-                and restart_from_stage == IMPORTANCE_STAGE
-                and checkpoint is not None
-            ):
-                facts = checkpoint.output_snapshot
-            if facts is None:
+        if restart_from_stage == IMPORTANCE_STAGE:
+            analysis = context.get("approved_message_analysis_proposal")
+            if analysis is None and checkpoint is not None:
+                analysis = checkpoint.output_snapshot
+            if analysis is None:
                 raise ValueError(
-                    "no approved fact checkpoint is available; "
-                    "restart from fact_classify"
+                    "no approved message analysis checkpoint is available; "
+                    "restart from message_analysis"
                 )
-            result["approved_fact_proposal"] = facts
-        if restart_from_stage in {IMPORTANCE_STAGE, CLAIM_STAGE}:
-            classification = context.get("approved_classification_proposal")
-            if (
-                classification is None
-                and restart_from_stage == IMPORTANCE_STAGE
-                and checkpoint is not None
-            ):
-                classification = checkpoint.output_snapshot
-            if classification is None:
-                raise ValueError(
-                    "no approved classification checkpoint is available; "
-                    "restart from fact_classify"
-                )
-            result["approved_classification_proposal"] = classification
-        if restart_from_stage == CLAIM_STAGE:
-            importance = context.get("approved_importance_proposal")
-            if (
-                importance is None
-                and restart_from_stage == CLAIM_STAGE
-                and checkpoint is not None
-            ):
-                importance = checkpoint.output_snapshot
-            if importance is None:
-                raise ValueError(
-                    "no approved importance checkpoint is available; "
-                    "restart from importance"
-                )
-            result["approved_importance_proposal"] = importance
+            result["approved_message_analysis_proposal"] = analysis
         return result
     return {}
 
 
-def _supersede_active_work(db: Session, *, raw_item_id: int, item_id: int) -> None:
+def _supersede_active_work(db: Session, *, raw_item_id: int) -> None:
     now = datetime.now(UTC)
     for run in db.scalars(
         select(ProcessingRun).where(
@@ -192,67 +128,6 @@ def _supersede_active_work(db: Session, *, raw_item_id: int, item_id: int) -> No
             if review.status == "pending":
                 review.status = "superseded"
                 review.resolved_at = now
-    for run in db.scalars(
-        select(EventAggregationRun).where(
-            EventAggregationRun.normalized_item_id == item_id,
-            EventAggregationRun.status.in_(["running", "awaiting_review"]),
-        )
-    ):
-        run.status = "superseded"
-        run.outcome = "correction_requested"
-        run.completed_at = now
-        for review in run.reviews:
-            if review.status == "pending":
-                review.status = "superseded"
-                review.resolved_at = now
-
-
-def _withdraw_event_membership(
-    db: Session,
-    *,
-    item: NormalizedItem,
-    correction: PipelineCorrection,
-) -> list[int]:
-    memberships = list(
-        db.scalars(
-            select(EventMessage).where(
-                EventMessage.normalized_item_id == item.id,
-                EventMessage.membership_status == "active",
-            )
-        )
-    )
-    if not memberships:
-        return []
-    now = datetime.now(UTC)
-    for membership in memberships:
-        event = membership.event
-        unlink_item_claims_from_event(
-            db,
-            normalized_item_id=item.id,
-            event_id=event.id,
-        )
-        membership.membership_status = "withdrawn"
-        membership.withdrawn_at = now
-        membership.withdrawal_reason = correction.reason
-        membership.source_correction_id = correction.id
-        event.current_revision += 1
-        db.flush()
-        refresh_event_projection(db, event)
-        db.add(
-            EventRevision(
-                event_id=event.id,
-                revision=event.current_revision,
-                title=event.title,
-                summary=event.summary,
-                change_note=f"撤回消息 {item.id}：{correction.reason}",
-                evidence_snapshot={
-                    "action": "withdraw_membership",
-                    "normalized_item_id": item.id,
-                    "correction_id": correction.id,
-                },
-            )
-        )
-    return [membership.event_id for membership in memberships]
 
 
 async def create_and_start_correction(
@@ -264,33 +139,23 @@ async def create_and_start_correction(
 ) -> PipelineCorrection:
     if item.publication_status != "published" and not allow_withdrawn:
         raise ValueError("normalized item is already withdrawn")
-    if item.publication_status != "published" and payload.restart_from_stage == EVENT_STAGE:
-        raise ValueError("event_decision recovery requires a published normalized item")
     source_run = _latest_processing_run(db, item.raw_item_id)
-    source_event_run = _latest_event_run(db, item.id)
     checkpoint = _checkpoint_before(
         db,
         raw_item_id=item.raw_item_id,
         restart_from_stage=payload.restart_from_stage,
     )
     if payload.restart_from_stage == OCR_STAGE and not is_patch_preview(item.raw_item):
-        raise ValueError(
-            "image_ocr is not applicable to this raw item; restart from translation"
-        )
-    resume_context = (
-        _resume_context(
-            source_run=source_run,
-            checkpoint=checkpoint,
-            restart_from_stage=payload.restart_from_stage,
-        )
-        if payload.restart_from_stage != EVENT_STAGE
-        else {}
+        raise ValueError("image_ocr is not applicable to this raw item; restart from translation")
+    resume_context = _resume_context(
+        source_run=source_run,
+        checkpoint=checkpoint,
+        restart_from_stage=payload.restart_from_stage,
     )
     correction = PipelineCorrection(
         raw_item_id=item.raw_item_id,
         normalized_item_id=item.id,
         source_processing_run_id=source_run.id if source_run else None,
-        source_event_run_id=source_event_run.id if source_event_run else None,
         checkpoint_id=checkpoint.id if checkpoint else None,
         restart_from_stage=payload.restart_from_stage,
         resume_mode=payload.resume_mode,
@@ -299,40 +164,26 @@ async def create_and_start_correction(
     )
     db.add(correction)
     db.flush()
-    _supersede_active_work(db, raw_item_id=item.raw_item_id, item_id=item.id)
-    correction.original_event_ids = _withdraw_event_membership(
-        db, item=item, correction=correction
-    )
-    if payload.restart_from_stage != EVENT_STAGE:
-        item.publication_status = "withdrawn"
-        item.withdrawn_at = datetime.now(UTC)
-        item.withdrawal_reason = payload.reason
-        withdraw_active_claims(db, normalized_item_id=item.id)
-        withdraw_raw_item_media(item.raw_item)
+    _supersede_active_work(db, raw_item_id=item.raw_item_id)
+    item.publication_status = "withdrawn"
+    item.withdrawn_at = datetime.now(UTC)
+    item.withdrawal_reason = payload.reason
+    withdraw_raw_item_media(item.raw_item)
     correction.status = "running"
     correction.started_at = datetime.now(UTC)
     db.commit()
     db.refresh(correction)
 
     try:
-        if payload.restart_from_stage == EVENT_STAGE:
-            await start_event_aggregation(
-                db,
-                item,
-                supersedes_run_id=source_event_run.id if source_event_run else None,
-                execution_mode=payload.resume_mode,
-                correction_id=correction.id,
-            )
-        else:
-            await start_item_processing(
-                db,
-                item.raw_item,
-                supersedes_run_id=source_run.id if source_run else None,
-                execution_mode=payload.resume_mode,
-                correction_id=correction.id,
-                restart_from_stage=payload.restart_from_stage,
-                context=resume_context,
-            )
+        await start_item_processing(
+            db,
+            item.raw_item,
+            supersedes_run_id=source_run.id if source_run else None,
+            execution_mode=payload.resume_mode,
+            correction_id=correction.id,
+            restart_from_stage=payload.restart_from_stage,
+            context=resume_context,
+        )
         if payload.resume_mode == "automatic":
             enqueue_pipeline_job(
                 db,
@@ -386,9 +237,6 @@ async def recover_failed_job(
             payload=payload,
             allow_withdrawn=True,
         )
-    if payload.restart_from_stage == EVENT_STAGE:
-        raise ValueError("event_decision recovery requires a published normalized item")
-
     source_run = _latest_processing_run(db, raw_item.id)
     checkpoint = _checkpoint_before(
         db,
@@ -396,9 +244,7 @@ async def recover_failed_job(
         restart_from_stage=payload.restart_from_stage,
     )
     if payload.restart_from_stage == OCR_STAGE and not is_patch_preview(raw_item):
-        raise ValueError(
-            "image_ocr is not applicable to this raw item; restart from translation"
-        )
+        raise ValueError("image_ocr is not applicable to this raw item; restart from translation")
     context = _resume_context(
         source_run=source_run,
         checkpoint=checkpoint,

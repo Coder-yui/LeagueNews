@@ -4,7 +4,7 @@
 
 | 服务 | 地址 | 用途 |
 | --- | --- | --- |
-| Next.js | http://localhost:3000 | 已发布消息、事件列表与详情 |
+| Next.js | http://localhost:3000 | 已发布消息列表与详情 |
 | 管理台 | http://localhost:3000/admin | 审核、自动化日志、采集配置、撤回、知识与 OCR Lab |
 | FastAPI Swagger | http://localhost:8000/docs | API 文档与调试 |
 | FastAPI health | http://localhost:8000/api/v1/health | 后端健康检查 |
@@ -99,8 +99,8 @@ GET /api/v1/pipeline/jobs
 GET /api/v1/collection-schedules
 ```
 
-新采集或手工导入的 RawItem 默认创建持久化 `pipeline_job`，由 Worker 自动完成消息发布和
-事件判断。`POST /api/v1/raw-items/{id}/process` 是显式人工审核入口，不会直接发布消息。
+新采集或手工导入的 RawItem 默认创建持久化 `pipeline_job`，由 Worker 自动完成消息处理与
+发布。`POST /api/v1/raw-items/{id}/process` 是显式人工审核入口，不会直接发布消息。
 已发布结果有误时，从管理台选择撤回阶段和后续人工/自动模式。
 
 ## 关闭
@@ -160,7 +160,7 @@ Caddy Alpine 约 71–82 MB。本机当时没有应用镜像，API/Chromium/OCR 
 
 清理前必须分别测量 PostgreSQL、媒体卷、容器日志、旧 image tag 和 build cache。不要把
 破坏性 prune 当作例行维护。任何媒体保留工具都必须先证明候选文件没有被 RawItem、
-NormalizedItem、Event、revision、checkpoint 或公开路径引用。Collector/OCR 是否拆镜像，
+NormalizedItem、revision、checkpoint 或公开路径引用。Collector/OCR 是否拆镜像，
 等实际分层证明有明确安全或资源收益后再决定。
 
 ## 常见问题

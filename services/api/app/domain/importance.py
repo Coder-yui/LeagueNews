@@ -4,58 +4,104 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal, TypedDict, cast
 
-from app.domain.content_semantics import OFFICIAL_ONLY_UPDATE_SUBTOPICS
+from app.domain.message_taxonomy import MESSAGE_TYPES, TOPICS, MessageType, Topic
 
-IMPORTANCE_POLICY_VERSION: Final = "importance-v8-official-updates"
 
-ImportanceSubtype = Literal[
-    "shop_daily_standard",
-    "shop_cosmetic_rotation",
-    "shop_rare_cosmetic",
-    "shop_bulk_refresh",
-    "shop_standard_offer",
-    "free_champion_rotation",
-    "free_reward",
-    "patch_preview",
-    "patch_full_preview",
-    "patch_official_notes",
-    "patch_hotfix",
-    "pbe_change",
-    "new_champion",
-    "new_game_mode",
-    "major_gameplay_change",
-    "tft_set_update",
-    "tft_cosmetic_release",
-    "activity_paid",
-    "activity_standard",
-    "activity_free_skin",
-    "esports_schedule",
-    "esports_ticketing",
-    "esports_regular",
-    "esports_playoffs",
-    "esports_final",
-    "worlds_regular",
-    "worlds_key",
-    "roster_transfer",
-    "skin_release",
-    "service_incident",
-    "disciplinary_action",
-    "security_notice",
-    "merch_release",
-    "partnership",
-    "media_release",
-    "riot_corporate",
-    "lol_universe",
-    "community_event",
-    "gameplay_guide",
-    "community",
-    "other",
-]
+IMPORTANCE_POLICY_VERSION: Final = "importance-v11-repost-weekly-rotation"
+
 ImportanceScale = Literal["minor", "standard", "major"]
 CompetitionRegion = Literal["none", "lpl", "lck", "international", "other"]
 Prominence = Literal["normal", "notable", "star"]
 AudienceRegion = Literal["cn", "global", "international_only", "unknown"]
 SkinTier = Literal["none", "standard", "legendary", "prestige_or_mythic", "ultimate"]
+
+ImportanceProfile = Literal[
+    "unknown",
+    "patch_official_notes",
+    "patch_full_preview",
+    "official_gameplay_preview",
+    "official_content_preview",
+    "gameplay_announcement",
+    "tft_announcement",
+    "activity_announcement",
+    "cosmetic_announcement",
+    "commerce_announcement",
+    "weekly_free_champion_rotation",
+    "game_announcement_general",
+    "patch_hotfix",
+    "service_notice",
+    "security_notice",
+    "promotion_gameplay",
+    "promotion_activity",
+    "promotion_cosmetic",
+    "promotion_community",
+    "promotion_general",
+    "shop_daily_standard",
+    "shop_cosmetic_rotation",
+    "shop_rare_cosmetic",
+    "shop_bulk_refresh",
+    "free_reward",
+    "activity_free_skin",
+    "community_game_notice",
+    "community_service_notice",
+    "community_notice_general",
+    "leak_gameplay",
+    "leak_content",
+    "leak_general",
+    "gameplay_guide",
+    "game_discussion",
+    "esports_schedule",
+    "esports_regular",
+    "esports_playoffs",
+    "esports_final",
+    "worlds_regular",
+    "worlds_key",
+    "roster_announcement",
+    "esports_announcement_general",
+    "esports_promotion",
+    "esports_rumor",
+    "esports_analysis",
+    "esports_discussion",
+    "universe_announcement",
+    "universe_promotion",
+    "universe_leak",
+    "universe_discussion",
+    "other_product_announcement",
+    "other_product_promotion",
+    "other_product_leak",
+    "other_product_discussion",
+    "merch_release",
+    "partnership",
+    "media_release",
+    "riot_announcement",
+    "riot_promotion",
+    "riot_leak",
+    "riot_discussion",
+]
+
+TopicFamily = Literal[
+    "gameplay",
+    "tft",
+    "service",
+    "security",
+    "cosmetics",
+    "commerce",
+    "activity",
+    "community",
+    "guide",
+    "esports_competition",
+    "esports_schedule",
+    "esports_matches",
+    "esports_rosters",
+    "esports_analysis",
+    "esports_media",
+    "universe",
+    "media",
+    "merchandise",
+    "corporate",
+    "platform",
+    "unknown",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,50 +111,232 @@ class ScoreBand:
     cap: float
 
 
-SCORE_BANDS: Final[dict[ImportanceSubtype, ScoreBand]] = {
+@dataclass(frozen=True, slots=True)
+class ProfileRoute:
+    families: frozenset[TopicFamily]
+    profile: ImportanceProfile
+
+
+class ImportanceFeatures(TypedDict):
+    scale: ImportanceScale
+    audience_region: AudienceRegion
+    competition_region: CompetitionRegion
+    prominence: Prominence
+    skin_tier: SkinTier
+    is_bulk_update: bool
+    evidence: list[str]
+
+
+SCORE_BANDS: Final[dict[ImportanceProfile, ScoreBand]] = {
+    "unknown": ScoreBand(0.0, 0.0, 0.0),
+    "patch_official_notes": ScoreBand(0.92, 0.88, 0.95),
+    "patch_full_preview": ScoreBand(0.90, 0.87, 0.93),
+    "official_gameplay_preview": ScoreBand(0.86, 0.80, 0.93),
+    "official_content_preview": ScoreBand(0.76, 0.66, 0.84),
+    "gameplay_announcement": ScoreBand(0.86, 0.78, 0.95),
+    "tft_announcement": ScoreBand(0.82, 0.74, 0.90),
+    "activity_announcement": ScoreBand(0.72, 0.62, 0.82),
+    "cosmetic_announcement": ScoreBand(0.68, 0.58, 0.80),
+    "commerce_announcement": ScoreBand(0.58, 0.48, 0.70),
+    "weekly_free_champion_rotation": ScoreBand(0.50, 0.44, 0.56),
+    "game_announcement_general": ScoreBand(0.62, 0.52, 0.76),
+    "patch_hotfix": ScoreBand(0.72, 0.62, 0.84),
+    "service_notice": ScoreBand(0.68, 0.54, 0.86),
+    "security_notice": ScoreBand(0.82, 0.72, 0.92),
+    "promotion_gameplay": ScoreBand(0.52, 0.38, 0.68),
+    "promotion_activity": ScoreBand(0.50, 0.36, 0.66),
+    "promotion_cosmetic": ScoreBand(0.48, 0.34, 0.64),
+    "promotion_community": ScoreBand(0.34, 0.16, 0.50),
+    "promotion_general": ScoreBand(0.42, 0.26, 0.58),
     "shop_daily_standard": ScoreBand(0.48, 0.42, 0.54),
     "shop_cosmetic_rotation": ScoreBand(0.58, 0.52, 0.64),
     "shop_rare_cosmetic": ScoreBand(0.66, 0.60, 0.72),
     "shop_bulk_refresh": ScoreBand(0.66, 0.60, 0.72),
-    "shop_standard_offer": ScoreBand(0.52, 0.42, 0.62),
-    "free_champion_rotation": ScoreBand(0.42, 0.38, 0.48),
     "free_reward": ScoreBand(0.62, 0.52, 0.75),
-    "patch_preview": ScoreBand(0.86, 0.82, 0.90),
-    "patch_full_preview": ScoreBand(0.90, 0.87, 0.93),
-    "patch_official_notes": ScoreBand(0.92, 0.88, 0.95),
-    "patch_hotfix": ScoreBand(0.72, 0.62, 0.84),
-    "pbe_change": ScoreBand(0.62, 0.52, 0.72),
-    "new_champion": ScoreBand(0.93, 0.88, 0.96),
-    "new_game_mode": ScoreBand(0.91, 0.86, 0.95),
-    "major_gameplay_change": ScoreBand(0.92, 0.87, 0.95),
-    "tft_set_update": ScoreBand(0.84, 0.78, 0.90),
-    "tft_cosmetic_release": ScoreBand(0.58, 0.50, 0.68),
-    "activity_paid": ScoreBand(0.68, 0.60, 0.76),
-    "activity_standard": ScoreBand(0.72, 0.62, 0.82),
-    "activity_free_skin": ScoreBand(0.88, 0.83, 0.93),
+    "activity_free_skin": ScoreBand(0.84, 0.78, 0.90),
+    "community_game_notice": ScoreBand(0.54, 0.42, 0.68),
+    "community_service_notice": ScoreBand(0.58, 0.46, 0.72),
+    "community_notice_general": ScoreBand(0.46, 0.34, 0.60),
+    "leak_gameplay": ScoreBand(0.62, 0.50, 0.75),
+    "leak_content": ScoreBand(0.54, 0.42, 0.68),
+    "leak_general": ScoreBand(0.50, 0.38, 0.64),
+    "gameplay_guide": ScoreBand(0.42, 0.32, 0.52),
+    "game_discussion": ScoreBand(0.34, 0.16, 0.55),
     "esports_schedule": ScoreBand(0.52, 0.46, 0.62),
-    "esports_ticketing": ScoreBand(0.58, 0.50, 0.68),
     "esports_regular": ScoreBand(0.60, 0.54, 0.68),
     "esports_playoffs": ScoreBand(0.70, 0.66, 0.76),
     "esports_final": ScoreBand(0.76, 0.71, 0.82),
     "worlds_regular": ScoreBand(0.68, 0.62, 0.74),
     "worlds_key": ScoreBand(0.80, 0.74, 0.86),
-    "roster_transfer": ScoreBand(0.62, 0.54, 0.74),
-    "skin_release": ScoreBand(0.68, 0.60, 0.80),
-    "service_incident": ScoreBand(0.68, 0.54, 0.86),
-    "disciplinary_action": ScoreBand(0.76, 0.66, 0.88),
-    "security_notice": ScoreBand(0.82, 0.72, 0.92),
+    "roster_announcement": ScoreBand(0.62, 0.54, 0.74),
+    "esports_announcement_general": ScoreBand(0.56, 0.44, 0.70),
+    "esports_promotion": ScoreBand(0.44, 0.28, 0.62),
+    "esports_rumor": ScoreBand(0.50, 0.38, 0.68),
+    "esports_analysis": ScoreBand(0.44, 0.30, 0.60),
+    "esports_discussion": ScoreBand(0.34, 0.18, 0.54),
+    "universe_announcement": ScoreBand(0.66, 0.58, 0.78),
+    "universe_promotion": ScoreBand(0.46, 0.32, 0.62),
+    "universe_leak": ScoreBand(0.54, 0.42, 0.68),
+    "universe_discussion": ScoreBand(0.38, 0.22, 0.56),
+    "other_product_announcement": ScoreBand(0.68, 0.56, 0.82),
+    "other_product_promotion": ScoreBand(0.46, 0.32, 0.62),
+    "other_product_leak": ScoreBand(0.54, 0.42, 0.70),
+    "other_product_discussion": ScoreBand(0.38, 0.22, 0.56),
     "merch_release": ScoreBand(0.52, 0.44, 0.64),
     "partnership": ScoreBand(0.58, 0.50, 0.68),
     "media_release": ScoreBand(0.58, 0.48, 0.70),
-    "riot_corporate": ScoreBand(0.66, 0.58, 0.76),
-    "lol_universe": ScoreBand(0.66, 0.58, 0.78),
-    "community_event": ScoreBand(0.52, 0.42, 0.64),
-    "gameplay_guide": ScoreBand(0.42, 0.32, 0.52),
-    "community": ScoreBand(0.34, 0.16, 0.48),
-    "other": ScoreBand(0.50, 0.30, 0.66),
+    "riot_announcement": ScoreBand(0.66, 0.58, 0.76),
+    "riot_promotion": ScoreBand(0.46, 0.32, 0.62),
+    "riot_leak": ScoreBand(0.54, 0.42, 0.68),
+    "riot_discussion": ScoreBand(0.38, 0.22, 0.56),
 }
 
+
+TOPIC_FAMILIES: Final[dict[Topic, TopicFamily]] = {
+    "balance_gameplay": "gameplay",
+    "champions": "gameplay",
+    "items_runes_systems": "gameplay",
+    "game_modes": "gameplay",
+    "gameplay": "gameplay",
+    "service_technical": "service",
+    "cosmetics": "cosmetics",
+    "shop_monetization": "commerce",
+    "activities_rewards": "activity",
+    "security_fair_play": "security",
+    "community": "community",
+    "guides_education": "guide",
+    "tft_gameplay": "tft",
+    "esports_competition": "esports_competition",
+    "esports_schedule": "esports_schedule",
+    "esports_matches": "esports_matches",
+    "esports_rosters": "esports_rosters",
+    "esports_analysis": "esports_analysis",
+    "esports_broadcast": "esports_media",
+    "esports_fandom_live": "esports_media",
+    "lore_universe": "universe",
+    "media_entertainment": "media",
+    "merchandise_collectibles": "merchandise",
+    "corporate_partnerships": "corporate",
+    "platform_services": "platform",
+    "unknown": "unknown",
+}
+
+
+def _route(families: set[TopicFamily], profile: ImportanceProfile) -> ProfileRoute:
+    return ProfileRoute(frozenset(families), profile)
+
+
+_GAME_PROMOTION_ROUTES = (
+    _route({"activity", "commerce"}, "promotion_activity"),
+    _route({"cosmetics"}, "promotion_cosmetic"),
+    _route({"gameplay", "tft"}, "promotion_gameplay"),
+    _route({"community", "guide", "media"}, "promotion_community"),
+    _route(set(TOPIC_FAMILIES.values()), "promotion_general"),
+)
+
+
+PROFILE_ROUTES: Final[dict[MessageType, tuple[ProfileRoute, ...]]] = {
+    "game_patch_notes": (_route(set(TOPIC_FAMILIES.values()), "patch_official_notes"),),
+    "game_official_preview": (
+        _route({"gameplay", "tft"}, "official_gameplay_preview"),
+        _route(set(TOPIC_FAMILIES.values()), "official_content_preview"),
+    ),
+    "game_announcement": (
+        _route({"security"}, "security_notice"),
+        _route({"service"}, "service_notice"),
+        _route({"activity"}, "activity_announcement"),
+        _route({"commerce"}, "commerce_announcement"),
+        _route({"cosmetics"}, "cosmetic_announcement"),
+        _route({"tft"}, "tft_announcement"),
+        _route({"gameplay"}, "gameplay_announcement"),
+        _route(set(TOPIC_FAMILIES.values()), "game_announcement_general"),
+    ),
+    "game_notice": (
+        _route({"security"}, "security_notice"),
+        _route(set(TOPIC_FAMILIES.values()), "service_notice"),
+    ),
+    "game_promotion_interaction": _GAME_PROMOTION_ROUTES,
+    "game_community_notice": (
+        _route({"commerce"}, "shop_daily_standard"),
+        _route({"activity"}, "free_reward"),
+        _route({"service", "security"}, "community_service_notice"),
+        _route({"gameplay", "tft", "cosmetics"}, "community_game_notice"),
+        _route(set(TOPIC_FAMILIES.values()), "community_notice_general"),
+    ),
+    "game_community_promotion_interaction": _GAME_PROMOTION_ROUTES,
+    "game_leak": (
+        _route({"gameplay", "tft", "service", "security"}, "leak_gameplay"),
+        _route({"cosmetics", "commerce", "activity"}, "leak_content"),
+        _route(set(TOPIC_FAMILIES.values()), "leak_general"),
+    ),
+    "game_community_discussion": (
+        _route({"guide"}, "gameplay_guide"),
+        _route(set(TOPIC_FAMILIES.values()), "game_discussion"),
+    ),
+    "esports_announcement": (
+        _route({"esports_matches"}, "esports_regular"),
+        _route({"esports_schedule"}, "esports_schedule"),
+        _route({"esports_rosters"}, "roster_announcement"),
+        _route(set(TOPIC_FAMILIES.values()), "esports_announcement_general"),
+    ),
+    "esports_promotion_interaction": (
+        _route(set(TOPIC_FAMILIES.values()), "esports_promotion"),
+    ),
+    "esports_rumor_speculation": (
+        _route(set(TOPIC_FAMILIES.values()), "esports_rumor"),
+    ),
+    "esports_community_discussion": (
+        _route({"esports_analysis"}, "esports_analysis"),
+        _route(set(TOPIC_FAMILIES.values()), "esports_discussion"),
+    ),
+    "lol_universe_announcement": (
+        _route(set(TOPIC_FAMILIES.values()), "universe_announcement"),
+    ),
+    "lol_universe_promotion_interaction": (
+        _route(set(TOPIC_FAMILIES.values()), "universe_promotion"),
+    ),
+    "lol_universe_leak": (
+        _route(set(TOPIC_FAMILIES.values()), "universe_leak"),
+    ),
+    "lol_universe_community_discussion": (
+        _route(set(TOPIC_FAMILIES.values()), "universe_discussion"),
+    ),
+    "other_lol_product_announcement": (
+        _route(set(TOPIC_FAMILIES.values()), "other_product_announcement"),
+    ),
+    "other_lol_product_promotion_interaction": (
+        _route(set(TOPIC_FAMILIES.values()), "other_product_promotion"),
+    ),
+    "other_lol_product_leak": (
+        _route(set(TOPIC_FAMILIES.values()), "other_product_leak"),
+    ),
+    "other_lol_product_community_discussion": (
+        _route(set(TOPIC_FAMILIES.values()), "other_product_discussion"),
+    ),
+    "riot_ecosystem_announcement": (
+        _route({"merchandise"}, "merch_release"),
+        _route({"corporate"}, "partnership"),
+        _route({"media"}, "media_release"),
+        _route(set(TOPIC_FAMILIES.values()), "riot_announcement"),
+    ),
+    "riot_ecosystem_promotion_interaction": (
+        _route(set(TOPIC_FAMILIES.values()), "riot_promotion"),
+    ),
+    "riot_ecosystem_leak": (
+        _route(set(TOPIC_FAMILIES.values()), "riot_leak"),
+    ),
+    "riot_ecosystem_community_discussion": (
+        _route(set(TOPIC_FAMILIES.values()), "riot_discussion"),
+    ),
+    "unknown": (_route(set(TOPIC_FAMILIES.values()), "unknown"),),
+}
+
+
+_HOTFIX_SIGNAL = re.compile(
+    r"不停机.{0,8}(?:更新|维护)|(?:无需|不用)停机.{0,8}(?:更新|维护)|"
+    r"热(?:更新|修复)|hotfix|micro\s*patch|server[-\s]?side\s+update",
+    re.IGNORECASE,
+)
 _FULL_PREVIEW = re.compile(r"full\s+preview|完整预览", re.IGNORECASE)
 _RARE_COSMETIC = re.compile(r"稀有|限定|绝版|rare|limited|神话炫彩", re.IGNORECASE)
 _COSMETIC = re.compile(r"炫彩|皮肤|chroma|skin", re.IGNORECASE)
@@ -122,52 +350,6 @@ _EXPLICIT_PRESTIGE_OR_MYTHIC = re.compile(
     r"|mythic\s+(?:skin|chroma)",
     re.IGNORECASE,
 )
-
-
-class EditorialImportanceAnalysis(TypedDict):
-    scale: ImportanceScale
-    audience_region: AudienceRegion
-    competition_region: CompetitionRegion
-    prominence: Prominence
-    skin_tier: SkinTier
-    is_bulk_update: bool
-    evidence: list[str]
-
-
-_SUBTOPIC_SUBTYPES: Final[dict[str, ImportanceSubtype]] = {
-    "patch_notes": "patch_official_notes",
-    "hotfix": "patch_hotfix",
-    "pbe_change": "pbe_change",
-    "champion_release": "new_champion",
-    "champion_update": "major_gameplay_change",
-    "item_rune_system": "major_gameplay_change",
-    "game_mode_release": "new_game_mode",
-    "game_mode_update": "major_gameplay_change",
-    "tft_set": "tft_set_update",
-    "tft_patch": "tft_set_update",
-    "tft_cosmetic": "tft_cosmetic_release",
-    "skin_release": "skin_release",
-    "shop_offer": "shop_standard_offer",
-    "free_rotation": "free_champion_rotation",
-    "free_reward": "free_reward",
-    "event_pass": "activity_paid",
-    "in_game_activity": "activity_standard",
-    "ticketing": "esports_ticketing",
-    "match_schedule": "esports_schedule",
-    "roster_move": "roster_transfer",
-    "maintenance": "service_incident",
-    "outage": "service_incident",
-    "disciplinary": "disciplinary_action",
-    "security": "security_notice",
-    "merch": "merch_release",
-    "partnership": "partnership",
-    "corporate": "riot_corporate",
-    "lore": "lol_universe",
-    "music_video": "media_release",
-    "community_event": "community_event",
-    "gameplay_guide": "gameplay_guide",
-    "community_post": "community",
-}
 _WORLD_EVENT = re.compile(r"worlds|全球总决赛|世界赛", re.IGNORECASE)
 _FINAL = re.compile(r"总决赛|决赛|\bfinals?\b", re.IGNORECASE)
 _PLAYOFF = re.compile(r"季后赛|淘汰赛|半决赛|playoffs?|semifinals?", re.IGNORECASE)
@@ -179,80 +361,94 @@ _FREE_SKIN = re.compile(
     re.IGNORECASE,
 )
 _LOTTERY = re.compile(r"抽奖|概率|有机会|召唤", re.IGNORECASE)
+_WEEKLY_FREE_CHAMPION = re.compile(
+    r"周免(?:英雄)?|每周免费英雄|免费英雄(?:更新|轮换)|"
+    r"weekly\s+free\s+champions?|free(?:-to-play)?\s+champion\s+rotation",
+    re.IGNORECASE,
+)
 
 
-def derive_importance_subtype(
+def has_hotfix_signal(value: str) -> bool:
+    return _HOTFIX_SIGNAL.search(value) is not None
+
+
+def _topic_families(topics: list[str]) -> frozenset[TopicFamily]:
+    invalid = set(topics) - TOPICS
+    if invalid:
+        raise ValueError(f"unsupported importance topics: {sorted(invalid)}")
+    return frozenset(TOPIC_FAMILIES[cast(Topic, topic)] for topic in topics)
+
+
+def _shop_profile(content: str) -> ImportanceProfile:
+    if _RARE_COSMETIC.search(content):
+        return "shop_rare_cosmetic"
+    if _BULK_REFRESH.search(content):
+        return "shop_bulk_refresh"
+    if _COSMETIC.search(content):
+        return "shop_cosmetic_rotation"
+    return "shop_daily_standard"
+
+
+def _match_profile(content: str) -> ImportanceProfile:
+    if _WORLD_EVENT.search(content):
+        return "worlds_key" if _FINAL.search(content) or _PLAYOFF.search(content) else "worlds_regular"
+    if _FINAL.search(content):
+        return "esports_final"
+    if _PLAYOFF.search(content):
+        return "esports_playoffs"
+    return "esports_regular"
+
+
+def derive_importance_profile(
     *,
-    primary_topic: str,
-    subtopic: str,
+    message_type: str,
+    topics: list[str],
     content: str,
-    source_kind: str = "first_party",
-) -> ImportanceSubtype:
-    """Map controlled classification to an editorial policy band."""
-    if subtopic in OFFICIAL_ONLY_UPDATE_SUBTOPICS and source_kind != "first_party":
-        return "pbe_change"
-    if subtopic == "shop_rotation":
-        if _RARE_COSMETIC.search(content):
-            return "shop_rare_cosmetic"
-        if _BULK_REFRESH.search(content):
-            return "shop_bulk_refresh"
-        if _COSMETIC.search(content):
-            return "shop_cosmetic_rotation"
-        return "shop_daily_standard"
-    if subtopic == "patch_preview":
-        return "patch_full_preview" if _FULL_PREVIEW.search(content) else "patch_preview"
-    if subtopic == "match_result":
-        if _WORLD_EVENT.search(content):
-            return (
-                "worlds_key"
-                if _FINAL.search(content) or _PLAYOFF.search(content)
-                else "worlds_regular"
-            )
-        if _FINAL.search(content):
-            return "esports_final"
-        if _PLAYOFF.search(content):
-            return "esports_playoffs"
-        return "esports_regular"
+) -> ImportanceProfile:
+    """Resolve one scoring profile directly from the approved message taxonomy."""
+    if message_type not in MESSAGE_TYPES:
+        raise ValueError(f"unsupported importance message_type: {message_type}")
+    if not topics:
+        raise ValueError("importance topics must not be empty")
+    typed_message_type = cast(MessageType, message_type)
+    families = _topic_families(topics)
+
+    if typed_message_type == "unknown":
+        return "unknown"
+    if typed_message_type == "game_notice" and has_hotfix_signal(content):
+        return "patch_hotfix"
+    if typed_message_type == "game_official_preview" and _FULL_PREVIEW.search(content):
+        return "patch_full_preview"
     if (
-        subtopic in {"in_game_activity", "free_reward"}
-        and _FREE_SKIN.search(content)
-        and not _LOTTERY.search(content)
+        typed_message_type == "game_announcement"
+        and "gameplay" in families
+        and _WEEKLY_FREE_CHAMPION.search(content)
     ):
-        return "activity_free_skin"
-    if subtype := _SUBTOPIC_SUBTYPES.get(subtopic):
-        return subtype
-    return {
-        "community": "community",
-        "universe": "lol_universe",
-        "business": "riot_corporate",
-        "media": "media_release",
-        "activity": "activity_standard",
-        "service": "service_incident",
-        "roster": "roster_transfer",
-        "skin": "skin_release",
-    }.get(primary_topic, "other")
+        return "weekly_free_champion_rotation"
+    if typed_message_type == "game_community_notice":
+        if "commerce" in families:
+            return _shop_profile(content)
+        if "activity" in families and _FREE_SKIN.search(content) and not _LOTTERY.search(content):
+            return "activity_free_skin"
+    if typed_message_type == "esports_announcement" and "esports_matches" in families:
+        return _match_profile(content)
 
-
-def _modifier(key: str, value: float, evidence: str) -> dict[str, object]:
-    return {"key": key, "value": round(value, 4), "evidence": evidence}
-
-
-def normalize_importance_analysis(
-    analysis: EditorialImportanceAnalysis,
-    *,
-    primary_topic: str,
-    subtopic: str,
-    content: str,
-    source_kind: str = "first_party",
-) -> EditorialImportanceAnalysis:
-    normalized = dict(analysis)
-    subtype = derive_importance_subtype(
-        primary_topic=primary_topic,
-        subtopic=subtopic,
-        content=content,
-        source_kind=source_kind,
+    for route in PROFILE_ROUTES[typed_message_type]:
+        if families & route.families:
+            return route.profile
+    raise ValueError(
+        f"no importance profile for message_type={message_type}, topics={topics}"
     )
-    if subtype not in {"skin_release", "tft_cosmetic_release"}:
+
+
+def normalize_importance_features(
+    features: ImportanceFeatures,
+    *,
+    profile: ImportanceProfile,
+    content: str,
+) -> ImportanceFeatures:
+    normalized = dict(features)
+    if profile not in {"cosmetic_announcement", "promotion_cosmetic"}:
         normalized["skin_tier"] = "none"
     elif (
         normalized["skin_tier"] == "prestige_or_mythic"
@@ -260,153 +456,145 @@ def normalize_importance_analysis(
         and not _EXPLICIT_PRESTIGE_OR_MYTHIC.search(content)
     ):
         normalized["skin_tier"] = "standard"
-    return cast(EditorialImportanceAnalysis, normalized)
+    return cast(ImportanceFeatures, normalized)
+
+
+def _modifier(key: str, value: float, evidence: str) -> dict[str, object]:
+    return {"key": key, "value": round(value, 4), "evidence": evidence}
 
 
 def calculate_importance(
-    analysis: EditorialImportanceAnalysis,
+    features: ImportanceFeatures,
     *,
-    primary_topic: str,
-    subtopic: str,
+    message_type: str,
+    topics: list[str],
+    content_form: str = "original",
     content: str = "",
-    source_kind: str = "first_party",
 ) -> tuple[float, dict[str, object]]:
-    """Calculate stable intrinsic importance from content impact only."""
-    analysis = normalize_importance_analysis(
-        analysis,
-        primary_topic=primary_topic,
-        subtopic=subtopic,
+    """Calculate message importance from classification and bounded features."""
+    profile = derive_importance_profile(
+        message_type=message_type,
+        topics=topics,
         content=content,
-        source_kind=source_kind,
     )
-    subtype = derive_importance_subtype(
-        primary_topic=primary_topic,
-        subtopic=subtopic,
+    features = normalize_importance_features(
+        features,
+        profile=profile,
         content=content,
-        source_kind=source_kind,
     )
-    band = SCORE_BANDS[subtype]
+    band = SCORE_BANDS[profile]
     modifiers: list[dict[str, object]] = []
-    scale = analysis["scale"]
-    if subtype in {"patch_hotfix", "service_incident", "security_notice"}:
+    scale = features["scale"]
+    if profile in {"patch_hotfix", "service_notice", "security_notice"}:
         scale_delta = {"minor": -0.07, "standard": 0.0, "major": 0.09}[scale]
     else:
         scale_delta = {"minor": -0.03, "standard": 0.0, "major": 0.03}[scale]
     if scale_delta:
         modifiers.append(_modifier("scale", scale_delta, f"内容规模识别为 {scale}"))
-    if analysis["is_bulk_update"] and subtype not in {
+    if features["is_bulk_update"] and profile not in {
         "shop_bulk_refresh",
         "patch_full_preview",
         "patch_official_notes",
+        "weekly_free_champion_rotation",
     }:
         modifiers.append(_modifier("bulk_update", 0.03, "包含批量新增或大量改动"))
-    if subtype.startswith("esports_") or subtype.startswith("worlds_"):
+    if profile.startswith("esports_") or profile.startswith("worlds_"):
         region_delta = {
             "lpl": 0.03,
             "lck": 0.0,
             "international": 0.01,
             "other": -0.03,
             "none": -0.03,
-        }[analysis["competition_region"]]
+        }[features["competition_region"]]
         if region_delta:
             modifiers.append(
                 _modifier(
                     "competition_region",
                     region_delta,
-                    f"赛事赛区为 {analysis['competition_region']}",
+                    f"赛事赛区为 {features['competition_region']}",
                 )
             )
-    if subtype in {
+    if profile in {
         "esports_regular",
         "esports_playoffs",
         "esports_final",
         "worlds_regular",
         "worlds_key",
-        "roster_transfer",
+        "roster_announcement",
+        "esports_rumor",
     }:
-        prominence_delta = {"normal": 0.0, "notable": 0.03, "star": 0.07}[analysis["prominence"]]
+        prominence_delta = {"normal": 0.0, "notable": 0.03, "star": 0.07}[
+            features["prominence"]
+        ]
         if prominence_delta:
             modifiers.append(
                 _modifier(
                     "prominence",
                     prominence_delta,
-                    f"涉及对象知名度为 {analysis['prominence']}",
+                    f"涉及对象知名度为 {features['prominence']}",
                 )
             )
-    if subtype in {"skin_release", "tft_cosmetic_release"}:
+    if profile in {"cosmetic_announcement", "promotion_cosmetic"}:
         skin_tier_delta = {
             "none": 0.0,
             "standard": 0.0,
             "legendary": 0.04,
             "prestige_or_mythic": 0.06,
             "ultimate": 0.10,
-        }[analysis["skin_tier"]]
+        }[features["skin_tier"]]
         if skin_tier_delta:
             modifiers.append(
                 _modifier(
                     "skin_tier",
                     skin_tier_delta,
-                    f"外观档次为 {analysis['skin_tier']}",
+                    f"外观档次为 {features['skin_tier']}",
                 )
             )
+    profile_modifier_total = sum(float(item["value"]) for item in modifiers)
+    pre_clamp = band.base + profile_modifier_total
+    profile_score = round(max(band.floor, min(band.cap, pre_clamp)), 4)
+    if content_form == "repost":
+        modifiers.append(_modifier("content_form", -0.08, "内容形式为 repost"))
     modifier_total = sum(float(item["value"]) for item in modifiers)
-    pre_clamp = band.base + modifier_total
-    final = round(max(band.floor, min(band.cap, pre_clamp)), 4)
+    content_form_delta = modifier_total - profile_modifier_total
+    final = round(max(0.0, min(1.0, profile_score + content_form_delta)), 4)
     return final, {
         "policy_version": IMPORTANCE_POLICY_VERSION,
-        "score_kind": "intrinsic_importance",
-        "editorial_subtype": subtype,
+        "score_kind": "message_importance",
+        "importance_profile": profile,
+        "message_type": message_type,
+        "topics": topics,
         "base_score": band.base,
         "score_band": {"floor": band.floor, "cap": band.cap},
         "modifiers": modifiers,
         "modifier_total": round(modifier_total, 4),
+        "profile_modifier_total": round(profile_modifier_total, 4),
         "pre_clamp_score": round(pre_clamp, 4),
+        "profile_score": profile_score,
         "final_score": final,
     }
 
 
 def calculate_message_priority(
-    intrinsic_score: float,
+    importance_score: float,
     *,
-    information_stage: str,
     content_form: str,
     audience_region: str,
 ) -> tuple[float, dict[str, object]]:
-    """Project intrinsic value into a feed priority without claiming history knowledge."""
+    """Adjust message importance only for feed delivery constraints."""
     modifiers: list[dict[str, object]] = []
-    stage_delta = {
-        "correction": 0.04,
-        "result": 0.02,
-        "active": 0.01,
-        "announcement": 0.0,
-        "preview": 0.0,
-        "update": 0.0,
-        "rumor": -0.02,
-        "speculation": -0.06,
-        "reminder": -0.12,
-        "commentary": -0.16,
-    }.get(information_stage, 0.0)
-    if stage_delta:
-        modifiers.append(
-            _modifier(
-                "information_stage",
-                stage_delta,
-                f"信息阶段为 {information_stage}",
-            )
-        )
-    form_delta = {"repost": -0.08, "roundup": -0.04}.get(content_form, 0.0)
+    form_delta = {"quote": -0.02}.get(content_form, 0.0)
     if form_delta:
         modifiers.append(_modifier("content_form", form_delta, f"内容形式为 {content_form}"))
     if audience_region == "international_only":
         modifiers.append(_modifier("audience_region", -0.12, "明确仅影响非国服受众"))
     total = sum(float(item["value"]) for item in modifiers)
-    final = round(max(0.05, min(1.0, intrinsic_score + total)), 4)
+    final = round(max(0.0, min(1.0, importance_score + total)), 4)
     return final, {
         "policy_version": IMPORTANCE_POLICY_VERSION,
         "score_kind": "message_priority",
-        "intrinsic_score": intrinsic_score,
+        "importance_score": importance_score,
         "modifiers": modifiers,
         "modifier_total": round(total, 4),
         "final_score": final,
-        "novelty_basis": "current-message-signals-only",
     }

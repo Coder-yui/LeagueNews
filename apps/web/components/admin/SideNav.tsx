@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, ArrowLeft, BookOpen, Database, FileText, GitBranch, Menu, ScanText, Settings, ShieldCheck, X } from "lucide-react";
+import { Activity, ArrowLeft, BookOpen, Database, FileText, Menu, ScanText, Settings, ShieldCheck, X } from "lucide-react";
 import { useState } from "react";
 
 const groups = [
   { label: "", items: [{ href: "/admin/pipeline", label: "流水线监控", icon: Activity }] },
-  { label: "内容", items: [{ href: "/admin/messages", label: "消息管理", icon: FileText }, { href: "/admin/events", label: "事件管理", icon: GitBranch }] },
+  { label: "内容", items: [{ href: "/admin/messages", label: "消息管理", icon: FileText }] },
   { label: "运营", items: [{ href: "/admin/reviews", label: "审核中心", icon: ShieldCheck, review: true }, { href: "/admin/collection", label: "数据采集", icon: Database }] },
   { label: "系统", items: [{ href: "/admin/system", label: "系统运维", icon: Settings }, { href: "/admin/system/ocr", label: "OCR 测试台", icon: ScanText }, { href: "/admin/system/knowledge", label: "知识库", icon: BookOpen }] },
 ];

@@ -4,21 +4,12 @@ from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-import app.models  # noqa: F401
 from app.connectors.base import RawItemCandidate
 from app.core.database import Base
-from app.models.event import (
-    EventAggregationRun,
-    EventMessage,
-    EventReviewTask,
-)
-from app.models.intelligence import EventClaim
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineJob, ProcessingCheckpoint
 from app.models.source import Source
 from app.models.workflow import ProcessingRun, ReviewTask
-from app.services.claims import extract_traceable_claim
-from app.services.event_aggregation import create_event
 from app.services.ingestion import ingest_connector_items
 
 
@@ -50,7 +41,7 @@ def _candidate(text: str) -> RawItemCandidate:
     )
 
 
-def test_new_raw_revision_supersedes_active_downstream_projection() -> None:
+def test_new_raw_revision_supersedes_message_processing_projection() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
@@ -71,7 +62,10 @@ def test_new_raw_revision_supersedes_active_downstream_projection() -> None:
             normalized_text="First version",
             summary="First version",
             entities=[],
-            primary_topic="other",
+            products=["lol_pc"],
+            message_type="game_announcement",
+            topics=["activities_rewards"],
+            classification_version="message-taxonomy-v2",
             importance_score=0.5,
             target_language="zh-CN",
             translated_title="第一版",
@@ -81,16 +75,6 @@ def test_new_raw_revision_supersedes_active_downstream_projection() -> None:
             analysis_version="test",
         )
         db.add(item)
-        db.flush()
-        claim = extract_traceable_claim(db, item)
-        event = create_event(
-            db,
-            normalized_item_id=item.id,
-            title="Versioned event",
-            summary="Initial evidence",
-            event_kind="other",
-            aggregation_strategy="singleton",
-        )
         item_run = ProcessingRun(
             raw_item_id=first.id,
             workflow_type="item",
@@ -104,33 +88,17 @@ def test_new_raw_revision_supersedes_active_downstream_projection() -> None:
             stage="importance",
             status="pending",
         )
-        event_run = EventAggregationRun(
-            normalized_item_id=item.id,
-            status="awaiting_review",
-        )
-        db.add(event_run)
-        db.flush()
-        event_review = EventReviewTask(
-            event_aggregation_run_id=event_run.id,
-            status="pending",
-        )
-        job = db.scalar(
-            select(PipelineJob).where(PipelineJob.raw_item_id == first.id)
-        )
-        if job is None:
-            job = PipelineJob(
-                raw_item_id=first.id,
-                status="queued",
-                current_stage="importance",
-            )
-            db.add(job)
+        job = db.scalar(select(PipelineJob).where(PipelineJob.raw_item_id == first.id))
+        assert job is not None
+        job.status = "queued"
+        job.current_stage = "importance"
         checkpoint = ProcessingCheckpoint(
             raw_item_id=first.id,
             normalized_item_id=item.id,
             processing_run_id=item_run.id,
             stage="importance",
         )
-        db.add_all([item_review, event_review, checkpoint])
+        db.add_all([item_review, checkpoint])
         db.commit()
 
         successor = asyncio.run(
@@ -145,20 +113,11 @@ def test_new_raw_revision_supersedes_active_downstream_projection() -> None:
         assert successor.revision == 2
         assert successor.supersedes_raw_item_id == first.id
         assert item.publication_status == "superseded"
-        assert claim.status == "superseded"
         assert job.status == "cancelled"
         assert item_run.status == "superseded"
         assert item_review.status == "superseded"
-        assert event_run.status == "superseded"
-        assert event_review.status == "superseded"
         assert checkpoint.invalidated_at is not None
-        membership = db.scalar(
-            select(EventMessage).where(
-                EventMessage.normalized_item_id == item.id
-            )
+        assert (
+            db.scalar(select(NormalizedItem).where(NormalizedItem.raw_item_id == successor.id))
+            is None
         )
-        assert membership is not None
-        assert membership.membership_status == "withdrawn"
-        assert db.get(EventClaim, (event.id, claim.id)) is not None
-        assert event.status == "withdrawn"
-        assert event.current_revision == 2

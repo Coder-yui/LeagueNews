@@ -1,22 +1,16 @@
 from dataclasses import dataclass
 
-FACT_EXTRACTION_OPERATION = "事实抽取"
 CLASSIFICATION_OPERATION = "分类"
-CLAIM_GENERATION_OPERATION = "断言生成"
 IMPORTANCE_SCORING_OPERATION = "重要性评分"
 RELEVANCE_OPERATION = "相关性判断"
 TRANSLATION_OPERATION = "翻译"
-EVENT_AGGREGATION_OPERATION = "事件聚合决策"
 KNOWLEDGE_ORGANIZATION_OPERATION = "知识整理"
 PRODUCTION_LLM_OPERATIONS = frozenset(
     {
-        FACT_EXTRACTION_OPERATION,
         CLASSIFICATION_OPERATION,
-        CLAIM_GENERATION_OPERATION,
         IMPORTANCE_SCORING_OPERATION,
         RELEVANCE_OPERATION,
         TRANSLATION_OPERATION,
-        EVENT_AGGREGATION_OPERATION,
         KNOWLEDGE_ORGANIZATION_OPERATION,
     }
 )
@@ -32,19 +26,16 @@ class PromptSpec:
 
 class PromptRegistry:
     _versions = {
-        FACT_EXTRACTION_OPERATION: ("fact-extraction", "v1"),
-        CLASSIFICATION_OPERATION: ("classification", "v6-cosmetic-releases"),
-        CLAIM_GENERATION_OPERATION: ("claim-generation", "v2-timeline"),
+        CLASSIFICATION_OPERATION: (
+            "message-content-analysis",
+            "v6-title-summarizability",
+        ),
         IMPORTANCE_SCORING_OPERATION: (
-            "importance-scoring",
-            "v5-cosmetic-releases",
+            "message-classification-importance",
+            "v13-community-promotion",
         ),
-        RELEVANCE_OPERATION: ("relevance", "v2-product-scope"),
-        TRANSLATION_OPERATION: ("translation", "v2-contextual-chunks"),
-        EVENT_AGGREGATION_OPERATION: (
-            "event-decision",
-            "v7-semantic-candidate-binding",
-        ),
+        RELEVANCE_OPERATION: ("relevance", "v3-lol-scope"),
+        TRANSLATION_OPERATION: ("translation", "v3-single-request"),
         KNOWLEDGE_ORGANIZATION_OPERATION: (
             "knowledge-organization",
             "v2-evaluation-gated",

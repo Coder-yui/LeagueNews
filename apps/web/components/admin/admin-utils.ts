@@ -2,12 +2,10 @@ import type { PipelineJob, ProcessingRun, RawAdminItem } from "@/lib/types";
 
 export const PIPELINE_STAGES = [
   "relevance",
-  "ocr",
+  "image_ocr",
   "translation",
-  "fact_classify",
+  "message_analysis",
   "importance",
-  "claim_gen",
-  "event_decision",
 ] as const;
 
 export type PipelineStageName = (typeof PIPELINE_STAGES)[number];
@@ -16,16 +14,13 @@ export type StageView = { name: PipelineStageName; status: StageStatus; detail?:
 
 export const STAGE_LABELS: Record<PipelineStageName, string> = {
   relevance: "相关性",
-  ocr: "图片 OCR",
+  image_ocr: "图片 OCR",
   translation: "翻译",
-  fact_classify: "事实与分类",
+  message_analysis: "消息分析",
   importance: "重要性",
-  claim_gen: "断言生成",
-  event_decision: "事件归属",
 };
 
 export function canonicalStage(stage: string | null | undefined): PipelineStageName {
-  if (stage === "image_ocr") return "ocr";
   return PIPELINE_STAGES.includes(stage as PipelineStageName)
     ? (stage as PipelineStageName)
     : "relevance";
@@ -34,16 +29,10 @@ export function canonicalStage(stage: string | null | undefined): PipelineStageN
 function summarizeContext(context: Record<string, unknown>, stage: PipelineStageName): string {
   const contextKeys: Record<PipelineStageName, string[]> = {
     relevance: ["relevance_decision"],
-    ocr: ["approved_media_extraction_ids"],
+    image_ocr: ["approved_media_extraction_ids"],
     translation: ["approved_translation_proposal", "translation"],
-    fact_classify: [
-      "approved_classification_proposal",
-      "approved_fact_proposal",
-      "fact_classify",
-    ],
+    message_analysis: ["approved_message_analysis_proposal", "message_analysis"],
     importance: ["approved_importance_proposal", "importance"],
-    claim_gen: ["approved_claim_proposal", "claim_gen"],
-    event_decision: ["event_decision"],
   };
   const value = contextKeys[stage].map((key) => context[key]).find((entry) => entry !== undefined);
   if (typeof value === "string") return value.slice(0, 80);
@@ -98,21 +87,6 @@ export function relativeTime(value: string | null | undefined): string {
   return `${Math.floor(hours / 24)} 天前`;
 }
 
-export function score(value: number | null | undefined): string {
-  return typeof value === "number" ? value.toFixed(2) : "—";
-}
-
 export function pointScore(value: number | null | undefined): string {
   return typeof value === "number" ? String(Math.round(value * 100)) : "—";
-}
-
-export function objectNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (value && typeof value === "object") {
-    const nested = (value as { score?: unknown; value?: unknown; freshness_factor?: unknown }).score
-      ?? (value as { value?: unknown }).value
-      ?? (value as { freshness_factor?: unknown }).freshness_factor;
-    return typeof nested === "number" ? nested : null;
-  }
-  return null;
 }

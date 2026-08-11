@@ -16,21 +16,15 @@ from app.services.media_publication import (
 )
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
+def test_media_rejects_non_public_literal_addresses(tmp_path: Path) -> None:
+    for url in (
         "http://127.0.0.1/a.png",
         "http://169.254.169.254/latest/meta-data",
         "http://[::1]/a.png",
         "http://[fc00::1]/a.png",
-    ],
-)
-def test_media_rejects_non_public_literal_addresses(
-    tmp_path: Path, url: str
-) -> None:
-    storage = MediaStorage(tmp_path)
-    with pytest.raises(MediaStorageError, match="private or local"):
-        asyncio.run(storage._validate_public_url(url))
+    ):
+        with pytest.raises(MediaStorageError, match="private or local"):
+            asyncio.run(MediaStorage(tmp_path)._validate_public_url(url))
 
 
 def test_media_rejects_hostname_when_any_resolution_is_private(

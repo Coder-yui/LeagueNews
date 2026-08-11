@@ -41,8 +41,15 @@ fixtures or mocks unless a human intentionally runs the separate live smoke test
 - Preserve unrelated working-tree changes.
 - Never read, print, copy, or commit production environment files, cookies, tokens, passwords, or headers.
 - Never use `git reset --hard`, `git clean`, or `docker compose down -v`.
-- Never delete, truncate, rebuild, or silently rewrite databases, media, reviews, rules, terms, revisions,
-  or checkpoints.
+- Never mutate production databases.
+For a verified local development database, a downstream-processing reset is allowed
+only with explicit user authorization. Before resetting, stop workers, verify the
+exact database host and name, and preserve Sources, RawItems, source payloads,
+original media assets, rules, and glossary terms.
+A local downstream reset may remove pipeline jobs, corrections, review tasks,
+processing checkpoints, processing runs, normalized-item media associations,
+normalized-item revisions, normalized items, and derived media extractions.
+It must never remove or rewrite RawItems or original source evidence.
 - Do not connect to or mutate production while developing or testing.
 - Database changes must be backward-compatible and migration-driven.
 

@@ -8,10 +8,8 @@ PipelineStage = Literal[
     "relevance",
     "image_ocr",
     "translation",
-    "fact_classify",
+    "message_analysis",
     "importance",
-    "claim_gen",
-    "event_decision",
 ]
 
 
@@ -27,9 +25,7 @@ class PipelineCorrectionRead(BaseModel):
     id: int
     raw_item_id: int
     normalized_item_id: int | None
-    original_event_ids: list[int]
     source_processing_run_id: int | None
-    source_event_run_id: int | None
     checkpoint_id: int | None
     restart_from_stage: str
     resume_mode: str
@@ -48,7 +44,6 @@ class ProcessingCheckpointRead(BaseModel):
     raw_item_id: int
     normalized_item_id: int | None
     processing_run_id: int | None
-    event_aggregation_run_id: int | None
     correction_id: int | None
     stage: str
     output_snapshot: dict
@@ -70,7 +65,6 @@ class PipelineJobRead(BaseModel):
     status: str
     current_stage: str
     processing_run_id: int | None
-    event_aggregation_run_id: int | None
     last_checkpoint_id: int | None
     attempts: int
     error_message: str | None

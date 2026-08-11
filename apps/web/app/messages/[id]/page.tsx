@@ -24,7 +24,6 @@ export default async function MessagePage({
         </Link>
         <nav aria-label="主要导航">
           <Link className="active" href="/">消息</Link>
-          <Link href="/events">事件</Link>
           <Link href="/admin">处理台</Link>
         </nav>
         <div className="live-state"><span /> Reviewed</div>

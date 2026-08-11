@@ -1,10 +1,4 @@
-import type {
-  Digest,
-  EventDetail,
-  EventSummary,
-  PublishedItem,
-  PublishedItemPage,
-} from "./types";
+import type { PublishedItem, PublishedItemPage } from "./types";
 
 export const apiUrl =
   process.env.INTERNAL_API_URL ??
@@ -43,11 +37,27 @@ export async function getPublishedItemsPage(
     return {
       items: [],
       total: 0,
+      product_options: [],
+      message_type_options: [],
       topic_options: [],
-      subtopic_options: [],
-      information_stage_options: [],
     };
   }
+}
+
+export async function getAllPublishedItems(): Promise<PublishedItemPage> {
+  const pageSize = 100;
+  const firstPage = await getPublishedItemsPage(pageSize, 0);
+  const offsets = Array.from(
+    { length: Math.max(0, Math.ceil(firstPage.total / pageSize) - 1) },
+    (_, index) => (index + 1) * pageSize,
+  );
+  const remainingPages = await Promise.all(
+    offsets.map((offset) => getPublishedItemsPage(pageSize, offset)),
+  );
+  return {
+    ...firstPage,
+    items: [firstPage, ...remainingPages].flatMap((page) => page.items),
+  };
 }
 
 export async function getPublishedItem(id: number): Promise<PublishedItem | null> {
@@ -58,56 +68,6 @@ export async function getPublishedItem(id: number): Promise<PublishedItem | null
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`API returned ${response.status}`);
     return (await response.json()) as PublishedItem;
-  } catch {
-    return null;
-  }
-}
-
-export async function getEvents(): Promise<EventSummary[]> {
-  try {
-    const response = await fetch(`${apiUrl}/events`, {
-      next: { revalidate: 30 },
-    });
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as EventSummary[];
-  } catch {
-    return [];
-  }
-}
-
-export async function getEvent(id: number): Promise<EventDetail | null> {
-  try {
-    const response = await fetch(`${apiUrl}/events/${id}`, {
-      next: { revalidate: 30 },
-    });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as EventDetail;
-  } catch {
-    return null;
-  }
-}
-
-export async function getDigests(): Promise<Digest[]> {
-  try {
-    const response = await fetch(`${apiUrl}/digests`, {
-      next: { revalidate: 60 },
-    });
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as Digest[];
-  } catch {
-    return [];
-  }
-}
-
-export async function getDigest(id: number): Promise<Digest | null> {
-  try {
-    const response = await fetch(`${apiUrl}/digests/${id}`, {
-      next: { revalidate: 60 },
-    });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as Digest;
   } catch {
     return null;
   }

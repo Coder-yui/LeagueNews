@@ -5,8 +5,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
+from app.domain.message_taxonomy import MESSAGE_TYPE_ORDER, PRODUCTS, TOPIC_RULES
 from app.models.media_extraction import MediaExtraction
-from app.models.event import EventMessage
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
 from app.models.raw_item import RawItem
 from app.schemas.normalized_item import (
@@ -34,13 +34,15 @@ def list_normalized_items(db: Session = Depends(get_db)) -> list[NormalizedItem]
 
 
 def _published_statement():
-    return select(NormalizedItem).join(NormalizedItem.raw_item).options(
-        selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
-        selectinload(NormalizedItem.media_links)
-        .selectinload(NormalizedItemMediaExtraction.media_extraction)
-        .selectinload(MediaExtraction.media_asset),
-        selectinload(NormalizedItem.claims),
-        selectinload(NormalizedItem.event_memberships).selectinload(EventMessage.event),
+    return (
+        select(NormalizedItem)
+        .join(NormalizedItem.raw_item)
+        .options(
+            selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
+            selectinload(NormalizedItem.media_links)
+            .selectinload(NormalizedItemMediaExtraction.media_extraction)
+            .selectinload(MediaExtraction.media_asset),
+        )
     )
 
 
@@ -48,9 +50,7 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
     raw_item = item.raw_item
     source = raw_item.source
     public_media_by_index = {
-        asset.block_index: asset.public_path
-        for asset in raw_item.media_assets
-        if asset.public_path
+        asset.block_index: asset.public_path for asset in raw_item.media_assets if asset.public_path
     }
     media_extractions = []
     for link in sorted(
@@ -81,29 +81,25 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         "title": item.translated_title or item.normalized_title,
         "summary": item.summary,
         "entities": item.entities,
-        "primary_topic": item.primary_topic,
-        "subtopic": item.subtopic,
-        "secondary_topics": item.secondary_topics,
-        "source_kind": item.source_kind,
-        "information_stage": item.information_stage,
+        "products": item.products,
+        "message_type": item.message_type,
+        "topics": item.topics,
+        "classification_version": item.classification_version,
         "content_form": item.content_form,
-        "product_scope": item.product_scope,
         "facets": item.facets,
-        "ontology_version": item.ontology_version,
         "importance_score": item.importance_score,
         "importance_dimensions": item.importance_dimensions,
         "importance_policy_version": item.importance_policy_version,
         "priority_score": item.priority_score,
         "source_id": source.id,
         "source_name": source.name,
+        "source_reliability_score": source.reliability_score,
         "source_base_url": source.base_url,
         "source_url": raw_item.canonical_url,
         "author": raw_item.author_name,
         "published_at": raw_item.published_at,
         "original_title": raw_item.display_title,
-        "original_content_blocks": _public_blocks(
-            raw_item.content_blocks, public_media_by_index
-        ),
+        "original_content_blocks": _public_blocks(raw_item.content_blocks, public_media_by_index),
         "source_language": item.source_language,
         "translated_title": item.translated_title,
         "translated_content_blocks": _public_blocks(
@@ -111,32 +107,6 @@ def _published_payload(item: NormalizedItem) -> dict[str, Any]:
         ),
         "translation_status": item.translation_status,
         "media_extractions": media_extractions,
-        "fact_claims": [
-            {
-                "id": claim.id,
-                "subject": claim.subject,
-                "predicate": claim.predicate,
-                "object_value": claim.object_value,
-                "attribution": claim.attribution,
-                "stance": claim.stance,
-                "confidence": claim.confidence,
-            }
-            for claim in item.claims
-            if claim.status == "active"
-        ],
-        "event_memberships": [
-            {
-                "event_id": membership.event_id,
-                "event_title": membership.event.title,
-                "event_kind": membership.event.event_kind,
-                "aggregation_strategy": membership.event.aggregation_strategy,
-                "product_scope": membership.event.product_scope,
-                "membership_role": membership.membership_role,
-                "evidence_stance": membership.evidence_stance,
-            }
-            for membership in item.event_memberships
-            if membership.membership_status == "active"
-        ],
         "created_at": item.created_at,
     }
 
@@ -177,9 +147,7 @@ def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 
 @router.get("/published-page", response_model=PublishedItemPageRead)
 def list_published_items_page(
-    primary_topic: str | None = None,
-    subtopic: str | None = None,
-    information_stage: str | None = None,
+    message_type: str | None = None,
     search: str | None = None,
     sort_by: str = Query(default="time", pattern="^(time|priority|intrinsic)$"),
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
@@ -191,12 +159,8 @@ def list_published_items_page(
         latest_normalized_item_condition(),
         NormalizedItem.publication_status == "published",
     ]
-    if primary_topic:
-        conditions.append(NormalizedItem.primary_topic == primary_topic)
-    if subtopic:
-        conditions.append(NormalizedItem.subtopic == subtopic)
-    if information_stage:
-        conditions.append(NormalizedItem.information_stage == information_stage)
+    if message_type:
+        conditions.append(NormalizedItem.message_type == message_type)
     if search:
         search_value = search.strip()
         if search_value.isdigit():
@@ -211,9 +175,7 @@ def list_published_items_page(
                 )
             )
     count_statement = (
-        select(func.count(NormalizedItem.id))
-        .join(NormalizedItem.raw_item)
-        .where(*conditions)
+        select(func.count(NormalizedItem.id)).join(NormalizedItem.raw_item).where(*conditions)
     )
     total = db.scalar(count_statement) or 0
     sort_column = {
@@ -227,52 +189,14 @@ def list_published_items_page(
         else (sort_column.desc(), NormalizedItem.id.desc())
     )
     statement = (
-        _published_statement()
-        .where(*conditions)
-        .order_by(*ordering)
-        .offset(offset)
-        .limit(limit)
+        _published_statement().where(*conditions).order_by(*ordering).offset(offset).limit(limit)
     )
-    option_conditions = [
-        latest_normalized_item_condition(),
-        NormalizedItem.publication_status == "published",
-    ]
-    topic_options = [
-        value
-        for value in db.scalars(
-            select(NormalizedItem.primary_topic)
-            .where(*option_conditions)
-            .distinct()
-            .order_by(NormalizedItem.primary_topic)
-        )
-        if value
-    ]
-    subtopic_options = [
-        value
-        for value in db.scalars(
-            select(NormalizedItem.subtopic)
-            .where(*option_conditions)
-            .distinct()
-            .order_by(NormalizedItem.subtopic)
-        )
-        if value
-    ]
-    information_stage_options = [
-        value
-        for value in db.scalars(
-            select(NormalizedItem.information_stage)
-            .where(*option_conditions)
-            .distinct()
-            .order_by(NormalizedItem.information_stage)
-        )
-        if value
-    ]
     return {
         "items": [_published_payload(item) for item in db.scalars(statement)],
         "total": total,
-        "topic_options": topic_options,
-        "subtopic_options": subtopic_options,
-        "information_stage_options": information_stage_options,
+        "product_options": list(PRODUCTS),
+        "message_type_options": list(MESSAGE_TYPE_ORDER),
+        "topic_options": [rule.code for rule in TOPIC_RULES],
     }
 
 

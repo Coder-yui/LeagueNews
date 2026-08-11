@@ -14,7 +14,7 @@ function record(value: unknown): Record<string, unknown> {
 export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChanged?: () => void }) {
   const run = item.processing_runs[0];
   const context = run?.context ?? {};
-  const [stage, setStage] = useState<PipelineStageName>("event_decision");
+  const [stage, setStage] = useState<PipelineStageName>("message_analysis");
   const [rawOpen, setRawOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +26,7 @@ export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChan
     if (!item.normalized_item_id) { setError("该消息尚未生成 normalized item，不能从阶段重跑"); return; }
     setBusy(true); setError(null);
     try {
-      await adminApi(`/pipeline/normalized-items/${item.normalized_item_id}/corrections`, { method: "POST", body: JSON.stringify({ restart_from_stage: stage === "ocr" ? "image_ocr" : stage, resume_mode: "automatic", reason: `管理台从 ${stage} 阶段重跑` }) });
+      await adminApi(`/pipeline/normalized-items/${item.normalized_item_id}/corrections`, { method: "POST", body: JSON.stringify({ restart_from_stage: stage, resume_mode: "automatic", reason: `管理台从 ${stage} 阶段重跑` }) });
       onChanged?.();
     } catch (value) { setError(value instanceof Error ? value.message : "重跑失败"); }
     finally { setBusy(false); }

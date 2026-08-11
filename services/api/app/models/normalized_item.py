@@ -1,7 +1,18 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -18,19 +29,16 @@ class NormalizedItem(Base):
     normalized_text: Mapped[str] = mapped_column(Text)
     summary: Mapped[str] = mapped_column(Text)
     entities: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    primary_topic: Mapped[str] = mapped_column(String(40), default="other", index=True)
-    subtopic: Mapped[str] = mapped_column(String(40), default="other", index=True)
-    secondary_topics: Mapped[list[str]] = mapped_column(JSON, default=list)
-    source_kind: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
-    information_stage: Mapped[str] = mapped_column(String(30), default="update", index=True)
+    products: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["unknown"])
+    message_type: Mapped[str] = mapped_column(String(80), default="unknown", index=True)
+    topics: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["unknown"])
+    classification_version: Mapped[str] = mapped_column(String(40), default="message-taxonomy-v2")
     content_form: Mapped[str] = mapped_column(String(30), default="original")
-    product_scope: Mapped[str] = mapped_column(String(40), default="uncertain", index=True)
     facets: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    ontology_version: Mapped[str] = mapped_column(String(40), default="lol-news-v6")
     importance_score: Mapped[float] = mapped_column(Float, index=True)
     importance_dimensions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     importance_policy_version: Mapped[str] = mapped_column(
-        String(80), default="importance-v7-cosmetic-releases"
+        String(80), default="importance-v11-repost-weekly-rotation"
     )
     importance_calculation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     priority_score: Mapped[float] = mapped_column(Float, default=0.5, index=True)
@@ -46,12 +54,8 @@ class NormalizedItem(Base):
     analysis_model: Mapped[str] = mapped_column(String(120))
     analysis_version: Mapped[str] = mapped_column(String(30), default="v2")
     current_revision: Mapped[int] = mapped_column(Integer, default=1)
-    publication_status: Mapped[str] = mapped_column(
-        String(30), default="published", index=True
-    )
-    withdrawn_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    publication_status: Mapped[str] = mapped_column(String(30), default="published", index=True)
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     withdrawal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -62,16 +66,10 @@ class NormalizedItem(Base):
     media_links: Mapped[list["NormalizedItemMediaExtraction"]] = relationship(
         back_populates="normalized_item", cascade="all, delete-orphan"
     )
-    event_memberships: Mapped[list["EventMessage"]] = relationship(  # noqa: F821
-        back_populates="normalized_item"
-    )
     revisions: Mapped[list["NormalizedItemRevision"]] = relationship(
         back_populates="normalized_item",
         cascade="all, delete-orphan",
         order_by="NormalizedItemRevision.revision",
-    )
-    claims: Mapped[list["Claim"]] = relationship(  # noqa: F821
-        back_populates="normalized_item", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
@@ -118,9 +116,7 @@ class NormalizedItemMediaExtraction(Base):
     translated_structured_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     translation_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     translation_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     normalized_item: Mapped[NormalizedItem] = relationship(back_populates="media_links")
     media_extraction: Mapped["MediaExtraction"] = relationship()  # noqa: F821
@@ -139,9 +135,7 @@ class NormalizedItemRevision(Base):
         ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     change_note: Mapped[str] = mapped_column(Text, default="published")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     normalized_item: Mapped[NormalizedItem] = relationship(back_populates="revisions")
 

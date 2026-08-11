@@ -3,46 +3,35 @@ import pytest
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
-    CLAIM_GENERATION_OPERATION,
-    EVENT_AGGREGATION_OPERATION,
     PRODUCTION_LLM_OPERATIONS,
+    TRANSLATION_OPERATION,
 )
 
 
-def test_prompt_registry_versions_known_tasks() -> None:
-    prompt = prompt_registry.resolve(
+def test_production_prompt_registry_contract() -> None:
+    importance = prompt_registry.resolve(
         operation="重要性评分",
         content="contract",
-        schema_version="ImportanceResult:v1",
+        schema_version="MessageClassificationImportanceResult:v1",
     )
-    assert prompt.name == "importance-scoring"
-    assert prompt.version == "v5-cosmetic-releases"
-    assert prompt.content == "contract"
-
-
-def test_all_production_llm_operations_are_registered() -> None:
+    assert importance.name == "message-classification-importance"
+    assert importance.version == "v13-community-promotion"
+    assert importance.content == "contract"
     assert PRODUCTION_LLM_OPERATIONS <= prompt_registry.registered_operations
-    prompt = prompt_registry.resolve(
-        operation=EVENT_AGGREGATION_OPERATION,
-        content="unchanged event prompt",
-        schema_version="EventDecisionDraft:v1",
-    )
-    assert prompt.name == "event-decision"
-    assert prompt.version == "v7-semantic-candidate-binding"
     classification = prompt_registry.resolve(
         operation=CLASSIFICATION_OPERATION,
-        content="dual-axis contract",
-        schema_version="ClassificationResult:v1",
+        content="message taxonomy contract",
+        schema_version="MessageContentAnalysisResult:v1",
     )
-    assert classification.name == "classification"
-    assert classification.version == "v6-cosmetic-releases"
-    claim_generation = prompt_registry.resolve(
-        operation=CLAIM_GENERATION_OPERATION,
-        content="timeline claim contract",
-        schema_version="ClaimGenerationResult:v1",
+    assert classification.name == "message-content-analysis"
+    assert classification.version == "v6-title-summarizability"
+    translation = prompt_registry.resolve(
+        operation=TRANSLATION_OPERATION,
+        content="single request translation",
+        schema_version="TranslationResult:v1",
     )
-    assert claim_generation.name == "claim-generation"
-    assert claim_generation.version == "v2-timeline"
+    assert translation.name == "translation"
+    assert translation.version == "v3-single-request"
 
 
 def test_unregistered_operations_require_explicit_experimental_opt_in() -> None:

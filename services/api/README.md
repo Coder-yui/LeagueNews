@@ -7,11 +7,15 @@ FastAPI 后端，负责：
 - 人工审核、知识与术语管理；
 - 持久化自动管线、checkpoint、失败恢复与分阶段撤回；
 - Source 周期采集调度；
-- 事件候选、事件聚合、revision 和公开读取 API。
+- NormalizedItem 发布与公开读取 API。
 
 运行和架构以仓库文档为准：
 
-- [`../../docs/DEVELOPMENT_HANDOFF.md`](../../docs/DEVELOPMENT_HANDOFF.md)
+- [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md)
+- [`../../docs/README.md`](../../docs/README.md)
 - [`../../docs/LOCAL_RUNBOOK.md`](../../docs/LOCAL_RUNBOOK.md)
 - [`../../docs/CONNECTOR_OPERATIONS_GUIDE.md`](../../docs/CONNECTOR_OPERATIONS_GUIDE.md)
 - [`../../docs/REVIEWED_AI_WORKFLOW.md`](../../docs/REVIEWED_AI_WORKFLOW.md)
+- [`../../docs/MESSAGE_CLASSIFICATION.md`](../../docs/MESSAGE_CLASSIFICATION.md)
+- [`../../docs/IMPORTANCE_SCORING_POLICY.md`](../../docs/IMPORTANCE_SCORING_POLICY.md)
+- [`../../docs/OCR_CONFIGURATION.md`](../../docs/OCR_CONFIGURATION.md)

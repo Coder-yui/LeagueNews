@@ -31,7 +31,7 @@
 ```
 
 Connector 本身只负责采集和原始入库；默认启用的独立 Pipeline Worker 会消费
-`pipeline_jobs`，自动继续执行相关性、可选 OCR、翻译、分析、发布和事件判断。
+`pipeline_jobs`，自动继续执行相关性、可选 OCR、翻译、分析、重要性计算和消息发布。
 `raw_items` 仍是不可变原文，不保存可变处理状态。完整字段设计见
 [RawItem 与 ContentBlock v2](RAW_ITEM_CONTENT_MODEL.md)。
 

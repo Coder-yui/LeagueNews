@@ -1,65 +1,13 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from app.domain.ontology import (
-    ContentForm,
-    EntityType,
-    EventAssertion,
-    InformationStage,
-    PrimaryTopic,
-    SourceKind,
-    Subtopic,
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.domain.message_taxonomy import (
+    ContentForm as MessageContentForm,
+    MessageType,
+    Product,
+    Topic,
 )
-from app.schemas.event_workflow import EventReviewTaskRead
-
-
-class EventIdentityEntityDraft(BaseModel):
-    name: str = Field(min_length=1)
-    type: EntityType
-    canonical_name: str = Field(min_length=1)
-    role: Literal["core", "context", "affected"]
-
-
-class EventMentionTemporalDraft(BaseModel):
-    is_recurring: bool
-    recurrence_window: Literal[
-        "hourly",
-        "daily",
-        "weekly",
-        "biweekly",
-        "monthly",
-        "quarterly",
-        "patch_cycle",
-        "seasonal",
-        "annual",
-    ] | None
-    certainty: Literal["confirmed", "likely", "speculative"]
-    event_date: str | None = Field(
-        default=None,
-        pattern=r"^20\d{2}-\d{2}-\d{2}$",
-    )
-
-    @field_validator("recurrence_window", mode="before")
-    @classmethod
-    def normalize_recurrence_window(cls, value: object) -> object:
-        return {
-            "fortnightly": "biweekly",
-            "yearly": "annual",
-        }.get(value, value)
-
-
-class EventMentionDraft(BaseModel):
-    topic: PrimaryTopic
-    subtopic: Subtopic
-    identity_entities: list[EventIdentityEntityDraft] = Field(
-        min_length=1,
-        max_length=5,
-    )
-    assertion: EventAssertion = "asserted"
-    temporal: EventMentionTemporalDraft
-    membership_role: Literal["primary", "component", "cross_ref"] = "primary"
 
 
 class ProcessingRunRead(BaseModel):
@@ -129,10 +77,9 @@ class ReviewQueueItemRead(BaseModel):
     normalized_item_id: int | None
     current_stage: str
     completed_stages: list[str]
-    review_kind: Literal["message", "ocr", "event"]
+    review_kind: Literal["message", "ocr"]
     message_review: ReviewTaskRead | None = None
     ocr_review: OCRWorkflowReviewRead | None = None
-    event_review: EventReviewTaskRead | None = None
     created_at: datetime
 
 
@@ -141,47 +88,13 @@ class ReviewApproval(BaseModel):
 
 
 class ReviewCorrectionApproval(BaseModel):
-    product_scope: Literal[
-        "lol_pc",
-        "lol_esports",
-        "tft",
-        "lol_universe",
-        "riot_corporate",
-        "lol_merch_music",
-        "wild_rift",
-        "2xko",
-        "unrelated",
-        "uncertain",
-    ] | None = None
-    is_lol_relevant: bool | None = None
-    source_kind: SourceKind | None = None
-    information_stage: InformationStage | None = None
-    content_form: ContentForm | None = None
-    primary_topic: PrimaryTopic | None = None
-    subtopic: Subtopic | None = None
-    event_assertion: EventAssertion | None = None
-    event_mentions: list[EventMentionDraft] | None = Field(
-        default=None,
-        max_length=12,
-    )
+    decision: Literal["relevant", "irrelevant", "uncertain"] | None = None
+    products: list[Product] | None = Field(default=None, min_length=1, max_length=3)
+    content_form: MessageContentForm | None = None
+    message_type: MessageType | None = None
+    topics: list[Topic] | None = Field(default=None, min_length=1)
     importance_score: float | None = Field(default=None, ge=0, le=1)
     note: str | None = None
-
-    @model_validator(mode="after")
-    def validate_relevance_correction(self) -> "ReviewCorrectionApproval":
-        if self.product_scope is None or self.is_lol_relevant is None:
-            return self
-        retained = {
-            "lol_pc",
-            "lol_esports",
-            "tft",
-            "lol_universe",
-            "riot_corporate",
-            "lol_merch_music",
-        }
-        if (self.product_scope in retained) != self.is_lol_relevant:
-            raise ValueError("product_scope 与 is_lol_relevant 不一致")
-        return self
 
 
 class OCRTableRecordCorrection(BaseModel):
@@ -263,9 +176,7 @@ class ReviewRejection(BaseModel):
 
 
 class KnowledgeRuleCreate(BaseModel):
-    knowledge_type: Literal[
-        "analysis", "translation", "event_aggregation"
-    ]
+    knowledge_type: Literal["analysis", "translation"]
     scope: str = "global"
     rule_text: str = Field(min_length=1)
     correction_data: dict[str, Any] = Field(default_factory=dict)
@@ -273,9 +184,7 @@ class KnowledgeRuleCreate(BaseModel):
 
 
 class KnowledgeRuleUpdate(BaseModel):
-    knowledge_type: Literal[
-        "analysis", "translation", "event_aggregation"
-    ] | None = None
+    knowledge_type: Literal["analysis", "translation"] | None = None
     scope: str | None = None
     rule_text: str | None = Field(default=None, min_length=1)
     correction_data: dict[str, Any] | None = None
@@ -292,7 +201,6 @@ class KnowledgeRuleRead(BaseModel):
     rule_text: str
     correction_data: dict[str, Any]
     source_review_id: int | None
-    source_event_review_id: int | None
     version: int
     lifecycle_status: str
     evaluation_summary: dict[str, Any]

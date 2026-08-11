@@ -1,3 +1,0 @@
-{"dataset_version":"regression-v1","candidate":{"prompt":"current","model":"fixture","policy":"v1"},"case_id":"relevance-wild-rift-001","task":"relevance","expected":{},"actual":{"is_lol_relevant":false,"product_scope":"wild_rift"}}
-{"dataset_version":"regression-v1","candidate":{"prompt":"current","model":"fixture","policy":"importance-v3-editorial-baselines"},"case_id":"importance-lpl-regular-001","task":"importance","expected":{},"actual":{"editorial_subtype":"esports_regular","competition_region":"lpl","score":0.63,"policy":"importance-v3-editorial-baselines"}}
-{"dataset_version":"regression-v1","candidate":{"prompt":"current","model":"fixture","policy":"v1"},"case_id":"event-patch-key-001","task":"event_decision","expected":{},"actual":{"decision":"update"}}

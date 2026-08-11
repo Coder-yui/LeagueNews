@@ -14,7 +14,7 @@
 		path /api/*
 		not {
 			method GET
-			path /api/v1/health /api/v1/ready /api/v1/normalized-items/published /api/v1/normalized-items/*/published /api/v1/events /api/v1/events/* /api/v1/digests /api/v1/digests/* /api/v1/feeds/*
+			path /api/v1/health /api/v1/ready /api/v1/normalized-items/published /api/v1/normalized-items/*/published
 		}
 	}
 	basic_auth @privateApi {

@@ -23,7 +23,11 @@ def test_published_payload_combines_reviewed_item_source_and_bilingual_ocr() -> 
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Designer X", connector_type="x_twitter")
+        source = Source(
+            name="Designer X",
+            connector_type="x_twitter",
+            reliability_score=0.85,
+        )
         db.add(source)
         db.flush()
         raw = RawItem(
@@ -87,11 +91,10 @@ def test_published_payload_combines_reviewed_item_source_and_bilingual_ocr() -> 
             normalized_text="Patch preview",
             summary="设计师公布版本预览。",
             entities=[{"name": "26.13", "type": "patch"}],
-            primary_topic="patch",
-            subtopic="patch_preview",
-            source_kind="attributed_report",
-            information_stage="preview",
-            product_scope="lol_pc",
+            products=["lol_pc"],
+            message_type="game_official_preview",
+            topics=["balance_gameplay"],
+            classification_version="message-taxonomy-v2",
             importance_score=0.8,
             language="en",
             source_language="en",
@@ -137,25 +140,23 @@ def test_published_payload_combines_reviewed_item_source_and_bilingual_ocr() -> 
         )
         db.commit()
 
-        loaded = db.scalar(
-            _published_statement().where(NormalizedItem.id == item.id)
-        )
+        loaded = db.scalar(_published_statement().where(NormalizedItem.id == item.id))
         payload = PublishedItemRead.model_validate(_published_payload(loaded))
 
         assert payload.source_name == "Designer X"
+        assert payload.source_reliability_score == 0.85
+        assert payload.products == ["lol_pc"]
+        assert payload.message_type == "game_official_preview"
+        assert payload.topics == ["balance_gameplay"]
         assert payload.original_content_blocks[0]["text"] == "Patch preview"
         assert payload.translated_content_blocks[0]["text"] == "版本预览"
         assert payload.media_extractions[0].block_index == 1
         assert (
-            payload.media_extractions[0].original_data["sections"][0]["entries"][0][
-                "target"
-            ]
+            payload.media_extractions[0].original_data["sections"][0]["entries"][0]["target"]
             == "Aphelios"
         )
         assert (
-            payload.media_extractions[0].translated_data["sections"][0]["entries"][0][
-                "target"
-            ]
+            payload.media_extractions[0].translated_data["sections"][0]["entries"][0]["target"]
             == "厄斐琉斯"
         )
 
@@ -191,16 +192,17 @@ def test_published_items_order_by_original_publish_time_with_ingestion_fallback(
                     normalized_text=external_id,
                     summary=external_id,
                     entities=[],
-                    primary_topic="other",
+                    products=["unknown"],
+                    message_type="unknown",
+                    topics=["unknown"],
+                    classification_version="message-taxonomy-v2",
                     importance_score=0.5,
                     language="zh-CN",
                     source_language="zh-CN",
                     target_language="zh-CN",
                     translated_title=external_id,
                     translated_text=external_id,
-                    translated_content_blocks=[
-                        {"type": "paragraph", "text": external_id}
-                    ],
+                    translated_content_blocks=[{"type": "paragraph", "text": external_id}],
                     translation_status="not_required",
                     translation_model=None,
                     analysis_model="test",
@@ -253,9 +255,7 @@ def test_message_lists_only_include_latest_raw_revision() -> None:
                 source_id=source.id,
                 external_id=external_id,
                 native_title=f"Revision {revision}",
-                content_blocks=[
-                    {"type": "paragraph", "text": f"Revision {revision}"}
-                ],
+                content_blocks=[{"type": "paragraph", "text": f"Revision {revision}"}],
                 revision=revision,
                 supersedes_raw_item_id=supersedes_raw_item_id,
             )
@@ -267,7 +267,10 @@ def test_message_lists_only_include_latest_raw_revision() -> None:
                 normalized_text=f"Revision {revision}",
                 summary=f"Revision {revision}",
                 entities=[],
-                primary_topic="other",
+                products=["unknown"],
+                message_type="unknown",
+                topics=["unknown"],
+                classification_version="message-taxonomy-v2",
                 importance_score=0.5,
                 target_language="zh-CN",
                 translated_title=f"Revision {revision}",
@@ -292,7 +295,5 @@ def test_message_lists_only_include_latest_raw_revision() -> None:
         )
 
         assert [item.id for item in list_normalized_items(db)] == [latest_item.id]
-        assert [item["id"] for item in list_published_items(db)] == [
-            latest_item.id
-        ]
+        assert [item["id"] for item in list_published_items(db)] == [latest_item.id]
         assert old_item.id != latest_item.id

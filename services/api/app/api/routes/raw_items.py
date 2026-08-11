@@ -75,10 +75,9 @@ def _raw_item_payloads(
                 "source_name": item.source.name,
                 "source_connector_type": item.source.connector_type,
                 "normalized_item_id": normalized.id if normalized else None,
-                "subtopic": normalized.subtopic if normalized else None,
-                "information_stage": (
-                    normalized.information_stage if normalized else None
-                ),
+                "products": normalized.products if normalized else None,
+                "message_type": normalized.message_type if normalized else None,
+                "topics": normalized.topics if normalized else None,
                 "summary": normalized.summary if normalized else None,
                 "importance_score": normalized.importance_score if normalized else None,
                 "current_pipeline_stage": job.current_stage if job else None,
@@ -114,7 +113,7 @@ def list_raw_items(db: Session = Depends(get_db)) -> list[dict[str, object]]:
 def list_raw_items_admin_page(
     process_status: str = Query(default="failed", pattern="^(all|failed|processing|completed)$"),
     source_id: int | None = None,
-    subtopic: str | None = None,
+    message_type: str | None = None,
     search: str | None = None,
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=25, ge=1, le=100),
@@ -157,9 +156,7 @@ def list_raw_items_admin_page(
         not_(failed),
         or_(
             func.coalesce(latest_job.status.in_(["queued", "running"]), False),
-            func.coalesce(
-                latest_run.status.in_(["running", "awaiting_review"]), False
-            ),
+            func.coalesce(latest_run.status.in_(["running", "awaiting_review"]), False),
         ),
     )
     completed = and_(
@@ -180,11 +177,11 @@ def list_raw_items_admin_page(
     filtered = joins
     if source_id is not None:
         filtered = filtered.where(RawItem.source_id == source_id)
-    if subtopic is not None:
+    if message_type is not None:
         filtered = filtered.where(
-            NormalizedItem.subtopic.is_(None)
-            if subtopic == "null"
-            else NormalizedItem.subtopic == subtopic
+            NormalizedItem.message_type.is_(None)
+            if message_type == "null"
+            else NormalizedItem.message_type == message_type
         )
     if search:
         pattern = f"%{search.strip()}%"
@@ -194,17 +191,10 @@ def list_raw_items_admin_page(
                 NormalizedItem.summary.ilike(pattern),
             )
         )
-    total_items = db.scalar(
-        select(func.count(RawItem.id)).where(latest_raw_item_condition())
-    ) or 0
+    total_items = db.scalar(select(func.count(RawItem.id)).where(latest_raw_item_condition())) or 0
     all_count = db.scalar(select(func.count()).select_from(filtered.subquery())) or 0
     status_counts = {
-        name: db.scalar(
-            select(func.count()).select_from(
-                filtered.where(predicate).subquery()
-            )
-        )
-        or 0
+        name: db.scalar(select(func.count()).select_from(filtered.where(predicate).subquery())) or 0
         for name, predicate in status_predicates.items()
     }
     if process_status != "all":
@@ -240,12 +230,10 @@ def list_raw_items_admin_page(
             .order_by(Source.name)
         )
     ]
-    subtopic_options = [
+    message_type_options = [
         value
         for value in db.scalars(
-            select(NormalizedItem.subtopic)
-            .distinct()
-            .order_by(NormalizedItem.subtopic)
+            select(NormalizedItem.message_type).distinct().order_by(NormalizedItem.message_type)
         )
         if value
     ]
@@ -254,7 +242,7 @@ def list_raw_items_admin_page(
         .outerjoin(NormalizedItem, NormalizedItem.raw_item_id == RawItem.id)
         .where(latest_raw_item_condition(), NormalizedItem.id.is_(None))
     ):
-        subtopic_options.append("null")
+        message_type_options.append("null")
     return {
         "items": _raw_item_payloads(db, items),
         "total": total,
@@ -264,7 +252,7 @@ def list_raw_items_admin_page(
             **status_counts,
         },
         "source_options": source_options,
-        "subtopic_options": subtopic_options,
+        "message_type_options": message_type_options,
     }
 
 
@@ -278,10 +266,7 @@ async def process_raw_item(item_id: int, db: Session = Depends(get_db)) -> objec
             status_code=409,
             detail="raw item has been superseded by a newer revision",
         )
-    if (
-        raw_item.normalized_item
-        and raw_item.normalized_item.publication_status == "published"
-    ):
+    if raw_item.normalized_item and raw_item.normalized_item.publication_status == "published":
         raise HTTPException(status_code=409, detail="raw item already has approved analysis")
     active = db.scalar(
         select(ProcessingRun).where(

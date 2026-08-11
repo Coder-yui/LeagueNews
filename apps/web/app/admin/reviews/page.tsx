@@ -11,20 +11,16 @@ const pipelineStages = [
   "relevance",
   "image_ocr",
   "translation",
-  "fact_classify",
+  "message_analysis",
   "importance",
-  "claim_gen",
-  "event_decision",
 ] as const;
 
 const stageLabels: Record<string, string> = {
   relevance: "相关性",
   image_ocr: "图片 OCR",
   translation: "翻译",
-  fact_classify: "事实与分类",
+  message_analysis: "消息分析",
   importance: "重要性",
-  claim_gen: "断言生成",
-  event_decision: "事件归属",
 };
 
 function ReviewProgress({ item }: { item: ReviewQueueItem }) {
@@ -128,16 +124,9 @@ function ReviewDialog({
               review={item.ocr_review}
               onResolved={resolved}
             />
-          ) : item.review_kind === "event" && item.event_review ? (
-            <ReviewCard
-              review={item.event_review}
-              kind="event"
-              onResolved={resolved}
-            />
           ) : item.message_review ? (
             <ReviewCard
               review={item.message_review}
-              kind="message"
               onResolved={resolved}
             />
           ) : (

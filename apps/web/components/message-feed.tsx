@@ -2,11 +2,9 @@ import Image from "next/image";
 import Link from "next/link";
 import {
   ArrowUpRight,
-  ChevronLeft,
-  ChevronRight,
   ImageIcon,
 } from "lucide-react";
-import { importanceLevel } from "@/lib/event-labels";
+import { importanceLevel } from "@/lib/importance-labels";
 import type { PublishedItem } from "@/lib/types";
 
 function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
@@ -21,7 +19,7 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
       <div className="message-card-index">{String(index + 1).padStart(2, "0")}</div>
       <div className="message-card-copy">
         <div className="message-card-meta">
-          <span>{item.primary_topic} · {item.subtopic}</span>
+          <span>#{item.id} · {item.message_type}</span>
           <time dateTime={publishedAt}>
             {new Date(publishedAt).toLocaleString("zh-CN", {
               month: "numeric",
@@ -30,7 +28,9 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
               minute: "2-digit",
             })}
           </time>
-          <span>{item.source_name}</span>
+          <span>
+            {item.source_name} · 信源可信度 {Math.round(item.source_reliability_score * 100)}
+          </span>
         </div>
         <Link href={`/messages/${item.id}`} className="message-card-title">
           <h3>{item.title}</h3>
@@ -43,6 +43,11 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
           >
             重要性 {importance}
           </span>
+          {item.topics.map((topic) => (
+            <span className="topic-badge" key={topic}>
+              主题 {topic}
+            </span>
+          ))}
           {item.entities.map((entity, entityIndex) => (
             <span className="entity" key={`${entity.name}-${entityIndex}`}>
               {entity.name}
@@ -76,16 +81,8 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
 
 export function MessageFeed({
   items,
-  page,
-  pageCount,
-  pageSize,
-  total,
 }: {
   items: PublishedItem[];
-  page: number;
-  pageCount: number;
-  pageSize: number;
-  total: number;
 }) {
   if (!items.length) {
     return (
@@ -100,33 +97,11 @@ export function MessageFeed({
         {items.map((item, index) => (
           <MessageCard
             item={item}
-            index={(page - 1) * pageSize + index}
+            index={index}
             key={item.id}
           />
         ))}
       </div>
-      {pageCount > 1 && (
-        <div className="public-pagination">
-          <span>共 {total} 条消息</span>
-          <div>
-            <Link
-              className={page === 1 ? "disabled" : ""}
-              aria-disabled={page === 1}
-              href={`/?page=${Math.max(1, page - 1)}#messages`}
-            >
-              <ChevronLeft size={13} /> 上一页
-            </Link>
-            <span>{page} / {pageCount}</span>
-            <Link
-              className={page === pageCount ? "disabled" : ""}
-              aria-disabled={page === pageCount}
-              href={`/?page=${Math.min(pageCount, page + 1)}#messages`}
-            >
-              下一页 <ChevronRight size={13} />
-            </Link>
-          </div>
-        </div>
-      )}
     </>
   );
 }

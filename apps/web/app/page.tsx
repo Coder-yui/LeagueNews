@@ -6,34 +6,12 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { MessageFeed } from "@/components/message-feed";
-import { getPublishedItemsPage } from "@/lib/api";
+import { getAllPublishedItems } from "@/lib/api";
 
-const MESSAGE_PAGE_SIZE = 10;
-
-export default async function Home({
-  searchParams,
-}: {
-  searchParams: Promise<{ page?: string }>;
-}) {
-  const params = await searchParams;
-  const parsedPage = Number.parseInt(params.page ?? "1", 10);
-  const requestedPage = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
-  let messagePage = await getPublishedItemsPage(
-    MESSAGE_PAGE_SIZE,
-    (requestedPage - 1) * MESSAGE_PAGE_SIZE,
-  );
-  const pageCount = Math.max(1, Math.ceil(messagePage.total / MESSAGE_PAGE_SIZE));
-  const page = Math.min(requestedPage, pageCount);
-  if (page !== requestedPage) {
-    messagePage = await getPublishedItemsPage(
-      MESSAGE_PAGE_SIZE,
-      (page - 1) * MESSAGE_PAGE_SIZE,
-    );
-  }
+export default async function Home() {
+  const messagePage = await getAllPublishedItems();
   const items = messagePage.items;
-  const topItem = page === 1
-    ? items[0]
-    : (await getPublishedItemsPage(1, 0)).items[0];
+  const topItem = items[0];
   const dateLabel = new Intl.DateTimeFormat("zh-CN", {
     month: "long",
     day: "numeric",
@@ -49,7 +27,6 @@ export default async function Home({
         </a>
         <nav aria-label="主要导航">
           <a className="active" href="#messages">消息</a>
-          <Link href="/events">事件</Link>
           <a href="#pipeline">处理链路</a>
           <a href="#sources">信源</a>
           <a href="/admin">处理台</a>
@@ -65,8 +42,8 @@ export default async function Home({
 
       <section className="signal-grid" aria-label="今日概览">
         <div><span>已审消息</span><strong>{messagePage.total.toString().padStart(2, "0")}</strong></div>
-        <div><span>本页高优先级</span><strong>{items.filter((item) => item.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
-        <div><span>本页消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
+        <div><span>高优先级</span><strong>{items.filter((item) => item.importance_score >= 0.8).length.toString().padStart(2, "0")}</strong></div>
+        <div><span>已显示消息</span><strong>{items.length.toString().padStart(2, "0")}</strong></div>
         <div className="pulse"><Activity size={18} /><span>持续更新</span></div>
       </section>
 
@@ -76,24 +53,18 @@ export default async function Home({
           <h2><Link href={`/messages/${topItem.id}`}>{topItem.title}</Link></h2>
           <p>{topItem.summary}</p>
           <div className="tag-row">
-            <span>{topItem.primary_topic}</span>
-            <span>{topItem.subtopic}</span>
+            <span>#{topItem.id}</span>
+            <span>{topItem.message_type}</span>
           </div>
         </section>
       )}
 
-      <section id="messages" className="events-section">
+      <section id="messages" className="messages-section">
         <div className="section-heading">
           <div><span className="kicker">REVIEWED STREAM</span><h2>已审核消息</h2></div>
           <span>按原始发布时间排序</span>
         </div>
-        <MessageFeed
-          items={items}
-          page={page}
-          pageCount={pageCount}
-          pageSize={MESSAGE_PAGE_SIZE}
-          total={messagePage.total}
-        />
+        <MessageFeed items={items} />
       </section>
 
       <section id="pipeline" className="pipeline">
@@ -102,7 +73,7 @@ export default async function Home({
       </section>
 
       <section id="sources" className="source-summary">
-        <span>本页信源</span>
+        <span>全部信源</span>
         <strong>{new Set(items.map((item) => item.source_name)).size}</strong>
         <p>不同平台账号保持独立信源身份，所有消息均可返回原始位置核验。</p>
       </section>

@@ -9,14 +9,14 @@ from app.schemas.workflow import (
 
 def test_rule_update_allows_manual_type_scope_and_text_changes() -> None:
     update = KnowledgeRuleUpdate(
-        knowledge_type="event_aggregation",
+        knowledge_type="analysis",
         scope="lol-esports",
-        rule_text="同一赛程的赛前提醒应聚合到同一事件。",
+        rule_text="官方赛事赛果应分类为赛事公告。",
     )
 
-    assert update.knowledge_type == "event_aggregation"
+    assert update.knowledge_type == "analysis"
     assert update.scope == "lol-esports"
-    assert update.rule_text.startswith("同一赛程")
+    assert update.rule_text.startswith("官方赛事")
 
 
 def test_rule_update_rejects_unknown_knowledge_type() -> None:

@@ -1,14 +1,6 @@
 from app.models.connector_run import ConnectorRun
 from app.models.collection_schedule import SourceCollectionSchedule
-from app.models.event import (
-    Event,
-    EventAggregationRun,
-    EventMessage,
-    EventReviewTask,
-    EventRevision,
-)
 from app.models.media_asset import MediaAsset
-from app.models.intelligence import Claim, Digest, DigestRevision, EventClaim
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import (
     NormalizedItem,
@@ -25,16 +17,7 @@ from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, Revi
 __all__ = [
     "ConnectorRun",
     "SourceCollectionSchedule",
-    "Event",
-    "EventAggregationRun",
-    "EventMessage",
-    "EventReviewTask",
-    "EventRevision",
     "GlossaryTerm",
-    "Claim",
-    "EventClaim",
-    "Digest",
-    "DigestRevision",
     "KnowledgeRule",
     "MediaAsset",
     "MediaExtraction",

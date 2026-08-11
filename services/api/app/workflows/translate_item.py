@@ -69,7 +69,7 @@ def _document_outline(text_blocks: list[dict[str, object]]) -> str:
 def _neighbor_text(blocks: list[dict[str, object]], *, from_end: bool) -> str:
     selected = blocks[-2:] if from_end else blocks[:2]
     return "\n".join(str(block.get("text") or "") for block in selected)[
-        :TRANSLATION_CONTEXT_MAX_CHARS // 2
+        : TRANSLATION_CONTEXT_MAX_CHARS // 2
     ]
 
 
@@ -92,6 +92,17 @@ async def build_translation(
     structured_requires_translation = bool(
         media_extractions and detect_language(structured_text) != "zh-CN"
     )
+    if not source_text.strip() and not structured_requires_translation:
+        return TranslationData(
+            source_language=source_language,
+            target_language=target_language,
+            translated_title=raw_item.display_title or "",
+            translated_text="",
+            translated_content_blocks=blocks,
+            translated_media_extractions=[],
+            translation_status="not_required",
+            translation_model=None,
+        )
     if source_language.startswith("zh") and not structured_requires_translation:
         return TranslationData(
             source_language=source_language,
@@ -121,8 +132,7 @@ async def build_translation(
             ),
         }
         for index, block in enumerate(blocks)
-        if block.get("type") in TEXT_BLOCK_TYPES
-        and (block.get("text") or block.get("items"))
+        if block.get("type") in TEXT_BLOCK_TYPES and (block.get("text") or block.get("items"))
     ]
     chunks = _chunk_text_blocks(text_blocks)
     outline = _document_outline(text_blocks)
@@ -146,9 +156,7 @@ async def build_translation(
             target_language=target_language,
             glossary=glossary,
             knowledge_rules=rules,
-            media_extractions=(
-                source_media_extractions if chunk_index == 0 else []
-            ),
+            media_extractions=(source_media_extractions if chunk_index == 0 else []),
             document_context={
                 "document_outline": outline,
                 "chunk_number": chunk_index + 1,
@@ -175,9 +183,7 @@ async def build_translation(
             block.text for block in result.translated_blocks[-2:]
         )[-TRANSLATION_CONTEXT_MAX_CHARS // 2 :]
 
-    translations = {
-        block.index: block.text for block in translated_result_blocks
-    }
+    translations = {block.index: block.text for block in translated_result_blocks}
     translated_blocks: list[dict[str, Any]] = []
     translated_text_parts: list[str] = []
     for index, block in enumerate(blocks):
@@ -199,8 +205,7 @@ async def build_translation(
         translated_text="\n\n".join(translated_text_parts),
         translated_content_blocks=translated_blocks,
         translated_media_extractions=[
-            extraction.model_dump(mode="json")
-            for extraction in translated_result_extractions
+            extraction.model_dump(mode="json") for extraction in translated_result_extractions
         ],
         translation_status="translated",
         translation_model=settings.model_name,

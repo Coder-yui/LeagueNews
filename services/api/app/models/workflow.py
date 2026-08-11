@@ -18,6 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 
+MESSAGE_KNOWLEDGE_TYPES = ("analysis", "translation")
+
+
 class ProcessingRun(Base):
     __tablename__ = "processing_runs"
 
@@ -105,23 +108,12 @@ class KnowledgeRule(Base):
     source_review_id: Mapped[int | None] = mapped_column(
         ForeignKey("review_tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    source_event_review_id: Mapped[int | None] = mapped_column(
-        ForeignKey("event_review_tasks.id", ondelete="SET NULL"), nullable=True, index=True
-    )
     version: Mapped[int] = mapped_column(default=1)
-    lifecycle_status: Mapped[str] = mapped_column(
-        String(20), default="draft", index=True
-    )
+    lifecycle_status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     evaluation_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    evaluated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    promoted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    retired_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

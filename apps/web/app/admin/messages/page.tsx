@@ -13,9 +13,9 @@ import { pointScore, relativeTime } from "@/components/admin/admin-utils";
 const emptyPage: PublishedItemPage = {
   items: [],
   total: 0,
+  product_options: [],
+  message_type_options: [],
   topic_options: [],
-  subtopic_options: [],
-  information_stage_options: [],
 };
 
 export default function MessagesPage() {
@@ -23,7 +23,6 @@ export default function MessagesPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<"list" | "review">("list");
-  const [topic, setTopic] = useState("all");
   const [type, setType] = useState("all");
   const [importanceSort, setImportanceSort] = useState<"none" | "asc" | "desc">(
     "none",
@@ -54,8 +53,7 @@ export default function MessagesPage() {
       sort_by: sortBy,
       sort: direction,
     });
-    if (topic !== "all") params.set("primary_topic", topic);
-    if (type !== "all") params.set("subtopic", type);
+    if (type !== "all") params.set("message_type", type);
     if (query) params.set("search", query);
     try {
       setData(
@@ -74,7 +72,6 @@ export default function MessagesPage() {
     pageSize,
     query,
     sort,
-    topic,
     type,
   ]);
   useEffect(() => {
@@ -93,7 +90,7 @@ export default function MessagesPage() {
       await adminApi(`/pipeline/normalized-items/${current.id}/corrections`, {
         method: "POST",
         body: JSON.stringify({
-          restart_from_stage: "fact_classify",
+          restart_from_stage: "message_analysis",
           resume_mode: "manual",
           reason: "审阅视图标记分析结果有问题",
         }),
@@ -134,25 +131,13 @@ export default function MessagesPage() {
       </header>
       <section className="admin-filters admin-message-filters">
         <label>
-          Topic
-          <select
-            value={topic}
-            onChange={(event) => resetPage(() => setTopic(event.target.value))}
-          >
-            <option value="all">全部</option>
-            {data.topic_options.map((value) => (
-              <option key={value}>{value}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          子主题
+          消息类型
           <select
             value={type}
             onChange={(event) => resetPage(() => setType(event.target.value))}
           >
             <option value="all">全部</option>
-            {data.subtopic_options.map((value) => (
+            {data.message_type_options.map((value) => (
               <option key={value}>{value}</option>
             ))}
           </select>
@@ -220,10 +205,9 @@ export default function MessagesPage() {
                 <tr>
                   <th>ID</th>
                   <th>标题</th>
-                  <th>子主题</th>
-                  <th>Topic</th>
+                  <th>消息类型</th>
+                  <th>产品 / 主题</th>
                   <th>重要性</th>
-                  <th>事件</th>
                   <th>发布时间</th>
                 </tr>
               </thead>
@@ -239,13 +223,14 @@ export default function MessagesPage() {
                     </td>
                     <td>
                       <span className="admin-badge">
-                        {item.subtopic}
+                        {item.message_type}
                       </span>
                     </td>
                     <td>
                       <span className="admin-badge subtle">
-                        {item.primary_topic}
+                        {item.products.join(" · ")}
                       </span>
+                      <small>{item.topics.join(" · ")}</small>
                     </td>
                     <td>
                       <span
@@ -258,9 +243,6 @@ export default function MessagesPage() {
                       >
                         {pointScore(item.importance_score)}
                       </span>
-                    </td>
-                    <td className="admin-number">
-                      {item.event_memberships?.length ?? 0}
                     </td>
                     <td
                       title={
@@ -315,10 +297,10 @@ export default function MessagesPage() {
             <article>
               <header>
                 <span className="admin-badge">
-                  {current.subtopic}
+                  {current.message_type}
                 </span>
                 <span className="admin-badge subtle">
-                  {current.primary_topic}
+                  {current.products.join(" · ")}
                 </span>
               </header>
               <h2>{current.title}</h2>

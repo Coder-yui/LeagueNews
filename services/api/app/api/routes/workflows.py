@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
-from app.models.event import EventAggregationRun, EventReviewTask
+from app.domain.message_taxonomy import classification_error, content_analysis_error
 from app.models.media_extraction import MediaExtraction
 from app.models.pipeline import ProcessingCheckpoint
 from app.models.workflow import ProcessingRun, ReviewTask
@@ -34,11 +34,36 @@ def _corrected_review_proposal(
     payload: ReviewCorrectionApproval,
 ) -> dict[str, object]:
     corrections = payload.model_dump(exclude={"note"}, exclude_none=True)
-    if review.stage == "fact_classify":
-        primary_topic = corrections.pop("primary_topic", None)
-        if primary_topic is not None:
-            corrections["topic"] = primary_topic
+    allowed_fields = {
+        "relevance": {"decision"},
+        "message_analysis": {"products", "content_form"},
+        "importance": {"message_type", "topics", "importance_score"},
+    }.get(review.stage, set())
+    if unsupported := set(corrections).difference(allowed_fields):
+        raise ValueError(f"stage={review.stage} 不支持修正字段: {', '.join(sorted(unsupported))}")
     proposal = {**review.proposal, **corrections}
+    if review.stage == "message_analysis":
+        error = content_analysis_error(
+            products=list(proposal.get("products") or []),
+            content_form=str(proposal.get("content_form") or ""),
+        )
+        if error:
+            raise ValueError(error)
+    if review.stage == "importance" and (
+        payload.message_type is not None or payload.topics is not None
+    ):
+        analysis = review.processing_run.context.get("approved_message_analysis_proposal")
+        if not isinstance(analysis, dict):
+            raise ValueError("importance 修正缺少已批准的消息内容分析")
+        error = classification_error(
+            products=list(analysis.get("products") or []),
+            content_form=str(analysis.get("content_form") or ""),
+            message_type=str(proposal.get("message_type") or ""),
+            topics=list(proposal.get("topics") or []),
+            is_official_source=review.processing_run.raw_item.source.is_official,
+        )
+        if error:
+            raise ValueError(error)
     if review.stage != "importance" or payload.importance_score is None:
         return proposal
 
@@ -95,9 +120,7 @@ def _ocr_review_payload(
                 "storage_path": extraction.media_asset.storage_path,
                 "confidence": extraction.confidence,
                 "raw_ocr_text": extraction.raw_ocr_text,
-                "table_data": dict(
-                    extraction.processing_config.get("table_data", {})
-                ),
+                "table_data": dict(extraction.processing_config.get("table_data", {})),
             }
             for extraction in extractions
         ],
@@ -173,10 +196,7 @@ def list_review_queue(db: Session = Depends(get_db)) -> list[dict[str, object]]:
     message_reviews = list(
         db.scalars(
             select(ReviewTask)
-            .options(
-                selectinload(ReviewTask.processing_run)
-                .selectinload(ProcessingRun.raw_item)
-            )
+            .options(selectinload(ReviewTask.processing_run).selectinload(ProcessingRun.raw_item))
             .where(
                 ReviewTask.status == "pending",
             )
@@ -184,26 +204,8 @@ def list_review_queue(db: Session = Depends(get_db)) -> list[dict[str, object]]:
             .limit(200)
         )
     )
-    event_reviews = list(
-        db.scalars(
-            select(EventReviewTask)
-            .options(
-                selectinload(EventReviewTask.run)
-                .selectinload(EventAggregationRun.normalized_item)
-            )
-            .where(EventReviewTask.status == "pending")
-            .order_by(EventReviewTask.created_at.desc())
-            .limit(200)
-        )
-    )
-    raw_item_ids = {
-        review.processing_run.raw_item_id for review in message_reviews
-    } | {
-        review.run.normalized_item.raw_item_id for review in event_reviews
-    }
-    completed_by_raw: dict[int, list[str]] = {
-        raw_item_id: [] for raw_item_id in raw_item_ids
-    }
+    raw_item_ids = {review.processing_run.raw_item_id for review in message_reviews}
+    completed_by_raw: dict[int, list[str]] = {raw_item_id: [] for raw_item_id in raw_item_ids}
     if raw_item_ids:
         checkpoints = db.scalars(
             select(ProcessingCheckpoint)
@@ -231,38 +233,13 @@ def list_review_queue(db: Session = Depends(get_db)) -> list[dict[str, object]]:
                 "source_name": raw_item.source.name,
                 "processing_run_id": run.id,
                 "normalized_item_id": (
-                    raw_item.normalized_item.id
-                    if raw_item.normalized_item is not None
-                    else None
+                    raw_item.normalized_item.id if raw_item.normalized_item is not None else None
                 ),
                 "current_stage": review.stage,
                 "completed_stages": completed_by_raw.get(raw_item.id, []),
                 "review_kind": "ocr" if is_ocr else "message",
                 "message_review": None if is_ocr else review,
-                "ocr_review": (
-                    _ocr_review_payload(db, review) if is_ocr else None
-                ),
-                "event_review": None,
-                "created_at": review.created_at,
-            }
-        )
-    for review in event_reviews:
-        item = review.run.normalized_item
-        raw_item = item.raw_item
-        payloads.append(
-            {
-                "raw_item_id": raw_item.id,
-                "raw_title": raw_item.display_title,
-                "canonical_url": raw_item.canonical_url,
-                "source_name": raw_item.source.name,
-                "processing_run_id": None,
-                "normalized_item_id": item.id,
-                "current_stage": "event_decision",
-                "completed_stages": completed_by_raw.get(raw_item.id, []),
-                "review_kind": "event",
-                "message_review": None,
-                "ocr_review": None,
-                "event_review": review,
+                "ocr_review": (_ocr_review_payload(db, review) if is_ocr else None),
                 "created_at": review.created_at,
             }
         )

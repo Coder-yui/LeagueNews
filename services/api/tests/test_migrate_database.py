@@ -5,11 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import Base
 from app.models.source import Source
-from scripts.migrate_database import (
-    DEFAULT_SOURCES,
-    migration_files,
-    seed_default_sources,
-)
+from scripts.migrate_database import DEFAULT_SOURCES, migration_files, seed_default_sources
+
+
+MIGRATIONS = Path(__file__).parents[3] / "infra" / "postgres" / "migrations"
 
 
 def test_fresh_database_sources_match_current_connector_baseline() -> None:
@@ -37,40 +36,52 @@ def test_fresh_database_sources_match_current_connector_baseline() -> None:
             if source.external_key is not None
         }
     ) == 14
-    by_external_key = {
-        source.external_key: source
-        for source in sources
-        if source.external_key is not None
+    by_key = {
+        source.external_key: source for source in sources if source.external_key is not None
     }
-    assert by_external_key["riotphroxzon"].is_official is True
-    assert by_external_key["riotphroxzon"].reliability_score == 1.0
+    assert by_key["riotphroxzon"].is_official is True
+    assert by_key["riotphroxzon"].reliability_score == 1.0
     assert {
-        by_external_key[key].reliability_score
-        for key in ("2266865584", "2522098777", "2600241232")
+        by_key[key].reliability_score for key in ("2266865584", "2522098777", "2600241232")
     } == {0.6}
-    assert {
-        by_external_key[key].reliability_score
-        for key in ("86124184", "770437943")
-    } == {0.7}
+    assert {by_key[key].reliability_score for key in ("86124184", "770437943")} == {0.7}
 
 
-def test_migration_ledger_is_contiguous_and_self_records_version(
-    monkeypatch,
-) -> None:
-    migrations = Path(__file__).parents[3] / "infra" / "postgres" / "migrations"
-    monkeypatch.setenv("MIGRATIONS_DIR", str(migrations))
+def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> None:
+    monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "055_update_event_market_reach_policy.sql"
+    assert files[-1].name == "061_update_importance_policy_v11.sql"
 
+    taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
+    for column in ("products", "message_type", "topics", "classification_version"):
+        assert f"ADD COLUMN {column}" in taxonomy
+    for stage in ("relevance", "image_ocr", "translation", "message_analysis", "importance"):
+        assert f"'{stage}'" in taxonomy
 
-def test_runtime_compatibility_migration_supports_json_and_jsonb_databases() -> None:
-    migration = (
-        Path(__file__).parents[3]
-        / "infra"
-        / "postgres"
-        / "migrations"
-        / "054_remove_runtime_compatibility_layers.sql"
-    ).read_text(encoding="utf-8")
+    normalized_defaults = (
+        MIGRATIONS / "057_restore_legacy_normalized_defaults.sql"
+    ).read_text()
+    assert "ALTER COLUMN primary_topic SET DEFAULT 'other'" in normalized_defaults
+    assert "ALTER COLUMN secondary_topics SET DEFAULT '[]'::jsonb" in normalized_defaults
 
-    assert "json_array_length(original_event_ids::json)" in migration
+    correction_defaults = (
+        MIGRATIONS / "058_restore_legacy_correction_defaults.sql"
+    ).read_text()
+    assert "ALTER COLUMN original_event_ids SET DEFAULT '[]'::json" in correction_defaults
+
+    importance_policy = (
+        MIGRATIONS / "059_update_importance_policy_v9.sql"
+    ).read_text()
+    assert "importance-v9-classification-native" in importance_policy
+
+    community_promotion = (
+        MIGRATIONS / "060_add_community_promotion_type.sql"
+    ).read_text()
+    assert "message-taxonomy-v2" in community_promotion
+    assert "importance-v10-community-promotion" in community_promotion
+
+    current_importance = (
+        MIGRATIONS / "061_update_importance_policy_v11.sql"
+    ).read_text()
+    assert "importance-v11-repost-weekly-rotation" in current_importance

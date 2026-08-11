@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.workflow import GlossaryTerm, KnowledgeRule
+from app.models.workflow import GlossaryTerm, KnowledgeRule, MESSAGE_KNOWLEDGE_TYPES
 from app.models.workflow import ReviewTask
 from app.schemas.workflow import (
     GlossaryTermCreate,
@@ -38,9 +38,7 @@ def export_review_evaluation_cases(
         return []
     reviews = list(
         db.scalars(
-            select(ReviewTask)
-            .where(ReviewTask.id.in_(set(review_ids)))
-            .order_by(ReviewTask.id)
+            select(ReviewTask).where(ReviewTask.id.in_(set(review_ids))).order_by(ReviewTask.id)
         )
     )
     return [
@@ -68,7 +66,12 @@ def list_knowledge_rules(
     active: bool | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[KnowledgeRule]:
-    statement = select(KnowledgeRule).order_by(KnowledgeRule.updated_at.desc()).limit(500)
+    statement = (
+        select(KnowledgeRule)
+        .where(KnowledgeRule.knowledge_type.in_(MESSAGE_KNOWLEDGE_TYPES))
+        .order_by(KnowledgeRule.updated_at.desc())
+        .limit(500)
+    )
     if knowledge_type:
         statement = statement.where(KnowledgeRule.knowledge_type == knowledge_type)
     if active is not None:
@@ -128,13 +131,11 @@ def update_knowledge_rule(
     db: Session = Depends(get_db),
 ) -> KnowledgeRule:
     rule = db.get(KnowledgeRule, rule_id)
-    if not rule:
+    if not rule or rule.knowledge_type not in MESSAGE_KNOWLEDGE_TYPES:
         raise HTTPException(status_code=404, detail="knowledge rule not found")
     updates = payload.model_dump(exclude_unset=True)
     target_lifecycle = updates.get("lifecycle_status")
-    evaluation_summary = updates.get(
-        "evaluation_summary", rule.evaluation_summary
-    )
+    evaluation_summary = updates.get("evaluation_summary", rule.evaluation_summary)
     if target_lifecycle == "evaluated" and not evaluation_summary:
         raise HTTPException(
             status_code=409,

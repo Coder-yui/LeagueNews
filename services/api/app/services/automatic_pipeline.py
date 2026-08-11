@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.models.event import EventAggregationRun, EventReviewTask
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
@@ -21,16 +20,9 @@ from app.services.pipeline_execution import (
     PipelineLeaseLost,
     assert_execution_owned,
 )
-from app.services.maintenance import run_daily_maintenance
 from app.services.raw_item_versions import (
-    is_latest_normalized_item,
     is_latest_raw_item,
     latest_raw_item_condition,
-)
-from app.workflows.event_aggregation import (
-    approve_event_review,
-    resume_event_aggregation,
-    start_event_aggregation,
 )
 from app.workflows.reviewed_pipeline import (
     approve_review,
@@ -121,18 +113,6 @@ def _pending_item_review(db: Session, run_id: int) -> ReviewTask | None:
     )
 
 
-def _pending_event_review(db: Session, run_id: int) -> EventReviewTask | None:
-    return db.scalar(
-        select(EventReviewTask)
-        .where(
-            EventReviewTask.event_aggregation_run_id == run_id,
-            EventReviewTask.status == "pending",
-        )
-        .order_by(EventReviewTask.id.desc())
-        .limit(1)
-    )
-
-
 def _active_item_run(db: Session, raw_item_id: int) -> ProcessingRun | None:
     return db.scalar(
         select(ProcessingRun)
@@ -141,18 +121,6 @@ def _active_item_run(db: Session, raw_item_id: int) -> ProcessingRun | None:
             ProcessingRun.status.in_(["running", "awaiting_review"]),
         )
         .order_by(ProcessingRun.id.desc())
-        .limit(1)
-    )
-
-
-def _active_event_run(db: Session, item_id: int) -> EventAggregationRun | None:
-    return db.scalar(
-        select(EventAggregationRun)
-        .where(
-            EventAggregationRun.normalized_item_id == item_id,
-            EventAggregationRun.status.in_(["running", "awaiting_review"]),
-        )
-        .order_by(EventAggregationRun.id.desc())
         .limit(1)
     )
 
@@ -211,9 +179,7 @@ async def execute_pipeline_job(
                 execution_guard=execution_guard,
             )
         if item_run.status != "completed":
-            raise RuntimeError(
-                f"automatic item run stopped with status={item_run.status}"
-            )
+            raise RuntimeError(f"automatic item run stopped with status={item_run.status}")
         if item_run.outcome in {"irrelevant", "insufficient_evidence"}:
             return
 
@@ -221,49 +187,6 @@ async def execute_pipeline_job(
     item = raw_item.normalized_item
     if item is None or item.publication_status != "published":
         raise RuntimeError("automatic item pipeline did not publish a normalized item")
-    if not is_latest_normalized_item(db, item):
-        # Historical raw revisions remain traceable normalized evidence, but only
-        # the latest revision may enter the current event projection.
-        return
-
-    event_run = _active_event_run(db, item.id)
-    if event_run is None:
-        job.current_stage = "event_decision"
-        assert_execution_owned(db, execution_guard)
-        db.commit()
-        event_run = await start_event_aggregation(
-            db,
-            item,
-            execution_mode="automatic",
-            correction_id=job.correction_id,
-            execution_guard=execution_guard,
-        )
-    job.event_aggregation_run_id = event_run.id
-    if event_run.status == "running":
-        event_run = await resume_event_aggregation(
-            db,
-            event_run,
-            execution_guard=execution_guard,
-        )
-    if event_run.status == "awaiting_review":
-        review = _pending_event_review(db, event_run.id)
-        if review is None:
-            raise RuntimeError("automatic event run has no pending review")
-        job.current_stage = "event_decision"
-        review.decision_source = "automatic"
-        review.policy_version = "auto-approve-v1"
-        assert_execution_owned(db, execution_guard)
-        db.commit()
-        event_run = approve_event_review(
-            db,
-            review,
-            note="automatic pipeline approval",
-            execution_guard=execution_guard,
-        )
-    if event_run.status != "completed":
-        raise RuntimeError(
-            f"automatic event run stopped with status={event_run.status}"
-        )
 
 
 def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob | None:
@@ -298,9 +221,7 @@ def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob
     job.worker_id = worker_id or _worker_id()
     job.lease_token = secrets.token_hex(24)
     job.heartbeat_at = now
-    job.lease_expires_at = now + timedelta(
-        seconds=settings.pipeline_worker_lease_seconds
-    )
+    job.lease_expires_at = now + timedelta(seconds=settings.pipeline_worker_lease_seconds)
     if reclaimed:
         job.recovery_count += 1
         job.recovery_provenance = [
@@ -331,8 +252,7 @@ def _renew_job_lease(job_id: int, lease_token: str) -> bool:
             )
             .values(
                 heartbeat_at=now,
-                lease_expires_at=now
-                + timedelta(seconds=settings.pipeline_worker_lease_seconds),
+                lease_expires_at=now + timedelta(seconds=settings.pipeline_worker_lease_seconds),
             )
         )
         db.commit()
@@ -375,9 +295,7 @@ async def process_next_job() -> bool:
             lease_token=lease_token,
             lease_lost=lease_lost,
         )
-        heartbeat = asyncio.create_task(
-            _heartbeat_job(job.id, lease_token, lease_lost)
-        )
+        heartbeat = asyncio.create_task(_heartbeat_job(job.id, lease_token, lease_lost))
         try:
             await execute_pipeline_job(
                 db,
@@ -439,7 +357,6 @@ async def process_next_job() -> bool:
 
 async def worker_loop() -> None:
     while True:
-        run_daily_maintenance()
         processed = await process_next_job()
         if not processed:
             await asyncio.sleep(settings.pipeline_worker_poll_seconds)

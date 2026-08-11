@@ -1,7 +1,18 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -17,12 +28,8 @@ class PipelineCorrection(Base):
     normalized_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("normalized_items.id", ondelete="RESTRICT"), nullable=True, index=True
     )
-    original_event_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     source_processing_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True
-    )
-    source_event_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("event_aggregation_runs.id", ondelete="SET NULL"), nullable=True
     )
     checkpoint_id: Mapped[int | None] = mapped_column(
         ForeignKey(
@@ -41,12 +48,8 @@ class PipelineCorrection(Base):
     requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     checkpoints: Mapped[list["ProcessingCheckpoint"]] = relationship(
         back_populates="correction",
         foreign_keys="ProcessingCheckpoint.correction_id",
@@ -55,9 +58,8 @@ class PipelineCorrection(Base):
     __table_args__ = (
         CheckConstraint(
             "restart_from_stage IN "
-            "('relevance', 'image_ocr', 'translation', 'fact_classify', "
-            "'importance', 'claim_gen', "
-            "'event_decision')",
+            "('relevance', 'image_ocr', 'translation', 'message_analysis', "
+            "'importance')",
             name="ck_pipeline_corrections_restart_stage",
         ),
         CheckConstraint(
@@ -84,11 +86,6 @@ class ProcessingCheckpoint(Base):
     processing_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    event_aggregation_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("event_aggregation_runs.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
     correction_id: Mapped[int | None] = mapped_column(
         ForeignKey("pipeline_corrections.id", ondelete="SET NULL"),
         nullable=True,
@@ -100,12 +97,8 @@ class ProcessingCheckpoint(Base):
     knowledge_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     model_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     decision_source: Mapped[str] = mapped_column(String(20), default="manual")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    invalidated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     correction: Mapped[PipelineCorrection | None] = relationship(
@@ -115,10 +108,7 @@ class ProcessingCheckpoint(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "stage IN "
-            "('relevance', 'image_ocr', 'translation', 'fact_classify', "
-            "'importance', 'claim_gen', "
-            "'event_decision')",
+            "stage IN ('relevance', 'image_ocr', 'translation', 'message_analysis', 'importance')",
             name="ck_processing_checkpoints_stage",
         ),
         CheckConstraint(
@@ -141,40 +131,27 @@ class PipelineJob(Base):
         index=True,
     )
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
-    current_stage: Mapped[str] = mapped_column(
-        String(40), default="relevance", index=True
-    )
+    current_stage: Mapped[str] = mapped_column(String(40), default="relevance", index=True)
     processing_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True
-    )
-    event_aggregation_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("event_aggregation_runs.id", ondelete="SET NULL"), nullable=True
     )
     last_checkpoint_id: Mapped[int | None] = mapped_column(
         ForeignKey("processing_checkpoints.id", ondelete="SET NULL"), nullable=True
     )
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
-    heartbeat_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     recovery_count: Mapped[int] = mapped_column(Integer, default=0)
     recovery_provenance: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 

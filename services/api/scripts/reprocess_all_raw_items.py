@@ -21,6 +21,7 @@ from app.services.automatic_pipeline import (
     enqueue_pipeline_job,
     process_next_job,
 )
+from app.services.raw_item_versions import latest_raw_item_condition
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +88,10 @@ def _validate_preflight(
 def _raw_item_ids(db: Session) -> list[int]:
     return list(
         db.scalars(
-            select(RawItem.id).order_by(
-                func.coalesce(RawItem.published_at, RawItem.ingested_at),
-                RawItem.id,
+            select(RawItem.id)
+            .where(latest_raw_item_condition())
+            .order_by(
+                func.coalesce(RawItem.published_at, RawItem.ingested_at), RawItem.id
             )
         )
     )
@@ -100,7 +102,7 @@ def _dataset_raw_item_ids(db: Session, paths: list[Path]) -> list[int]:
         int(case["input"]["raw_item_id"])
         for path in paths
         for case in load_jsonl(path)
-        if case.get("task") == "ontology_v2"
+        if case.get("task") == "message_analysis"
     }
     ordered = _raw_item_ids(db)
     selected = [raw_item_id for raw_item_id in ordered if raw_item_id in requested]
@@ -243,7 +245,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Queue every RawItem and drain the current automatic pipeline from "
-            "relevance through event_decision. Dry-run by default."
+            "relevance through importance and message publication. Dry-run by default."
         )
     )
     parser.add_argument("--apply", action="store_true")
@@ -265,7 +267,7 @@ async def main() -> None:
         type=Path,
         action="append",
         help=(
-            "process only RawItem ids referenced by ontology_v2 cases; "
+            "process only RawItem ids referenced by message_analysis cases; "
             "repeat to process the union of multiple regression datasets"
         ),
     )

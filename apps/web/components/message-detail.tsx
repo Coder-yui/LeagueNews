@@ -176,8 +176,13 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
     <article className="message-detail">
       <header className="message-detail-head">
         <div className="message-detail-kicker">
-          <span>{item.primary_topic} · {item.subtopic}</span>
+          <span>#{item.id} · {item.message_type}</span>
           <span>重要性 {Math.round(item.importance_score * 100)}</span>
+          {item.topics.map((topic) => (
+            <span className="topic-badge" key={topic}>
+              主题 {topic}
+            </span>
+          ))}
         </div>
         <h1>{title}</h1>
         <p>{item.summary}</p>
@@ -185,6 +190,7 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
           <div>
             <span>来源</span>
             <strong>{item.source_name}</strong>
+            <span>· 信源可信度 {Math.round(item.source_reliability_score * 100)}</span>
             {item.author && <span>· {item.author}</span>}
             {item.published_at && (
               <time dateTime={item.published_at}>

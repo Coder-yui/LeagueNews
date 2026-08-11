@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.workflow import KnowledgeRule
+from app.models.workflow import KnowledgeRule, MESSAGE_KNOWLEDGE_TYPES
 from app.services.llm import LLMClient
 
 
@@ -9,7 +9,10 @@ async def organize_active_knowledge_rules(db: Session) -> list[KnowledgeRule]:
     source_rules = list(
         db.scalars(
             select(KnowledgeRule)
-            .where(KnowledgeRule.lifecycle_status == "active")
+            .where(
+                KnowledgeRule.lifecycle_status == "active",
+                KnowledgeRule.knowledge_type.in_(MESSAGE_KNOWLEDGE_TYPES),
+            )
             .order_by(
                 KnowledgeRule.knowledge_type,
                 KnowledgeRule.scope,

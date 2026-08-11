@@ -1,281 +1,305 @@
-# 消息与事件重要性评分细则
+# 消息重要性计算
 
-本文档逐项对应当前可执行实现，用于审核分值政策，而不是描述理想方案。当前版本：
+本文档是当前可执行重要性政策的唯一说明，对应
+`services/api/app/domain/importance.py`。当前版本：
 
-- 消息内在重要性：`importance-v7-cosmetic-releases`
-- 消息排序优先级：`importance-v7-cosmetic-releases`
-- 事件重要性：`event-importance-v5-component-baselines`
+- 消息重要性：`importance-v11-repost-weekly-rotation`
+- 消息排序优先级：`importance-v11-repost-weekly-rotation`
 
-实现入口为 `services/api/app/domain/importance.py` 和
-`services/api/app/domain/event_importance.py`。以后调整分值时，应同时修改实现、测试、本文档
-和政策版本号。
+修改分类到评分的路由、评分档案、修正项或排序规则时，必须同时更新实现、测试、本文档和版本号。
 
-## 一、分值口径
+## 一、评分口径
 
-产品和管理台统一按 **0-100 分**展示。数据库与 API 存储 `0.00-1.00`，例如数据库中的
-`0.86` 等于界面上的 `86 / 100`。计算结果以 0-1 口径保留四位小数。
+数据库和 API 使用 `0.00-1.00`，前端按 `0-100` 展示。
 
-系统中有三个不同的数：
+系统保留两个不同的数：
 
-1. **消息内在重要性**：消息所描述事实本身的影响，不考虑真假、来源和发布时间先后。
-2. **消息排序优先级**：在内在重要性上叠加阶段、内容形式和受众范围，用于消息流排序。
-3. **事件重要性**：事件成员消息对该事件的最高有效贡献，不按消息数量累加。
+1. **消息重要性 `importance_score`**：衡量当前消息本身的编辑价值，同时考虑它属于正式公告、
+   推广互动、提醒、爆料还是讨论，以及消息实际涉及的内容领域。
+2. **消息排序优先级 `priority_score`**：只在消息重要性上叠加引用形式和受众范围等投放约束，
+   用于消息流排序。纯转发已经在消息重要性中扣分，不在排序阶段重复扣分。
 
-可信度和重要性严格分开。官方身份、信源可靠性、独立信源数和是否官宣均不直接改变重要性。
-当前消息内在重要性的自动上限为 96 分；消息排序优先级理论上可达到 100 分。
+可信度不是重要性字段；Source 可靠性不直接增减分。官方或非官方身份已经通过候选目录约束
+`message_type`，评分程序只使用批准后的分类结果。
 
-## 二、单条消息内在重要性
+`media_only` 和 `link_only` 不执行重要性模型与评分算法，两个分数均写为 0。
 
-### 2.1 计算流程
+## 二、分类原生计算流程
 
 ```text
-受控 topic + subtopic + 已审核标题 + 正文
-  -> 程序确定编辑子类型
-  -> 读取该子类型的基准分、下限和上限
-  -> LLM 提取有限的结构化修正特征
-  -> 基准分 + 适用的修正项
-  -> 限制在子类型区间内
-  -> 消息内在重要性
+批准后的 message_type + 全部 topics + content_form + 当前消息文本
+  -> topics 映射为 topic families
+  -> message_type × topic families 路由到一个 importance_profile
+  -> 读取档案的基准分、下限和上限
+  -> 应用有限的结构化修正项
+  -> 限制在档案区间内
+  -> 纯转发扣 8 分
+  -> importance_score
+  -> 应用引用形式和受众修正
+  -> priority_score
 ```
 
 公式：
 
 ```text
-原始分 = 子类型基准分 + 所有适用修正项
-内在重要性 = min(子类型上限, max(子类型下限, 原始分))
+原始分 = 档案基准分 + 所有适用修正项
+档案分 = min(档案上限, max(档案下限, 原始分))
+消息重要性 = min(100, max(0, 档案分 + 转发修正项))
+排序优先级 = min(100, max(0, 消息重要性 + 投放修正项))
 ```
 
-LLM 不输出最终分数，只提取以下字段：
+系统不再生成或使用 `primary_topic`、`subtopic`、`source_kind`、`information_stage` 或
+`editorial_subtype`。计算审计字段统一使用 `importance_profile`。
 
-| 字段 | 允许值 | 含义及用途 |
-| --- | --- | --- |
-| `scale` | minor / standard / major | 同一子类型内的影响规模；用于规模修正 |
-| `audience_region` | cn / global / international_only / unknown | 只影响消息排序优先级，不改变内在重要性 |
-| `competition_region` | lpl / lck / international / other / none | 仅赛事子类型使用 |
-| `prominence` | normal / notable / star | 仅比赛结果和转会类使用 |
-| `skin_tier` | none / standard / legendary / prestige_or_mythic / ultimate | 仅新皮肤、新炫彩、国服新臻彩和云顶外观发布使用，必须有文本证据 |
-| `is_bulk_update` | true / false | 是否包含大量对象或批量新增 |
-| `evidence` | 1-6 条文本 | 审核依据，不直接参与计算 |
+## 三、Topics 如何参与评分
 
-`topic`、`subtopic`、`information_stage` 和 `content_form` 来自前置受控分类。LLM 没有自由选择
-编辑子类型或分数的权限。
+所有 topics 先映射为评分领域：
 
-### 2.2 编辑子类型如何确定
-
-以下四类先执行专门识别：
-
-| 受控分类 | 子类型选择顺序 |
+| topic family | topics |
 | --- | --- |
-| `shop_rotation` | 稀有/限定证据 -> 稀有外观；否则批量证据 -> 批量刷新；否则皮肤/炫彩证据 -> 外观轮换；否则普通每日轮换 |
-| `patch_preview` | 出现“完整预览”或 `full preview` -> 完整版本预览；否则版本预览 |
-| `match_result` | 世界赛且为决赛/季后赛 -> 世界赛关键场次；世界赛其他场次 -> 世界赛普通场次；非世界赛决赛 -> 赛区决赛；非世界赛季后赛/半决赛 -> 季后赛；否则常规赛 |
-| `in_game_activity` / `free_reward` | 明确是确定性皮肤领取、兑换或开箱，且不是抽奖、概率或“有机会” -> 免费皮肤活动；免费或付费的抽奖、概率奖池和“最高可得”均按普通游戏内活动处理 |
+| `gameplay` | `balance_gameplay`、`champions`、`items_runes_systems`、`game_modes`、`gameplay` |
+| `tft` | `tft_gameplay` |
+| `service` | `service_technical` |
+| `security` | `security_fair_play` |
+| `cosmetics` | `cosmetics` |
+| `commerce` | `shop_monetization` |
+| `activity` | `activities_rewards` |
+| `community` | `community` |
+| `guide` | `guides_education` |
+| `esports_competition` | `esports_competition` |
+| `esports_schedule` | `esports_schedule` |
+| `esports_matches` | `esports_matches` |
+| `esports_rosters` | `esports_rosters` |
+| `esports_analysis` | `esports_analysis` |
+| `esports_media` | `esports_broadcast`、`esports_fandom_live` |
+| `universe` | `lore_universe` |
+| `media` | `media_entertainment` |
+| `merchandise` | `merchandise_collectibles` |
+| `corporate` | `corporate_partnerships` |
+| `platform` | `platform_services` |
+| `unknown` | `unknown` |
 
-其余受控 `subtopic` 按下表映射：
+同一消息最终只选择一个重要性档案：
 
-| `subtopic` | 编辑子类型 | `subtopic` | 编辑子类型 |
-| --- | --- | --- | --- |
-| patch_notes | 正式版本公告 | hotfix | 热修复 |
-| pbe_change | 测试服/PBE 改动 | champion_release | 新英雄 |
-| champion_update | 重大玩法改动 | item_rune_system | 重大玩法改动 |
-| game_mode_release | 新游戏模式 | game_mode_update | 重大玩法改动 |
-| tft_set / tft_patch | 云顶赛季/版本更新 | tft_cosmetic | 云顶外观发布 |
-| skin_release | 新皮肤、新炫彩、国服新臻彩发布 | shop_offer | 普通商城优惠 |
-| free_rotation | 周免英雄 | free_reward | 免费奖励；确定性皮肤奖励按上方专门识别升档 |
-| event_pass | 有明确通行证、宝典、战令、付费等级或里程碑机制的活动 | ticketing | 赛事票务 |
-| match_schedule | 赛事赛程 | roster_move | 转会/阵容变化 |
-| maintenance / outage | 服务故障/维护 | disciplinary | 纪律处罚 |
-| security | 安全公告 | merch | 实体周边发布 |
-| partnership | 商业合作 | corporate | Riot 公司信息 |
-| lore | 世界观内容 | music_video | 音乐/视频发布 |
-| community_event | 社区活动 | gameplay_guide | 玩法攻略 |
-| community_post | 普通社区内容 |  |  |
+- 不只读取第一个 topic；路由使用完整 topic family 集合。
+- 不累加多个 topics 的分数。
+- 不按最高分选择 topic，避免多标签自动抬分。
+- 每种 `message_type` 都有显式、固定的路由优先级，因此 topics 输入顺序不影响结果。
 
-没有专门映射时按宽主题回退：`community`、`universe`、`business`、`media`、`activity`、
-`service`、`roster`、`skin` 分别回退到对应的普通类型；其他主题统一回退为“其他”。
-所有新皮肤、新炫彩和国服新臻彩统一使用 `skin_release`。
+## 四、Message type 到评分档案的路由
 
-### 2.3 子类型基准和硬区间
+### 4.1 游戏消息
 
-下表均为 100 分制的“基准 / 下限 / 上限”。修正项不能突破本行区间。
+| message_type | 路由顺序 |
+| --- | --- |
+| `game_patch_notes` | `patch_official_notes` |
+| `game_official_preview` | 玩法/云顶 -> `official_gameplay_preview`；其他 -> `official_content_preview` |
+| `game_announcement` | 周免英雄 -> `weekly_free_champion_rotation`；安全 -> `security_notice`；服务 -> `service_notice`；活动 -> `activity_announcement`；商城 -> `commerce_announcement`；外观 -> `cosmetic_announcement`；云顶 -> `tft_announcement`；玩法 -> `gameplay_announcement`；其他 -> `game_announcement_general` |
+| `game_notice` | 安全 -> `security_notice`；其他 -> `service_notice` |
+| `game_promotion_interaction` | 活动/商城 -> `promotion_activity`；外观 -> `promotion_cosmetic`；玩法/云顶 -> `promotion_gameplay`；社区/攻略/媒体 -> `promotion_community`；其他 -> `promotion_general` |
+| `game_community_notice` | 商城 -> 商城轮换档案；活动 -> `free_reward`；服务/安全 -> `community_service_notice`；玩法/云顶/外观 -> `community_game_notice`；其他 -> `community_notice_general` |
+| `game_community_promotion_interaction` | 与官方游戏推广使用相同的推广档案路由，不因非官方身份额外加减分 |
+| `game_leak` | 玩法/云顶/服务/安全 -> `leak_gameplay`；外观/商城/活动 -> `leak_content`；其他 -> `leak_general` |
+| `game_community_discussion` | 攻略 -> `gameplay_guide`；其他 -> `game_discussion` |
 
-| 内容类型 | 基准 | 下限 | 上限 |
-| --- | ---: | ---: | ---: |
-| 商城普通每日轮换 | 48 | 42 | 54 |
-| 商城皮肤/炫彩轮换 | 58 | 52 | 64 |
-| 商城稀有外观轮换 | 66 | 60 | 72 |
-| 商城批量刷新 | 66 | 60 | 72 |
-| 普通商城优惠 | 52 | 42 | 62 |
-| 周免英雄 | 42 | 38 | 48 |
-| 免费奖励 | 62 | 52 | 75 |
-| 版本预览 | 86 | 82 | 90 |
-| 完整版本预览 | 90 | 87 | 93 |
-| 正式版本公告 | 92 | 88 | 95 |
-| 热修复 | 72 | 62 | 84 |
-| 测试服/PBE 改动 | 62 | 52 | 72 |
-| 新英雄 | 93 | 88 | 96 |
-| 新游戏模式 | 91 | 86 | 95 |
-| 重大玩法改动 | 92 | 87 | 95 |
-| 云顶赛季/版本更新 | 84 | 78 | 90 |
-| 云顶外观发布 | 58 | 50 | 68 |
-| 付费活动/通行证 | 68 | 60 | 76 |
-| 普通游戏内活动 | 72 | 62 | 82 |
-| 明确免费获得皮肤的活动 | 88 | 83 | 93 |
-| 赛事赛程 | 52 | 46 | 62 |
-| 赛事票务 | 58 | 50 | 68 |
-| 普通常规赛结果 | 60 | 54 | 68 |
-| 季后赛结果 | 70 | 66 | 76 |
-| 赛区决赛结果 | 76 | 71 | 82 |
-| 世界赛普通场次 | 68 | 62 | 74 |
-| 世界赛关键场次 | 80 | 74 | 86 |
-| 转会/阵容变化 | 62 | 54 | 74 |
-| 新皮肤、新炫彩、国服新臻彩发布 | 68 | 60 | 80 |
-| 服务故障/维护 | 68 | 54 | 86 |
-| 纪律处罚 | 76 | 66 | 88 |
-| 安全公告 | 82 | 72 | 92 |
-| 实体周边发布 | 52 | 44 | 64 |
-| 商业合作 | 58 | 50 | 68 |
-| 音乐/视频发布 | 58 | 48 | 70 |
-| Riot 公司信息 | 66 | 58 | 76 |
-| 世界观内容 | 66 | 58 | 78 |
-| 社区活动 | 52 | 42 | 64 |
-| 玩法攻略 | 42 | 32 | 52 |
-| 普通社区内容 | 34 | 16 | 48 |
-| 其他 | 50 | 30 | 66 |
+`game_promotion_interaction` 与 `game_community_promotion_interaction` 永远只能进入推广档案，
+不得进入正式玩法公告、版本预览、PBE 改动或其他高信息密度档案。两者评分相同，独立 code
+只用于保留信源性质。`game_community_notice` 同样不会因为非官方来源而自动变成 leak。
 
-### 2.4 修正项
+### 4.2 赛事消息
 
-| 修正项 | 适用范围 | 条件 | 分值 |
-| --- | --- | --- | ---: |
-| 内容规模 | 热修复、服务故障、安全公告之外的所有类型 | minor / standard / major | -3 / 0 / +3 |
-| 内容规模 | 热修复、服务故障、安全公告 | minor / standard / major | -7 / 0 / +9 |
-| 批量更新 | 除商城批量刷新、完整版本预览、正式版本公告外 | `is_bulk_update=true` | +3 |
-| 赛事区域 | 所有 `esports_*` 和 `worlds_*` 子类型 | LPL / LCK / 国际赛事 / 其他赛区 / 未识别 | +3 / 0 / +1 / -3 / -3 |
-| 对象知名度 | 比赛结果、世界赛结果、转会/阵容变化 | normal / notable / star | 0 / +3 / +7 |
-| 外观档次 | 新皮肤、新炫彩、国服新臻彩、云顶外观发布 | 普通或未注明 / 传说 / 至臻或神话 / 终极 | 0 / +4 / +6 / +10 |
+| message_type | 路由顺序 |
+| --- | --- |
+| `esports_announcement` | 赛果 -> 赛果档案；赛程 -> `esports_schedule`；阵容 -> `roster_announcement`；其他 -> `esports_announcement_general` |
+| `esports_promotion_interaction` | `esports_promotion` |
+| `esports_rumor_speculation` | `esports_rumor` |
+| `esports_community_discussion` | 赛事分析 -> `esports_analysis`；其他 -> `esports_discussion` |
 
-“臻彩”是国服付费外观，不等于“至臻皮肤”。臻彩发布与普通新皮肤使用同一基准和区间；
-仅出现“臻彩”名称时 `skin_tier=standard`，不得套用“至臻或神话”修正。
+赛事推广不会因为包含 `esports_matches`、`esports_schedule` 或 `esports_rosters` 而使用正式赛果、
+赛程或转会档案。
 
-所有修正相加后再执行子类型区间限制。例如一条 LPL 明星选手相关的普通常规赛结果：
+### 4.3 英雄联盟宇宙、其他产品与 Riot 生态
 
-```text
-60（基准）+ 3（LPL）+ 7（star）= 70
-常规赛上限为 68，因此最终内在重要性为 68 分
-```
+| message_type | importance_profile |
+| --- | --- |
+| `lol_universe_announcement` | `universe_announcement` |
+| `lol_universe_promotion_interaction` | `universe_promotion` |
+| `lol_universe_leak` | `universe_leak` |
+| `lol_universe_community_discussion` | `universe_discussion` |
+| `other_lol_product_announcement` | `other_product_announcement` |
+| `other_lol_product_promotion_interaction` | `other_product_promotion` |
+| `other_lol_product_leak` | `other_product_leak` |
+| `other_lol_product_community_discussion` | `other_product_discussion` |
+| `riot_ecosystem_announcement` | 周边 -> `merch_release`；合作 -> `partnership`；媒体 -> `media_release`；其他 -> `riot_announcement` |
+| `riot_ecosystem_promotion_interaction` | `riot_promotion` |
+| `riot_ecosystem_leak` | `riot_leak` |
+| `riot_ecosystem_community_discussion` | `riot_discussion` |
+| `unknown` | `unknown`，固定 0 分 |
 
-## 三、单条消息排序优先级
+## 五、评分档案
 
-排序优先级不改变事实本身的重要性，只用于消息流排序：
+下表均为 100 分制的“基准 / 下限 / 上限”。
 
-```text
-排序优先级 = 内在重要性 + 阶段修正 + 内容形式修正 + 受众修正
-最终限制在 5-100 分
-```
+### 5.1 正式游戏信息
 
-阶段修正：
+| importance_profile | 含义 | 基准 | 下限 | 上限 |
+| --- | --- | ---: | ---: | ---: |
+| `patch_official_notes` | 正式版本说明 | 92 | 88 | 95 |
+| `patch_full_preview` | 完整版本预览 | 90 | 87 | 93 |
+| `official_gameplay_preview` | 官方玩法或云顶实质预览 | 86 | 80 | 93 |
+| `official_content_preview` | 官方其他内容实质预览 | 76 | 66 | 84 |
+| `gameplay_announcement` | 正式玩法公告 | 86 | 78 | 95 |
+| `tft_announcement` | 云顶正式公告 | 82 | 74 | 90 |
+| `activity_announcement` | 正式活动公告 | 72 | 62 | 82 |
+| `cosmetic_announcement` | 正式外观公告 | 68 | 58 | 80 |
+| `commerce_announcement` | 正式商城公告 | 58 | 48 | 70 |
+| `weekly_free_champion_rotation` | 周免英雄轮换 | 50 | 44 | 56 |
+| `game_announcement_general` | 其他游戏正式公告 | 62 | 52 | 76 |
+| `patch_hotfix` | 热修复 | 72 | 62 | 84 |
+| `service_notice` | 服务与运营通知 | 68 | 54 | 86 |
+| `security_notice` | 安全与公平竞技通知 | 82 | 72 | 92 |
 
-| `information_stage` | 分值 |
-| --- | ---: |
-| correction | +4 |
-| result | +2 |
-| active | +1 |
-| announcement / preview / update | 0 |
-| rumor | -2 |
-| speculation | -6 |
-| reminder | -12 |
-| commentary | -16 |
-| 未识别值 | 0 |
+### 5.2 推广、社区提醒、爆料与讨论
 
-其他修正：
+| importance_profile | 含义 | 基准 | 下限 | 上限 |
+| --- | --- | ---: | ---: | ---: |
+| `promotion_gameplay` | 玩法、模式或云顶宣传 | 52 | 38 | 68 |
+| `promotion_activity` | 活动或商城宣传 | 50 | 36 | 66 |
+| `promotion_cosmetic` | 外观宣传 | 48 | 34 | 64 |
+| `promotion_community` | 社区、创作、攻略或媒体互动 | 34 | 16 | 50 |
+| `promotion_general` | 其他游戏推广 | 42 | 26 | 58 |
+| `shop_daily_standard` | 商城普通轮换 | 48 | 42 | 54 |
+| `shop_cosmetic_rotation` | 商城外观轮换 | 58 | 52 | 64 |
+| `shop_rare_cosmetic` | 商城稀有外观轮换 | 66 | 60 | 72 |
+| `shop_bulk_refresh` | 商城批量刷新 | 66 | 60 | 72 |
+| `free_reward` | 免费奖励或活动提醒 | 62 | 52 | 75 |
+| `activity_free_skin` | 确定性免费皮肤提醒 | 84 | 78 | 90 |
+| `community_game_notice` | 社区玩法或内容提醒 | 54 | 42 | 68 |
+| `community_service_notice` | 社区服务与安全提醒 | 58 | 46 | 72 |
+| `community_notice_general` | 其他社区提醒 | 46 | 34 | 60 |
+| `leak_gameplay` | 未确认玩法、云顶、服务或安全信息 | 62 | 50 | 75 |
+| `leak_content` | 未确认外观、商城或活动信息 | 54 | 42 | 68 |
+| `leak_general` | 其他未确认信息 | 50 | 38 | 64 |
+| `gameplay_guide` | 玩法攻略 | 42 | 32 | 52 |
+| `game_discussion` | 普通游戏讨论 | 34 | 16 | 55 |
 
-| 条件 | 分值 |
-| --- | ---: |
-| `content_form=repost` | -8 |
-| `content_form=roundup` | -4 |
-| `audience_region=international_only` | -12 |
-| 其他内容形式或受众范围 | 0 |
+### 5.3 赛事
 
-例：一条内在重要性 60 分的常规赛赛后评论，排序优先级为 `60 - 16 = 44` 分；如果还是
-转载，则为 `60 - 16 - 8 = 36` 分。事实的重要性仍然是 60 分。
+| importance_profile | 含义 | 基准 | 下限 | 上限 |
+| --- | --- | ---: | ---: | ---: |
+| `esports_schedule` | 正式赛程 | 52 | 46 | 62 |
+| `esports_regular` | 普通常规赛结果 | 60 | 54 | 68 |
+| `esports_playoffs` | 季后赛结果 | 70 | 66 | 76 |
+| `esports_final` | 赛区决赛结果 | 76 | 71 | 82 |
+| `worlds_regular` | 世界赛普通场次 | 68 | 62 | 74 |
+| `worlds_key` | 世界赛关键场次 | 80 | 74 | 86 |
+| `roster_announcement` | 正式转会或阵容公告 | 62 | 54 | 74 |
+| `esports_announcement_general` | 其他赛事正式公告 | 56 | 44 | 70 |
+| `esports_promotion` | 赛事宣传、集锦和观赛引导 | 44 | 28 | 62 |
+| `esports_rumor` | 赛事传闻与推测 | 50 | 38 | 68 |
+| `esports_analysis` | 赛事分析 | 44 | 30 | 60 |
+| `esports_discussion` | 普通赛事讨论 | 34 | 18 | 54 |
 
-“免费皮肤现已可领取”这类消息按免费皮肤活动得到 88 分基准内在重要性；如果它只是提醒，
-排序优先级为 `88 - 12 = 76` 分。提醒仍低于首次公告，但不会再落入普通小奖励档。
+### 5.4 其他产品域
 
-## 四、聚合事件重要性
+| importance_profile | 含义 | 基准 | 下限 | 上限 |
+| --- | --- | ---: | ---: | ---: |
+| `universe_announcement` | 英雄联盟宇宙正式公告 | 66 | 58 | 78 |
+| `universe_promotion` | 英雄联盟宇宙推广 | 46 | 32 | 62 |
+| `universe_leak` | 英雄联盟宇宙未确认信息 | 54 | 42 | 68 |
+| `universe_discussion` | 英雄联盟宇宙讨论 | 38 | 22 | 56 |
+| `other_product_announcement` | 其他英雄联盟产品正式公告 | 68 | 56 | 82 |
+| `other_product_promotion` | 其他英雄联盟产品推广 | 46 | 32 | 62 |
+| `other_product_leak` | 其他英雄联盟产品未确认信息 | 54 | 42 | 70 |
+| `other_product_discussion` | 其他英雄联盟产品讨论 | 38 | 22 | 56 |
+| `merch_release` | 实体周边正式发布 | 52 | 44 | 64 |
+| `partnership` | 商业合作正式公告 | 58 | 50 | 68 |
+| `media_release` | 媒体内容正式发布 | 58 | 48 | 70 |
+| `riot_announcement` | 其他 Riot 生态正式公告 | 66 | 58 | 76 |
+| `riot_promotion` | Riot 生态推广 | 46 | 32 | 62 |
+| `riot_leak` | Riot 生态未确认信息 | 54 | 42 | 68 |
+| `riot_discussion` | Riot 生态讨论 | 38 | 22 | 56 |
+| `unknown` | 无法评分 | 0 | 0 | 0 |
 
-### 4.1 哪些成员参与计算
+## 六、档案内的专门识别
 
-只有事件中处于 active 状态、且对应消息仍为 published 的成员才进入计算。下列成员贡献为
-0：
+专门识别只在已经由 `message_type × topic family` 选定的合法范围内执行：
 
-- 消息已撤回；
-- `evidence_stance=context`；
-- `update_kind=context`。
+| 适用分类 | 识别结果 |
+| --- | --- |
+| `game_official_preview` | 正文明示“完整预览”或 `full preview` -> `patch_full_preview` |
+| `game_notice` | 明示热修复、不停机更新等服务端更新 -> `patch_hotfix` |
+| `game_announcement + gameplay` | 明示周免英雄、每周免费英雄或免费英雄轮换 -> `weekly_free_champion_rotation` |
+| `game_community_notice + commerce` | 稀有/限定 -> `shop_rare_cosmetic`；批量刷新 -> `shop_bulk_refresh`；皮肤/炫彩 -> `shop_cosmetic_rotation`；否则 `shop_daily_standard` |
+| `game_community_notice + activity` | 明确、确定性免费获得皮肤且不是抽奖或概率 -> `activity_free_skin`；否则 `free_reward` |
+| `esports_announcement + esports_matches` | 根据世界赛、季后赛和决赛证据选择对应赛果档案 |
 
-`duplicate_evidence` 不增加事件 revision 或独立信源数，但它描述的事实仍有内在重要性。
-由于事件最终只取最高贡献而不累加，重复消息不会把事件分数越堆越高。
+这些识别不能跨越消息类型边界。例如推广消息即使写有“完整预览”“决赛”或“现已上线”，仍只能
+使用推广档案。
 
-### 4.2 单个成员的贡献
+## 七、LLM 结构化特征与修正项
 
-`primary` 成员直接使用消息内在重要性。`component` 表示消息同时主张了另一个独立事件，
-不能因为它在当前消息中不是主叙事就降低事件本身的重要性，因此使用消息分与事件类型标准
-基准中的较低值。`cross_ref` 在同一基数上保留 35%。
+LLM 不输出分数，只提取：
 
-```text
-primary 贡献 = 消息内在重要性
-component 贡献 = min(消息内在重要性, 事件类型标准基准)
-cross_ref 贡献 = min(消息内在重要性, 事件类型标准基准) x 0.35
-```
+| 字段 | 允许值 | 用途 |
+| --- | --- | --- |
+| `scale` | minor / standard / major | 同一档案内的影响规模 |
+| `audience_region` | cn / global / international_only / unknown | 只影响排序优先级 |
+| `competition_region` | lpl / lck / international / other / none | 赛事档案修正 |
+| `prominence` | normal / notable / star | 赛果、阵容公告和赛事传闻修正 |
+| `skin_tier` | none / standard / legendary / prestige_or_mythic / ultimate | 正式外观公告和外观推广修正 |
+| `is_bulk_update` | true / false | 批量内容修正 |
+| `evidence` | 1-6 条消息原文 | 审核依据，不直接计分 |
 
-事件类型标准基准沿用消息评分已有档位：玩法更新 92、新玩法发布 91、外观发布 68、阵容变化
-62、普通比赛或晋级变化 60、赛程 52、商业优惠 52、玩家活动 72、服务事件 68、纪律处罚
-76、安全公告 82、媒体发布 58、公司公告 66、社区活动 52、其他 50。
+修正项：
 
-### 4.3 事件最终分
+| 修正项 | 适用范围 | 分值 |
+| --- | --- | ---: |
+| `scale` | `patch_hotfix`、`service_notice`、`security_notice` | minor -7 / standard 0 / major +9 |
+| `scale` | 其他非 unknown 档案 | minor -3 / standard 0 / major +3 |
+| `bulk_update` | 除商城批量刷新、完整预览、正式版本说明和周免英雄轮换外 | +3 |
+| `competition_region` | 所有赛事档案 | LPL +3 / LCK 0 / 国际 +1 / 其他 -3 / none -3 |
+| `prominence` | 赛果、阵容公告、赛事传闻 | normal 0 / notable +3 / star +7 |
+| `skin_tier` | 正式外观公告、外观推广 | standard 0 / legendary +4 / prestige_or_mythic +6 / ultimate +10 |
 
-```text
-事件基础重要性 = max(所有大于 0 的成员贡献)
-事件重要性 = 事件基础重要性 + 适用的事件范围修正
-```
+“臻彩”不能单独作为至臻或神话外观证据；只有文本明确说明“至臻皮肤、神话皮肤、神话炫彩”等
+档次时才能使用 `prestige_or_mythic`。
 
-- 不累加成员数量，不做平均，也没有“多条消息共同抬高分数”。
-- 官方来源不加分，独立信源数不加分；这些信号只影响可信度。
-- 有 active 成员但全部贡献为 0 时，事件显示最低 5 分。
-- 完全没有 active 成员时，事件聚合服务直接写为 0 分。
-- 最终分限制在 0-100；正常有成员的事件最低为 5 分。
-- `shop_rotation:{product_scope}:global:{week}` 表示仅影响外服玩家的商城周轮换，事件范围
-  修正为 -12 分；同周国服轮换不使用该修正。该规则不改变消息内在重要性。
+所有修正后的结果都必须限制在当前档案的下限和上限之间。
 
-例：一条 95 分的正式版本公告同时发布一组新外观，该外观以 `component` 身份加入外观事件：
+档案区间限制完成后，若 `content_form` 为 `repost`，消息重要性再扣 8 分，并限制在 0-100。
+这反映纯转发本身较低的编辑价值，也保证处于档案下限的转发仍能稳定减分。`original`、`quote`、
+`media_only` 和 `link_only` 不在此步加减分；后两者按前述规则直接为 0。
 
-```text
-min(95, 68) = 68
-```
+## 八、排序优先级
 
-如果同类测试服消息本身只有 65 分，则不会因事件基准被抬高：
+消息类型已经决定消息信息价值，因此排序阶段不再对推广、讨论、提醒、爆料或传闻重复降分，也不再
+使用 `information_stage`。
 
-```text
-min(65, 68) = 65
-```
+| 修正项 | 条件 | 分值 |
+| --- | --- | ---: |
+| 内容形式 | `quote` | -2 |
+| 受众范围 | `international_only` | -12 |
 
-事件仍取所有成员贡献中的最高值，不累加消息数量。
+`original`、`cn`、`global` 和 `unknown` 不修正。排序优先级限制在 0-100。
 
-## 五、当前政策的直接后果
+## 九、审计输出与不变量
 
-以下不是隐藏规则，而是现有公式必然产生的结果，审核时应重点判断是否符合产品预期：
+每次计算保存：
 
-1. 子类型区间是硬边界。修正项只能决定同类内容在区间内的位置，不能跨越类型等级。
-2. 提醒、评论、转载和仅外服不降低消息内在重要性；它们通常只降低排序优先级。唯一的
-   事件层范围修正是外服商城周轮换 -12 分。
-3. 传闻不因未官宣而降低内在重要性，只降低 2 分排序优先级；真假由可信度表达。
-4. `component` 使用事件类型标准基准封顶，避免继承整篇高分公告，也不会因主主题不同被双重折损；
-   `cross_ref` 在该基数上保留 35%。
-5. 系统尚未给每个 `event_mention` 单独提取规模等修正特征，附属事件使用对应事件类型的标准基准。
-6. 事件分只取最高成员贡献，所以多源确认不会提高事件重要性，但会提高事件可信度。
+- `policy_version`
+- `message_type` 和完整 `topics`
+- `importance_profile`
+- 基准、上下限、修正项、修正合计、限制前分数、档案分和最终分数
+- 排序优先级的独立修正项
 
-## 六、审核与人工覆盖
+必须满足：
 
-管理台按 0-100 分显示和编辑。人工覆盖会保留程序原始分、覆盖后分数和覆盖原因。合理的
-覆盖理由包括分类错误、规模判断错误、对象档次错误或明确的编辑政策例外；不能因为来源官方、
-转载量大或多家确认而提高重要性。
+1. 每个受控 `message_type` 都有评分路由。
+2. topic 输入顺序不改变评分档案。
+3. 多个 topics 不累加分数。
+4. 同主题的推广档案低于正式公告档案。
+5. 推广、讨论和社区提醒不能进入正式公告、正式赛果或官方预览档案。
+6. `unknown` 固定为 0。
+7. LLM 不得直接决定基准、上下限、修正值或最终分数。
+8. `repost` 只在消息重要性中扣 8 分，排序阶段不得重复扣分。

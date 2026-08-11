@@ -1,6 +1,6 @@
 # LoL Daily Intel
 
-英雄联盟垂直领域的多信源采集、AI 处理、事件聚合与发布系统。
+英雄联盟垂直领域的多信源采集、AI 消息处理与发布系统。
 
 ## 当前能力
 
@@ -12,18 +12,17 @@ Source 周期调度或手工触发
   -> 相关性
   -> 可选版本图片 OCR
   -> 翻译
-  -> 摘要、实体、重要性与可信度分析
+  -> products、content_form、message_type、topics、摘要和实体
+  -> 重要性计算
   -> NormalizedItem 发布
-  -> 事件判断与聚合
 ```
 
 - 已接入 Riot 官网、腾讯 LOL 官网、X、微博、百度贴吧和手工导入。
-- 新内容默认由独立 Worker 自动跑完整链路；各阶段仍保留草稿、决定来源和 checkpoint。
+- 新内容默认由独立 Worker 自动执行相关性、可选 OCR、翻译、消息分析和重要性；各阶段保留草稿、决定来源和 checkpoint。
 - 已发布消息可以按阶段撤回，并选择人工审核或自动模式重跑。
-- 事件层支持确定性候选、AI 结构化决策、人工/自动接受、稳定事件键和 revision 历史。
 - 管理台提供审核、采集计划、采集日志、管线日志、失败恢复、撤回、知识与 OCR Lab。
 - 已有单机 Docker Compose 生产部署、Caddy 边界认证、GHCR 镜像发布、备份与恢复脚本。
-- 日报、embedding/向量召回和应用内多用户权限尚未实现。
+- 事件聚合等待重新设计；日报、embedding/向量召回和应用内多用户权限尚未实现。
 
 ## 架构边界
 
@@ -31,14 +30,14 @@ Source 周期调度或手工触发
 - Connector 只映射统一 `RawItemCandidate`；共享 ingestion 负责校验、去重、媒体落盘和入库。
 - `raw_items.content_blocks` 是不可变原文事实来源，后续处理不得回写。
 - `normalized_items` 是单条消息当前投影，历史版本保存在 `normalized_item_revisions`。
-- 事件是 `NormalizedItem` 之上的独立层，成员关系和历史不写回 RawItem。
+- 当前消息处理在发布 `NormalizedItem` 后结束，不生成 Claim 或事件。
 - 自动与人工流程使用相同结构化草稿；区别记录在决定来源和运行模式中。
 
 ## 目录
 
 - `apps/web`：Next.js 公开页面与管理台
 - `services/api/app/connectors`：平台 Connector
-- `services/api/app/services`：ingestion、调度、管线、媒体、LLM 与事件服务
+- `services/api/app/services`：ingestion、调度、管线、媒体与 LLM 服务
 - `services/api/app/workflows`：人工审核和 AI 工作流
 - `services/api/app/models`：SQLAlchemy 模型
 - `infra/postgres/migrations`：只追加、不可改写的迁移历史
@@ -116,12 +115,15 @@ pnpm build:web
 
 ## 文档入口
 
-- [开发交接与当前状态](docs/DEVELOPMENT_HANDOFF.md)
+- [完整文档导航](docs/README.md)
+- [消息处理 v1 里程碑](docs/MESSAGE_PROCESSING_V1_MILESTONE.md)
+- [当前架构](docs/ARCHITECTURE.md)
 - [本地运行](docs/LOCAL_RUNBOOK.md)
 - [Connector 操作与排障](docs/CONNECTOR_OPERATIONS_GUIDE.md)
 - [Connector 架构](docs/CONNECTOR_ARCHITECTURE.md)
 - [RawItem 内容模型](docs/RAW_ITEM_CONTENT_MODEL.md)
-- [人工审核工作流](docs/REVIEWED_AI_WORKFLOW.md)
-- [事件编辑规则](docs/EVENT_EDITORIAL_POLICY.md)
-- [Google Cloud 首次预发布](docs/GOOGLE_CLOUD_FIRST_DEPLOY.md)
+- [消息处理流程](docs/REVIEWED_AI_WORKFLOW.md)
+- [消息分类规则](docs/MESSAGE_CLASSIFICATION.md)
+- [重要性计算](docs/IMPORTANCE_SCORING_POLICY.md)
+- [OCR 配置记录](docs/OCR_CONFIGURATION.md)
 - [生产部署](docs/PRODUCTION_DEPLOYMENT.md)

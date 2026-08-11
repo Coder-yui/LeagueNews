@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Final, Literal, get_args
 
 
-CLASSIFICATION_VERSION: Final = "message-taxonomy-v2"
+CLASSIFICATION_VERSION: Final = "message-taxonomy-v3"
 
 Product = Literal[
     "lol_pc",
@@ -14,6 +14,7 @@ Product = Literal[
     "unknown",
 ]
 ContentForm = Literal["original", "repost", "quote", "media_only", "link_only"]
+SourceKind = Literal["official", "unofficial", "unknown"]
 MessageType = Literal[
     "game_patch_notes",
     "game_official_preview",
@@ -532,8 +533,10 @@ def classification_error(
     content_form: str,
     message_type: str,
     topics: list[str],
-    is_official_source: bool | None,
+    source_kind: str,
 ) -> str | None:
+    if source_kind not in {"official", "unofficial", "unknown"}:
+        return "source_kind 包含不受支持的值"
     if error := content_analysis_error(products=products, content_form=content_form):
         return error
     if message_type not in MESSAGE_TYPES:
@@ -552,13 +555,7 @@ def classification_error(
         return None
     selected_products = set(products)
     message_rules = MESSAGE_TYPE_RULES_BY_CODE[message_type]
-    expected_source = (
-        "official"
-        if is_official_source
-        else "unofficial"
-        if is_official_source is not None
-        else None
-    )
+    expected_source = source_kind if source_kind != "unknown" else None
     if message_type != "unknown":
         product_rules = [
             rule for rule in message_rules if selected_products.intersection(rule.products)
@@ -591,13 +588,19 @@ def content_analysis_catalog() -> dict[str, object]:
     }
 
 
-def classification_catalog(*, products: list[str], is_official_source: bool) -> dict[str, object]:
+def classification_catalog(
+    *, products: list[str], source_kind: SourceKind
+) -> dict[str, object]:
     selected_products = set(products)
-    expected_source = "official" if is_official_source else "unofficial"
+    disclosed_sources = (
+        {"official", "unofficial", "any"}
+        if source_kind == "unknown"
+        else {source_kind, "any"}
+    )
     return {
         "classification_version": CLASSIFICATION_VERSION,
         "selected_products": products,
-        "source": expected_source,
+        "source_kind": source_kind,
         "message_types": [
             {
                 "code": rule.code,
@@ -610,7 +613,7 @@ def classification_catalog(*, products: list[str], is_official_source: bool) -> 
             if rule.code == "unknown"
             or (
                 bool(selected_products.intersection(rule.products))
-                and rule.source in {"any", expected_source}
+                and rule.source in disclosed_sources
             )
         ],
         "topics": [

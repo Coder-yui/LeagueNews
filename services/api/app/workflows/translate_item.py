@@ -81,6 +81,7 @@ async def build_translation(
     rules: list[str] | None = None,
 ) -> TranslationData:
     source_text = text_from_content_blocks(raw_item.content_blocks)
+    source_title = raw_item.native_title
     source_language = raw_item.language or detect_language(source_text)
     target_language = "zh-CN"
     blocks = [dict(block) for block in raw_item.content_blocks]
@@ -96,7 +97,7 @@ async def build_translation(
         return TranslationData(
             source_language=source_language,
             target_language=target_language,
-            translated_title=raw_item.display_title or "",
+            translated_title=source_title or "",
             translated_text="",
             translated_content_blocks=blocks,
             translated_media_extractions=[],
@@ -107,7 +108,7 @@ async def build_translation(
         return TranslationData(
             source_language=source_language,
             target_language=target_language,
-            translated_title=raw_item.display_title or "",
+            translated_title=source_title or "",
             translated_text=source_text,
             translated_content_blocks=blocks,
             translated_media_extractions=[
@@ -150,7 +151,7 @@ async def build_translation(
     previous_translation_tail = ""
     for chunk_index, chunk in enumerate(chunks):
         result = await client.translate(
-            title=raw_item.display_title,
+            title=source_title,
             text_blocks=chunk,
             source_language=source_language,
             target_language=target_language,
@@ -201,7 +202,7 @@ async def build_translation(
     return TranslationData(
         source_language=source_language,
         target_language=target_language,
-        translated_title=translated_title or raw_item.display_title or "",
+        translated_title=translated_title or source_title or "",
         translated_text="\n\n".join(translated_text_parts),
         translated_content_blocks=translated_blocks,
         translated_media_extractions=[

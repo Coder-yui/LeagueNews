@@ -601,7 +601,15 @@ def test_approving_message_analysis_moves_to_importance(
 
     async def fake_generate_importance_review(db, run):
         assert run.current_stage == "importance"
-        assert run.context["approved_message_analysis_proposal"] == content_proposal
+        assert run.context["approved_message_analysis_proposal"] == {
+            **content_proposal,
+            "classification_source": {
+                "current_source_kind": "unofficial",
+                "source_kind": "unofficial",
+                "basis": "current",
+                "upstream_source_url": None,
+            },
+        }
         run.status = "awaiting_review"
         db.commit()
 
@@ -684,7 +692,13 @@ def test_importance_stage_combines_filtered_classification_and_scoring(
                     "entities": [{"name": "26.17", "type": "patch"}],
                     "products": ["lol_pc"],
                     "content_form": "original",
-                    "classification_version": "message-taxonomy-v2",
+                    "classification_version": "message-taxonomy-v3",
+                    "classification_source": {
+                        "current_source_kind": "official",
+                        "source_kind": "official",
+                        "basis": "current",
+                        "upstream_source_url": None,
+                    },
                     "knowledge_rules": [],
                 },
             },
@@ -703,6 +717,7 @@ def test_importance_stage_combines_filtered_classification_and_scoring(
         )
         assert captured["products"] == ["lol_pc"]
         assert captured["content_form"] == "original"
+        assert captured["source_context"]["classification_source_kind"] == "official"
         assert review.proposal["message_type"] == "game_official_preview"
         assert review.proposal["topics"] == ["balance_gameplay", "champions"]
         assert review.proposal["importance_score"] == 0.86
@@ -751,6 +766,75 @@ def test_analysis_assembles_only_approved_stage_outputs() -> None:
     assert proposal["message_type"] == "game_official_preview"
     assert proposal["topics"] == ["balance_gameplay", "champions"]
     assert proposal["facets"]["relevance"]["decision"] == "relevant"
+
+
+@pytest.mark.parametrize(
+    ("content_form", "expected_title"),
+    [("media_only", "仅媒体消息"), ("link_only", "仅链接消息")],
+)
+def test_published_nonsemantic_message_uses_deterministic_title(
+    content_form: str,
+    expected_title: str,
+) -> None:
+    with _session() as db:
+        raw = _raw_item(
+            db,
+            native_title="",
+            content_blocks=[
+                {"type": "image", "source_url": "https://example.com/image.jpg"}
+                if content_form == "media_only"
+                else {
+                    "type": "embed",
+                    "embed_kind": "external_link",
+                    "source_url": "https://example.com/",
+                }
+            ],
+        )
+        proposal = reviewed_pipeline._build_item_proposal(
+            raw_item=raw,
+            translation_proposal={
+                "normalized_text": "",
+                "translated_title": "",
+                "translated_text": "",
+                "translated_content_blocks": raw.content_blocks,
+                "translation_status": "not_required",
+            },
+            analysis_proposal={
+                "title": "",
+                "summary": "",
+                "entities": [],
+                "products": ["unknown"],
+                "content_form": content_form,
+                "classification_version": "message-taxonomy-v3",
+                "classification_source": {
+                    "current_source_kind": "unofficial",
+                    "source_kind": "unofficial",
+                    "basis": "current",
+                    "upstream_source_url": None,
+                },
+            },
+            importance_proposal=None,
+        )
+        item = reviewed_pipeline._apply_normalized_item(db, raw, proposal)
+        db.commit()
+
+        assert item.normalized_title == expected_title
+        assert item.facets["classification_source"]["basis"] == "current"
+
+
+def test_media_message_preserves_explicit_analysis_title() -> None:
+    with _session() as db:
+        raw = _raw_item(
+            db,
+            native_title="原始明确标题",
+            content_blocks=[{"type": "image", "source_url": "https://example.com/a.jpg"}],
+        )
+        title = reviewed_pipeline._normalized_title(
+            raw_item=raw,
+            translation_proposal={"translated_title": "已有译文标题"},
+            analysis_proposal={"title": "分析明确标题", "content_form": "media_only"},
+        )
+        assert title == "分析明确标题"
 
 
 def test_source_authority_uses_sixty_for_tieba_and_one_hundred_for_official() -> None:

@@ -2,9 +2,9 @@
 
 > 状态：当前运行规则
 >
-> 存储版本：`message-taxonomy-v2`
+> 存储版本：`message-taxonomy-v3`
 >
-> 设计版本：Products v0.6 / Content Form v0.4 / Message Type v0.9 / Topics v0.2
+> 设计版本：Products v0.6 / Content Form v0.5 / Message Type v1.0 / Topics v0.2
 >
 > 本文是消息处理阶段的工作规则，不描述事件状态、事件聚合或消息可信度。
 
@@ -54,8 +54,8 @@
 | `original` | 发布者直接发布的原创消息，正文或标题包含可处理的语义内容。 | 正常完成分类和重要性计算。 |
 | `repost` | 转发或重新发布他人的消息，自身没有实质性新增内容。 | 继续处理；重要性档案分确定后扣 8 分，排序阶段不重复扣分。 |
 | `quote` | 发布者引用另一条消息，并附加自己的文字、判断或补充信息。 | 正常完成分类和重要性计算，同时保留引用关系。 |
-| `media_only` | 标题与正文都没有足够可读语义，只有图片、视频或其他媒体。标题是当前消息证据；若仅根据标题就能忠实概括消息的对象与事项、生成非空摘要，则已有可处理语义，不属于仅媒体。 | LLM 仍返回该内容形式，同时令其他语义分类全部为 `unknown`；不执行重要性模型，分数写为 0。 |
-| `link_only` | 只有链接或嵌入地址，没有成功提取到可读正文。 | LLM 仍返回该内容形式，同时令其他语义分类全部为 `unknown`；不执行重要性模型，分数写为 0。 |
+| `media_only` | 标题与正文都没有足够可读语义，只有图片、视频或其他媒体。标题是当前消息证据；若仅根据标题就能忠实概括消息的对象与事项、生成非空摘要，则已有可处理语义，不属于仅媒体。 | LLM 可返回空标题，其他语义分类全部为 `unknown`；不执行重要性模型，分数写为 0；发布前按确定性规则补标题。 |
+| `link_only` | 只有链接或嵌入地址，没有成功提取到可读正文。 | LLM 可返回空标题，其他语义分类全部为 `unknown`；不执行重要性模型，分数写为 0；发布前按确定性规则补标题。 |
 
 ### 处理顺序
 
@@ -63,7 +63,7 @@
 2. 相关性筛选和必要翻译完成后，内容分析调用同时判断 `products`、`content_form`，并提取标题、摘要和实体；该调用不接收消息类型或主题候选。
 3. 若 `content_form` 为 `media_only` 或 `link_only`，统一补全 `products=[unknown]`、`message_type=unknown`、`topics=[unknown]`，摘要和实体留空。
 4. 得到上述结果后跳过分类与重要性模型，以 0 分发布消息处理结果。
-5. `original`、`repost` 和 `quote` 进入下一次调用；运行时依据已批准的产品和信源披露消息类型、主题候选，并在同一次响应中提取重要性特征。
+5. `original`、`repost` 和 `quote` 进入下一次调用；运行时依据已批准的产品和下述分类信源披露消息类型、主题候选，并在同一次响应中提取重要性特征。
 
 ### 边界规则
 
@@ -72,6 +72,28 @@
 - 链接目标的正文已经被连接器成功提取时，不使用 `link_only`，应根据提取后的完整内容重新判断形式。
 - 标题与正文同属当前消息证据，不能因为正文只有图片就忽略明确标题。若仅根据标题就能忠实概括消息的对象与事项、生成非空摘要，应使用 `original`；只有标题和正文都无法提供可处理语义时才使用 `media_only`。
 - 当前系统没有通用图片或视频理解能力，因此不能根据媒体内容猜测产品、类型、主题或重要性；未来即使接入多模态模型，也仍由 LLM 产出内容形式和语义分类，不把内容形式写成模型调用前的固定门禁。
+- 真正无标题的 `media_only` / `link_only` 在内容分析与翻译阶段允许空标题；普通可处理消息仍必须有非空标题和摘要。最终标题优先级为：分析标题、译文标题、原始标题、内容形式占位标题、通用“未命名消息”。
+
+## Classification Source
+
+`content_form` 不是 `message_type`。尤其是 `repost` 只描述承载形式，不新增
+`reposted_patch_notes`、`official_repost` 等消息类型。运行时区分当前发布账号
+`current_source` 与消息承载内容的实际上游 `semantic_source`，并使用三态
+`source_kind=official|unofficial|unknown` 选择候选：
+
+- `original`：使用当前 Source，`basis=current`；
+- `quote`：使用当前 Source，`basis=current`，因为分类对象是发布者新增且可独立理解的表达；
+- `repost`：仅当 Connector 保存的原作者、转发/引用 URL 等结构化证据能与已配置 Source 或官方站点稳定匹配时，使用上游性质并记为 `basis=upstream`；
+- 上游无法稳定确认的 `repost`：使用 `source_kind=unknown`、`basis=unresolved`；
+- `media_only` / `link_only`：仍固定 `message_type=unknown`、`topics=[unknown]`，不从信源猜测语义。
+
+禁止根据正文语气、“Riot 表示”等文字或内容看起来像公告来推断官方上游，也不允许 LLM 自由输出
+上游是否官方。`unknown` 会按本文目录顺序披露适用产品下官方与非官方候选的去重并集，
+`unknown` message type 始终保留；它只是候选放宽，不产生任何“官方证据”结论。
+
+采用的依据保存在 `facets.classification_source`，字段为 `current_source_kind`、`source_kind`、
+`basis` 和可空的正常 `upstream_source_url`，同时进入处理提案与 checkpoint。这里的信息不是消息
+可信度，也不能证明某个事件获得官方确认。
 
 ## Message Type
 
@@ -225,7 +247,7 @@
 
 ### 渐进式披露选择规则
 
-内容分析调用先确定 `products`。分类与重要性调用只接收信源条件相符、且“适用 products”与已选产品至少有一项相交的候选。例如消息同时属于 `lol_pc` 和 `lol_esports` 且信源为官方时，候选是两组官方类型的并集，但最终仍只能输出一个消息类型。`unknown` 始终作为兜底候选。
+内容分析调用先确定 `products`。分类与重要性调用只接收分类信源条件相符、且“适用 products”与已选产品至少有一项相交的候选。例如消息同时属于 `lol_pc` 和 `lol_esports` 且分类信源为官方时，候选是两组官方类型的并集，但最终仍只能输出一个消息类型。分类信源未知时披露两侧候选并集；`unknown` 始终作为兜底候选。
 
 ### 共通约束
 

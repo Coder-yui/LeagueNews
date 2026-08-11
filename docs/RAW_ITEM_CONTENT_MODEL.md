@@ -130,9 +130,11 @@ API 的 `display_title` 是展示字段，不是数据库列：有 `native_title
 ## 5. 下游如何读取
 
 - 前端原文展示：直接遍历 `content_blocks`，这是完整内容的唯一事实来源。
-- 翻译：只翻译 `heading`、`paragraph`、`list.items` 和 `quote.text`，保持块 ID、顺序、图片和 embed 链接不变。
+- 翻译：标题输入只取明确的 `native_title`；正文只翻译 `heading`、`paragraph`、`list.items` 和 `quote.text`，保持块 ID、顺序、图片和 embed 链接不变。没有原始标题时允许译文标题为空。
 - 分析：调用 `text_from_content_blocks()` 生成当前文本视图。该规则可以以后独立调整，不需要迁移或改写 raw 数据。
-- 转发判断：检查是否存在 `embed_kind=quoted_post`，不读取平台私有 payload。
+- 转发形式判断：检查是否存在 `embed_kind=quoted_post`，不读取平台私有 payload。
+- 转发分类信源解析：可读取 Connector 已脱敏 provenance 中明确保存的转发/引用 URL，并结合
+  `quoted_post` embed 与现有 Source 配置稳定匹配；不得读取凭据或根据正文语气推断上游官方性。
 - 排障：需要核对平台响应时，单独查询 `raw_item_source_payloads`。
 
 ## 6. 不可变约束

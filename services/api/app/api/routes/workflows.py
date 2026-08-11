@@ -55,12 +55,24 @@ def _corrected_review_proposal(
         analysis = review.processing_run.context.get("approved_message_analysis_proposal")
         if not isinstance(analysis, dict):
             raise ValueError("importance 修正缺少已批准的消息内容分析")
+        classification_source = dict(analysis.get("classification_source") or {})
+        source_kind = str(classification_source.get("source_kind") or "")
+        if not source_kind:
+            source_kind = (
+                "unknown"
+                if str(analysis.get("content_form") or "") == "repost"
+                else "official"
+                if review.processing_run.raw_item.source.is_official
+                else "unofficial"
+            )
+        if source_kind not in {"official", "unofficial", "unknown"}:
+            source_kind = "unknown"
         error = classification_error(
             products=list(analysis.get("products") or []),
             content_form=str(analysis.get("content_form") or ""),
             message_type=str(proposal.get("message_type") or ""),
             topics=list(proposal.get("topics") or []),
-            is_official_source=review.processing_run.raw_item.source.is_official,
+            source_kind=source_kind,
         )
         if error:
             raise ValueError(error)

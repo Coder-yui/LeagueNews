@@ -53,20 +53,21 @@ LLM 输出 `relevant | irrelevant | uncertain`、置信度和理由。`irrelevan
 - 标准标题与摘要；
 - `products`、`content_form`；
 - 最多 8 个实体；
-- `classification_version=message-taxonomy-v2`。
+- `classification_version=message-taxonomy-v3`；分类信源三态依据随提案、checkpoint 和最终 facets 保存。
 
 产品尽量单选、最多 3 个。该调用不接收消息类型或主题目录，也不能提前输出这两个字段。
 `media_only` 或 `link_only` 固定输出 `products=[unknown]`，摘要和实体为空；流程在批准后直接
-补全 `message_type=unknown`、`topics=[unknown]`，不调用 importance 模型。
+补全 `message_type=unknown`、`topics=[unknown]`，不调用 importance 模型。真正没有标题时 LLM
+标题可以为空，发布前由程序补充“仅媒体消息”或“仅链接消息”。
 
 ### importance
 
-根据已批准的 `products`、`content_form` 和信源性质生成 `message_type` 与 `topics` 候选子集。
+根据已批准的 `products`、`content_form` 和三态分类信源生成 `message_type` 与 `topics` 候选子集。
 一次 LLM 调用从子集中选择消息类型和主题，同时提取有限的重要性特征；程序直接通过
 `message_type × topic family` 选择重要性档案并确定性算分。纯媒体和纯链接不进入本阶段，
 `message_type=unknown`、`topics=[unknown]` 且分数写为 0。
 
-`importance` 根据已批准的 `products` 和信源身份只向 LLM 暴露适用的 `message_type`、
+`importance` 根据已批准的 `products` 和分类信源只向 LLM 暴露适用的 `message_type`、
 `topics` 候选。评分不再生成 `primary_topic`、`subtopic` 或 `editorial_subtype` 等历史兼容字段；
 计算审计只记录从当前分类直接解析出的 `importance_profile`。
 

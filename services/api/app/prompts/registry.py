@@ -28,14 +28,14 @@ class PromptRegistry:
     _versions = {
         CLASSIFICATION_OPERATION: (
             "message-content-analysis",
-            "v6-title-summarizability",
+            "v7-empty-title-content-form",
         ),
         IMPORTANCE_SCORING_OPERATION: (
             "message-classification-importance",
-            "v13-community-promotion",
+            "v14-semantic-source-kind",
         ),
         RELEVANCE_OPERATION: ("relevance", "v3-lol-scope"),
-        TRANSLATION_OPERATION: ("translation", "v3-single-request"),
+        TRANSLATION_OPERATION: ("translation", "v4-optional-source-title"),
         KNOWLEDGE_ORGANIZATION_OPERATION: (
             "knowledge-organization",
             "v2-evaluation-gated",

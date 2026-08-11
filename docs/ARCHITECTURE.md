@@ -31,12 +31,19 @@ NormalizedItem 后结束；更高层聚合不属于当前运行时。
 
 - `products`：多选，尽量单选，最多 3 个；
 - `content_form`：单选；
-- `message_type`：单选，受产品与官方信源状态约束；
+- `message_type`：单选，受产品与本轮分类信源三态约束；
 - `topics`：多选，受产品约束；
-- `classification_version`：当前为 `message-taxonomy-v2`。
+- `classification_version`：当前为 `message-taxonomy-v3`。
+
+`original` 和 `quote` 使用当前 Source 的官方性质；`repost` 只在结构化 URL 能与已配置 Source
+稳定匹配时使用上游官方性质，否则使用 `unknown` 并披露官方、非官方候选并集。采用的
+`current_source_kind/source_kind/basis/upstream_source_url` 保存在消息分析与重要性提案、checkpoint
+以及最终 `facets.classification_source` 中。该分类信源只控制 message type 候选，不能证明事件获得
+官方确认。
 
 纯媒体或纯链接仍由 LLM 判断内容形式，但其他语义轴强制为 `unknown`，摘要和实体为空，重要性
-为 0。相关性在此之前完成，无关消息不会发布。
+为 0。LLM 可以为真正无标题的消息返回空标题；发布前由程序确定性补为“仅媒体消息”或
+“仅链接消息”。相关性在此之前完成，无关消息不会发布。
 
 ## 架构边界
 
@@ -87,7 +94,7 @@ NormalizedItem 后结束；更高层聚合不属于当前运行时。
 | `knowledge_rules` / `glossary_terms` | 分析规则与术语 |
 | `normalized_items` / `normalized_item_revisions` | 当前发布投影与历史 |
 
-最新迁移为 `061_update_importance_policy_v11.sql`。ORM、API 和工作流只访问上表列出的
+最新迁移为 `062_update_message_taxonomy_v3.sql`。ORM、API 和工作流只访问上表列出的
 当前运行时表；升级数据库可能保留迁移兼容对象，但它们不属于运行时模型，也不得绕过追加迁移
 直接修改。
 

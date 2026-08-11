@@ -56,8 +56,9 @@ def test_catalog_contract_and_source_specific_candidates() -> None:
     assert "Riftbound（裂界征伐）" in other_product
     assert "具体产品名" in other_product
 
-    official = classification_catalog(products=["lol_pc"], is_official_source=True)
-    unofficial = classification_catalog(products=["lol_pc"], is_official_source=False)
+    official = classification_catalog(products=["lol_pc"], source_kind="official")
+    unofficial = classification_catalog(products=["lol_pc"], source_kind="unofficial")
+    unresolved = classification_catalog(products=["lol_pc"], source_kind="unknown")
     assert [value["code"] for value in official["message_types"]] == [
         "game_patch_notes",
         "game_official_preview",
@@ -72,6 +73,10 @@ def test_catalog_contract_and_source_specific_candidates() -> None:
         "game_community_discussion",
         "game_community_promotion_interaction",
         "unknown",
+    ]
+    assert [value["code"] for value in unresolved["message_types"]] == [
+        *(item["code"] for item in official["message_types"] if item["code"] != "unknown"),
+        *(item["code"] for item in unofficial["message_types"]),
     ]
     assert "实质信息披露" in _message_definition(official, "game_official_preview")
     assert "可独立核验" in _message_definition(official, "game_announcement")
@@ -99,7 +104,7 @@ def test_content_form_validation_boundaries() -> None:
             content_form="media_only",
             message_type="unknown",
             topics=["unknown"],
-            is_official_source=False,
+            source_kind="unofficial",
         )
         is None
     )
@@ -108,7 +113,7 @@ def test_content_form_validation_boundaries() -> None:
         content_form="media_only",
         message_type="unknown",
         topics=["unknown"],
-        is_official_source=False,
+        source_kind="unofficial",
     ) == "纯媒体或纯链接消息的 products 必须为 unknown"
 
 
@@ -120,7 +125,7 @@ def test_classification_validation_boundaries() -> None:
                 "content_form": "original",
                 "message_type": "game_patch_notes",
                 "topics": ["balance_gameplay"],
-                "is_official_source": True,
+                "source_kind": "official",
             },
             None,
         ),
@@ -130,7 +135,7 @@ def test_classification_validation_boundaries() -> None:
                 "content_form": "original",
                 "message_type": "game_patch_notes",
                 "topics": ["balance_gameplay"],
-                "is_official_source": False,
+                "source_kind": "unofficial",
             },
             "message_type 不适用于当前信源性质",
         ),
@@ -140,7 +145,7 @@ def test_classification_validation_boundaries() -> None:
                 "content_form": "original",
                 "message_type": "game_patch_notes",
                 "topics": ["esports_matches"],
-                "is_official_source": True,
+                "source_kind": "official",
             },
             "message_type 不适用于所选 products",
         ),
@@ -150,7 +155,7 @@ def test_classification_validation_boundaries() -> None:
                 "content_form": "original",
                 "message_type": "game_announcement",
                 "topics": ["champions"],
-                "is_official_source": True,
+                "source_kind": "official",
             },
             "topic=champions 不适用于所选 products",
         ),
@@ -160,7 +165,7 @@ def test_classification_validation_boundaries() -> None:
         "content_form": "original",
         "message_type": "game_announcement",
         "topics": ["champions"],
-        "is_official_source": True,
+        "source_kind": "official",
     }
     cases.extend(
         [
@@ -179,7 +184,7 @@ def test_classification_validation_boundaries() -> None:
             content_form="original",
             message_type="game_promotion_interaction",
             topics=["activities_rewards"],
-            is_official_source=True,
+            source_kind="official",
         )
         is None
     )
@@ -188,15 +193,35 @@ def test_classification_validation_boundaries() -> None:
         content_form="original",
         message_type="game_promotion_interaction",
         topics=["activities_rewards"],
-        is_official_source=False,
+        source_kind="unofficial",
     ) == "message_type 不适用于当前信源性质"
+    assert (
+        classification_error(
+            products=["lol_pc"],
+            content_form="repost",
+            message_type="game_patch_notes",
+            topics=["balance_gameplay"],
+            source_kind="unknown",
+        )
+        is None
+    )
+    assert (
+        classification_error(
+            products=["lol_pc"],
+            content_form="repost",
+            message_type="game_community_discussion",
+            topics=["balance_gameplay"],
+            source_kind="unknown",
+        )
+        is None
+    )
     assert (
         classification_error(
             products=["lol_pc"],
             content_form="original",
             message_type="game_community_promotion_interaction",
             topics=["activities_rewards"],
-            is_official_source=False,
+            source_kind="unofficial",
         )
         is None
     )
@@ -205,7 +230,7 @@ def test_classification_validation_boundaries() -> None:
         content_form="original",
         message_type="game_community_promotion_interaction",
         topics=["activities_rewards"],
-        is_official_source=True,
+        source_kind="official",
     ) == "message_type 不适用于当前信源性质"
 
 

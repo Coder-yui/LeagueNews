@@ -42,7 +42,7 @@ def test_message_content_analysis_only_receives_first_stage_catalog() -> None:
             "entities": [{"name": "WBG", "type": "team", "canonical_name": "WBG"}],
             "products": ["lol_esports"],
             "content_form": "original",
-            "classification_version": "message-taxonomy-v2",
+            "classification_version": "message-taxonomy-v3",
         }
     )
     client, completions = _client_with_responses([response])
@@ -60,7 +60,8 @@ def test_message_content_analysis_only_receives_first_stage_catalog() -> None:
     assert result.products == ["lol_esports"]
     metadata = execution_metadata(result)
     assert metadata["prompt_name"] == "message-content-analysis"
-    assert metadata["prompt_version"] == "v6-title-summarizability"
+    assert metadata["prompt_version"] == "v7-empty-title-content-form"
+    assert metadata["json_schema_version"] == "MessageContentAnalysisResult:v2"
     messages = completions.calls[0]["messages"]
     assert isinstance(messages, list)
     assert "不判断消息类型、主题、重要性" in messages[0]["content"]
@@ -88,9 +89,62 @@ def test_media_only_forces_all_semantic_axes_to_unknown() -> None:
     assert result.entities == []
 
 
+@pytest.mark.parametrize("content_form", ["media_only", "link_only"])
+def test_nonsemantic_content_forms_allow_empty_title(content_form: str) -> None:
+    result = MessageContentAnalysisResult.model_validate(
+        {"title": "", "products": ["unknown"], "content_form": content_form}
+    )
+    assert result.title == ""
+
+
+def test_original_content_requires_title() -> None:
+    with pytest.raises(ValueError, match="可处理消息必须生成标题"):
+        MessageContentAnalysisResult.model_validate(
+            {
+                "title": "",
+                "summary": "有摘要",
+                "products": ["lol_pc"],
+                "content_form": "original",
+            }
+        )
+
+
+def test_translation_allows_empty_title_only_when_input_title_is_empty() -> None:
+    response = json.dumps(
+        {
+            "translated_title": "",
+            "translated_blocks": [],
+            "translated_media_extractions": [],
+        }
+    )
+    client, _ = _client_with_responses([response])
+    result = asyncio.run(
+        client.translate(title="", text_blocks=[], source_language="en")
+    )
+    assert result.translated_title == ""
+
+    client, _ = _client_with_responses([response, response])
+    with pytest.raises(LLMAnalysisError, match="translated_title"):
+        asyncio.run(
+            client.translate(title="Source title", text_blocks=[], source_language="en")
+        )
+
+
 def test_language_detection() -> None:
     assert detect_language("Patch preview and balance changes") == "en"
     assert detect_language("版本更新与英雄平衡调整") == "zh-CN"
+
+
+def test_media_without_source_title_keeps_translation_title_empty() -> None:
+    raw_item = SimpleNamespace(
+        language="unknown",
+        display_title="账号名称",
+        native_title=None,
+        content_blocks=[{"type": "image", "source_url": "https://example.com/a.jpg"}],
+    )
+    result = asyncio.run(build_translation(raw_item, media_extractions=[]))
+    assert result.translated_title == ""
+    assert result.translation_status == "not_required"
 
 
 def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch) -> None:
@@ -115,6 +169,7 @@ def test_chinese_post_still_translates_english_structured_patch_data(monkeypatch
     raw_item = SimpleNamespace(
         language="zh-CN",
         display_title="版本预览",
+        native_title="版本预览",
         content_blocks=[{"type": "paragraph", "text": "正文"}],
     )
     extraction = SimpleNamespace(
@@ -168,6 +223,7 @@ def test_long_article_translation_uses_contextual_chunks(monkeypatch) -> None:
     raw_item = SimpleNamespace(
         language="en",
         display_title="Patch 26.12 Notes",
+        native_title="Patch 26.12 Notes",
         content_blocks=[
             {"type": "heading", "level": 2, "text": "Champions"},
             {"type": "paragraph", "text": "first " + ("a" * 5_000)},

@@ -28,6 +28,7 @@ from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
+from app.services.classification_source import resolve_classification_source
 from app.services.llm import LLMClient, execution_metadata
 from app.services.media_publication import publish_raw_item_media
 from app.services.pipeline_execution import (
@@ -300,6 +301,14 @@ async def approve_review(
         db.commit()
         await _generate_translation_review(db, run, **_guard_kwargs(execution_guard))
     elif review.stage == MESSAGE_ANALYSIS_STAGE:
+        review.proposal = {
+            **review.proposal,
+            "classification_source": resolve_classification_source(
+                db,
+                run.raw_item,
+                content_form=str(review.proposal.get("content_form") or "original"),
+            ),
+        }
         run.context = {
             **run.context,
             "approved_message_analysis_proposal": review.proposal,
@@ -722,6 +731,11 @@ async def _generate_message_analysis_review(
         )
         proposal = {
             **analysis.model_dump(mode="json"),
+            "classification_source": resolve_classification_source(
+                db,
+                run.raw_item,
+                content_form=analysis.content_form,
+            ),
             "analysis_model": settings.model_name,
             "_execution_metadata": {
                 "message_analysis": execution_metadata(analysis),
@@ -753,6 +767,13 @@ async def _generate_importance_review(
         scoring_content = _importance_scoring_content(translation, analysis)
         products = list(analysis.get("products") or ["unknown"])
         content_form = str(analysis.get("content_form") or "original")
+        classification_source = dict(analysis.get("classification_source") or {})
+        if not classification_source:
+            classification_source = resolve_classification_source(
+                db,
+                run.raw_item,
+                content_form=content_form,
+            )
         assert_execution_owned(db, execution_guard)
         db.commit()
         client = LLMClient()
@@ -765,7 +786,13 @@ async def _generate_importance_review(
             },
             products=products,
             content_form=content_form,
-            source_context=_analysis_source_context(run),
+            source_context={
+                **_analysis_source_context(run),
+                "classification_source": classification_source,
+                "classification_source_kind": str(
+                    classification_source.get("source_kind") or "unknown"
+                ),
+            },
             knowledge_rules=_knowledge_texts_from_snapshot(
                 list(analysis.get("knowledge_rules") or [])
             ),
@@ -825,6 +852,7 @@ async def _generate_importance_review(
         proposal = {
             "message_type": message_type,
             "topics": topics,
+            "classification_source": classification_source,
             "importance_score": score,
             "importance_evidence": evidence,
             "importance_dimensions": dimensions,
@@ -875,7 +903,11 @@ def _build_item_proposal(
     }
     return {
         **translation_proposal,
-        "normalized_title": str(classification.get("title") or ""),
+        "normalized_title": _normalized_title(
+            raw_item=raw_item,
+            translation_proposal=translation_proposal,
+            analysis_proposal=classification,
+        ),
         "summary": str(classification.get("summary") or ""),
         "entities": normalize_entities(
             [
@@ -894,13 +926,16 @@ def _build_item_proposal(
         "facets": {
             "products": list(classification.get("products") or ["unknown"]),
             "message_type": str(importance.get("message_type") or "unknown"),
+            "classification_source": dict(
+                classification.get("classification_source") or {}
+            ),
             "evidence_gate": dict(evidence_gate or {}),
             "relevance": dict(relevance_proposal or {}),
         },
         **importance,
         "language": raw_item.language,
         "analysis_model": settings.model_name,
-        "analysis_version": "message-processing-v1",
+        "analysis_version": "message-processing-v1.1",
         "_execution_metadata": {
             **dict(classification.get("_execution_metadata") or {}),
             **dict(importance.get("_execution_metadata") or {}),
@@ -908,6 +943,26 @@ def _build_item_proposal(
         "knowledge_rules": knowledge_snapshot or [],
         "ocr_corrections": ocr_corrections or [],
     }
+
+
+def _normalized_title(
+    *,
+    raw_item: RawItem,
+    translation_proposal: dict[str, Any],
+    analysis_proposal: dict[str, Any],
+) -> str:
+    for candidate in (
+        analysis_proposal.get("title"),
+        translation_proposal.get("translated_title"),
+        raw_item.native_title,
+    ):
+        value = str(candidate or "").strip()
+        if value:
+            return value[:500]
+    return {
+        "media_only": "仅媒体消息",
+        "link_only": "仅链接消息",
+    }.get(str(analysis_proposal.get("content_form") or ""), "未命名消息")
 
 
 async def _generate_translation_review(

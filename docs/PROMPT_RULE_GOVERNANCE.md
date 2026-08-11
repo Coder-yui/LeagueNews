@@ -5,9 +5,9 @@
 生产 LLM operation 必须在 `app/prompts/registry.py` 注册。当前消息处理 operation：
 
 - `relevance`；
-- `translation / v3-single-request`；
-- `message-content-analysis / v6-title-summarizability`；
-- `message-classification-importance / v13-community-promotion`；
+- `translation / v4-optional-source-title`；
+- `message-content-analysis / v7-empty-title-content-form`；
+- `message-classification-importance / v14-semantic-source-kind`；
 - `knowledge-organization`。
 
 每次调用记录 prompt 名称、版本、hash、Schema、模型、输入 hash、响应元数据、usage、延迟和

@@ -3,7 +3,7 @@ import hashlib
 import os
 import time
 from collections.abc import Callable
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -23,6 +23,7 @@ from app.domain.message_taxonomy import (
     ContentForm as MessageContentForm,
     MessageType,
     Product,
+    SourceKind,
     Topic,
     TOPIC_ORDER,
     classification_catalog,
@@ -56,7 +57,7 @@ class ExtractedEntity(BaseModel):
 
 
 class MessageContentAnalysisResult(BaseModel):
-    title: str = Field(min_length=1, max_length=500)
+    title: str = Field(default="", max_length=500)
     summary: str = ""
     entities: list[ExtractedEntity] = Field(default_factory=list, max_length=8)
     products: list[Product] = Field(min_length=1, max_length=3)
@@ -71,11 +72,15 @@ class MessageContentAnalysisResult(BaseModel):
         )
         if error:
             raise ValueError(error)
+        self.title = self.title.strip()
         if self.content_form in {"media_only", "link_only"}:
             self.summary = ""
             self.entities = []
-        elif not self.summary.strip():
-            raise ValueError("可处理消息必须生成摘要")
+        else:
+            if not self.title:
+                raise ValueError("可处理消息必须生成标题")
+            if not self.summary.strip():
+                raise ValueError("可处理消息必须生成摘要")
         return self
 
 
@@ -133,7 +138,7 @@ class TranslatedMediaExtraction(BaseModel):
 
 
 class TranslationResult(BaseModel):
-    translated_title: str = Field(min_length=1, max_length=500)
+    translated_title: str = Field(default="", max_length=500)
     translated_blocks: list[TranslatedTextBlock] = Field(default_factory=list)
     translated_media_extractions: list[TranslatedMediaExtraction] = Field(default_factory=list)
 
@@ -211,8 +216,9 @@ class LLMClient:
    和正文都没有足够可读语义、只有未成功提取正文的链接。标题也是当前消息证据；不能因为正文只有
    图片就忽略标题。选择 media_only 前先判断仅根据标题能否忠实概括消息的对象与事项、生成非空
    摘要；如果可以，说明已有可处理语义，按 original 并输出摘要。
-3. media_only 或 link_only 时固定 products=[unknown]、summary 为空、entities 为空；不能根据媒体、
-   链接地址、账号或常识猜测内容，但必须使用标题中明确写出的语义。
+3. media_only 或 link_only 时固定 products=[unknown]、summary 为空、entities 为空；输入没有明确标题时
+   title 可以为空，禁止为了满足字段而编造标题；不能根据媒体、链接地址、账号或常识猜测内容，
+   但必须使用输入标题中明确写出的语义。
 4. unknown 与其他 product 互斥，products 按目录顺序输出。
 5. title 与 summary 使用简体中文。summary 忠实概括消息的主要事实、观点或提醒，不写重要性和可信度。
 6. entities 最多 8 个，只提取文本明确出现且有检索价值的实体。每项包含 name、type、canonical_name；
@@ -246,7 +252,17 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
         source_context: dict[str, object],
         knowledge_rules: list[str] | None = None,
     ) -> MessageClassificationImportanceResult:
-        is_official_source = bool(source_context.get("is_official_source"))
+        source_kind_value = source_context.get("classification_source_kind")
+        if source_kind_value not in {"official", "unofficial", "unknown"}:
+            legacy_official = source_context.get("is_official_source")
+            source_kind_value = (
+                "official"
+                if legacy_official is True
+                else "unofficial"
+                if legacy_official is False
+                else "unknown"
+            )
+        source_kind = cast(SourceKind, source_kind_value)
 
         def validate_classification(
             result: MessageClassificationImportanceResult,
@@ -256,10 +272,10 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                 content_form=content_form,
                 message_type=result.message_type,
                 topics=list(result.topics),
-                is_official_source=is_official_source,
+                source_kind=source_kind,
             )
 
-        prompt = """你是英雄联盟资讯编辑。已知产品、内容形式和信源性质；只从本次提供的
+        prompt = """你是英雄联盟资讯编辑。已知产品、内容形式和本轮确定的分类信源性质；只从本次提供的
 候选目录中选择一个 message_type 和一个或多个 topics，同时提取重要性规则需要的结构化特征。
 不重新判断 products/content_form，不输出最终分数，不判断可信度，也不评估行动紧迫性。
 最终分由程序按编辑政策确定性计算。输出严格 JSON。
@@ -268,6 +284,8 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 - message_type 必须且只能从 controlled_catalog.message_types 中单选。
 - topics 只能从 controlled_catalog.topics 中选择，只标消息实质讨论的领域，按候选目录顺序输出。
 - unknown 与同字段其他值互斥。不能输出未披露的 code。
+- classification_source 由程序根据当前发布者或可验证的上游来源确定。不得自行改判其官方性质；
+  source_kind=unknown 只表示同时披露两侧候选，不构成任何官方证据结论。
 - 非官方渠道的测试服（PBE）、测试服改动或 PBE 改动等未确认游戏信息优先考虑 game_leak。
 
 游戏官方公告、预览与推广互动的判断顺序：
@@ -315,7 +333,7 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                 "source_context": source_context,
                 "controlled_catalog": classification_catalog(
                     products=products,
-                    is_official_source=is_official_source,
+                    source_kind=source_kind,
                 ),
                 "approved_rules": knowledge_rules or [],
             },
@@ -407,6 +425,9 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             return None
 
         def validate_indexes(result: TranslationResult) -> str | None:
+            result.translated_title = result.translated_title.strip()
+            if (title or "").strip() and not result.translated_title:
+                return "输入标题非空时 translated_title 不能为空"
             actual_indexes = {block.index for block in result.translated_blocks}
             if actual_indexes != expected_indexes:
                 return (
@@ -478,6 +499,8 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             "document_context 仅用于保持全文术语、语气和标题一致，不是待翻译正文；"
             "只返回当前 text_blocks 中的 index。若 preferred_translated_title 非空，"
             "translated_title 必须沿用该标题。"
+            "输入 title 非空时必须忠实翻译且 translated_title 不能为空；输入 title 为空时"
+            "translated_title 可以为空，禁止编造标题。"
             "本阶段只翻译原始标题、正文块和图片结构化内容，不生成摘要、实体、分类或评分。"
         )
         return await self._validated_json_completion(
@@ -590,10 +613,14 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
         if "api.deepseek.com" in settings.openai_base_url:
             provider_options["extra_body"] = {"thinking": {"type": "disabled"}}
         output_schema = schema.model_json_schema()
+        schema_versions = {
+            "MessageContentAnalysisResult": "v2",
+            "TranslationResult": "v2",
+        }
         prompt_spec = prompt_registry.resolve(
             operation=operation,
             content=prompt,
-            schema_version=f"{schema.__name__}:v1",
+            schema_version=f"{schema.__name__}:{schema_versions.get(schema.__name__, 'v1')}",
         )
         schema_instruction = (
             "\n\n输出必须严格符合下面的 JSON Schema。所有 required 字段都必须出现，"

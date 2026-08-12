@@ -79,7 +79,6 @@ class EventRelatedMessageRead(BaseModel):
 class EventDetailRead(EventCardRead):
     latest_development: str
     key_facts: list[dict[str, Any]]
-    unresolved_points: list[dict[str, Any]]
     canonical_anchors: dict[str, Any]
     importance_breakdown: dict[str, Any]
     credibility_breakdown: dict[str, Any]

@@ -22,12 +22,14 @@ export async function adminApi<T>(path: string, options?: RequestInit): Promise<
 export async function getPublishedItemsPage(
   limit: number,
   offset: number,
+  featured = false,
 ): Promise<PublishedItemPage> {
   try {
     const params = new URLSearchParams({
       limit: String(limit),
       offset: String(offset),
     });
+    if (featured) params.set("featured", "true");
     const response = await fetch(`${apiUrl}/normalized-items/published-page?${params}`, {
       next: { revalidate: 30 },
     });
@@ -44,15 +46,15 @@ export async function getPublishedItemsPage(
   }
 }
 
-export async function getAllPublishedItems(): Promise<PublishedItemPage> {
+export async function getAllPublishedItems(featured = false): Promise<PublishedItemPage> {
   const pageSize = 100;
-  const firstPage = await getPublishedItemsPage(pageSize, 0);
+  const firstPage = await getPublishedItemsPage(pageSize, 0, featured);
   const offsets = Array.from(
     { length: Math.max(0, Math.ceil(firstPage.total / pageSize) - 1) },
     (_, index) => (index + 1) * pageSize,
   );
   const remainingPages = await Promise.all(
-    offsets.map((offset) => getPublishedItemsPage(pageSize, offset)),
+    offsets.map((offset) => getPublishedItemsPage(pageSize, offset, featured)),
   );
   return {
     ...firstPage,

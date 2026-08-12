@@ -95,7 +95,7 @@ Event 的粒度核心原则是：**独立生命周期 + 独立更新 + 用户认
 identity
   id, event_family, products[], canonical_anchors{}, aggregation_key
 presentation
-  title, current_summary, latest_development, key_facts[], unresolved_points[]
+  title, current_summary, latest_development, key_facts[]
 state
   lifecycle_status, first_seen_at, last_seen_at, last_material_update_at
 metrics

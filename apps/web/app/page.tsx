@@ -8,8 +8,14 @@ import Link from "next/link";
 import { MessageFeed } from "@/components/message-feed";
 import { getAllPublishedItems } from "@/lib/api";
 
-export default async function Home() {
-  const messagePage = await getAllPublishedItems();
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ featured?: string }>;
+}) {
+  const { featured: featuredParam } = await searchParams;
+  const featured = featuredParam === "true";
+  const messagePage = await getAllPublishedItems(featured);
   const items = messagePage.items;
   const topItem = items[0];
   const dateLabel = new Intl.DateTimeFormat("zh-CN", {
@@ -65,6 +71,10 @@ export default async function Home() {
           <div><span className="kicker">REVIEWED STREAM</span><h2>已审核消息</h2></div>
           <span>按原始发布时间排序</span>
         </div>
+        <nav className="event-category-tabs" aria-label="消息筛选">
+          <Link className={!featured ? "active" : ""} href="/">全部</Link>
+          <Link className={featured ? "active" : ""} href="/?featured=true">精选</Link>
+        </nav>
         <MessageFeed items={items} />
       </section>
 

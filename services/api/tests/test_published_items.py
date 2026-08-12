@@ -9,14 +9,21 @@ from app.api.routes.normalized_items import (
     _published_statement,
     list_normalized_items,
     list_published_items,
+    list_published_items_page,
 )
 from app.core.database import Base
+from app.domain.importance import is_featured_message
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.schemas.normalized_item import PublishedItemRead
+
+
+def test_featured_message_threshold_includes_boundary() -> None:
+    assert is_featured_message(0.75)
+    assert not is_featured_message(0.7499)
 
 
 def test_published_payload_combines_reviewed_item_source_and_bilingual_ocr() -> None:
@@ -297,3 +304,54 @@ def test_message_lists_only_include_latest_raw_revision() -> None:
         assert [item.id for item in list_normalized_items(db)] == [latest_item.id]
         assert [item["id"] for item in list_published_items(db)] == [latest_item.id]
         assert old_item.id != latest_item.id
+
+
+def test_published_page_featured_filter_preserves_normal_list() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Featured Source", connector_type="manual")
+        db.add(source)
+        db.flush()
+
+        for index, score in enumerate((0.75, 0.7499, 0.9), start=1):
+            raw = RawItem(
+                source_id=source.id,
+                external_id=f"featured-{index}",
+                native_title=f"Featured {index}",
+                content_blocks=[{"type": "paragraph", "text": f"Featured {index}"}],
+            )
+            db.add(raw)
+            db.flush()
+            db.add(
+                NormalizedItem(
+                    raw_item_id=raw.id,
+                    normalized_title=raw.native_title,
+                    normalized_text=raw.native_title,
+                    summary=raw.native_title,
+                    entities=[],
+                    products=["unknown"],
+                    message_type="unknown",
+                    topics=["unknown"],
+                    classification_version="message-taxonomy-v3",
+                    importance_score=score,
+                    target_language="zh-CN",
+                    translated_title=raw.native_title,
+                    translated_content_blocks=[],
+                    translation_status="not_required",
+                    analysis_model="test",
+                    analysis_version="test",
+                )
+            )
+        db.commit()
+
+        all_items = list_published_items_page(
+            db=db, limit=100, offset=0, sort_by="time", sort="desc"
+        )
+        featured_items = list_published_items_page(
+            db=db, featured=True, limit=100, offset=0, sort_by="time", sort="desc"
+        )
+
+        assert all_items["total"] == 3
+        assert featured_items["total"] == 2
+        assert {item["importance_score"] for item in featured_items["items"]} == {0.75, 0.9}

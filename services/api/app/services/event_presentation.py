@@ -180,7 +180,6 @@ def event_detail_payload(db: Session, event: Event) -> dict[str, Any]:
         **event_card_payload(db, event),
         "latest_development": event.latest_development,
         "key_facts": event.key_facts,
-        "unresolved_points": event.unresolved_points,
         "canonical_anchors": event.canonical_anchors,
         "importance_breakdown": event.importance_breakdown,
         "credibility_breakdown": event.credibility_breakdown,

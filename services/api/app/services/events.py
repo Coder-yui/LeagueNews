@@ -178,7 +178,6 @@ def create_event(
     lifecycle_status: str = "developing",
     latest_development: str = "",
     key_facts: list[dict[str, Any]] | None = None,
-    unresolved_points: list[dict[str, Any]] | None = None,
     aggregation_policy_version: str = AGGREGATION_POLICY_VERSION,
     commit: bool = True,
     use_savepoint: bool = True,
@@ -230,7 +229,6 @@ def create_event(
         last_material_update_at=(observed_at if materiality == "material_update" else None),
         latest_development=latest_development,
         key_facts=list(key_facts or []),
-        unresolved_points=list(unresolved_points or []),
         origin_message_id=item.id,
         latest_update_message_id=(item.id if materiality == "material_update" else None),
         aggregation_policy_version=aggregation_policy_version,
@@ -317,7 +315,6 @@ def add_event_mention(
     lifecycle_status: str | None = None,
     canonical_anchors: dict[str, Any] | None = None,
     key_facts: list[dict[str, Any]] | None = None,
-    unresolved_points: list[dict[str, Any]] | None = None,
     aggregation_policy_version: str = AGGREGATION_POLICY_VERSION,
     commit: bool = True,
     use_savepoint: bool = True,
@@ -401,8 +398,6 @@ def add_event_mention(
                 event.canonical_anchors = dict(canonical_anchors)
             if key_facts is not None:
                 event.key_facts = list(key_facts)
-            if unresolved_points is not None:
-                event.unresolved_points = list(unresolved_points)
             db.add(
                 EventRevision(
                     event_id=event.id,

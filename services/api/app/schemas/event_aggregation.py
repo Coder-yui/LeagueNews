@@ -35,16 +35,6 @@ class KeyFactChanges(BaseModel):
         return bool(self.add or self.replace or self.remove)
 
 
-class UnresolvedPointChanges(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    add: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
-    resolve: list[str] = Field(default_factory=list, max_length=8)
-
-    def has_changes(self) -> bool:
-        return bool(self.add or self.resolve)
-
-
 class CandidateRejection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -67,9 +57,6 @@ class EventMentionDecision(BaseModel):
     proposed_summary: str | None = None
     latest_development: str | None = None
     key_fact_changes: KeyFactChanges = Field(default_factory=KeyFactChanges)
-    unresolved_point_changes: UnresolvedPointChanges = Field(
-        default_factory=UnresolvedPointChanges
-    )
     importance: EventImportanceSemantics | None = None
     evidence_excerpt: str = Field(default="", max_length=2000)
     candidate_rejections: list[CandidateRejection] = Field(default_factory=list)
@@ -105,7 +92,6 @@ class EventMentionDecision(BaseModel):
             or self.proposed_summary is not None
             or self.latest_development is not None
             or self.key_fact_changes.has_changes()
-            or self.unresolved_point_changes.has_changes()
             or self.importance is not None
         ):
             raise ValueError("non-material mentions cannot change the event projection")

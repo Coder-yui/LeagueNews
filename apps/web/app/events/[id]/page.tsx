@@ -55,7 +55,6 @@ export default async function EventPage({ params }: { params: Promise<{ id: stri
         <section className="event-section"><span className="reader-label">LATEST DEVELOPMENT</span><p>{event.latest_development || "暂无新增进展。"}</p></section>
         <div className="event-two-columns">
           <section className="event-section"><h2>关键事实</h2><FactList values={event.key_facts} empty="尚无结构化关键事实。" /></section>
-          <section className="event-section"><h2>未决问题</h2><FactList values={event.unresolved_points} empty="当前没有未决问题。" /></section>
         </div>
 
         <section className="event-section">

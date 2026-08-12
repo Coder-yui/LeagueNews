@@ -168,7 +168,6 @@ def recall_event_candidates(
             "current_summary": event.current_summary,
             "latest_development": event.latest_development,
             "key_facts": event.key_facts,
-            "unresolved_points": event.unresolved_points,
             "lifecycle_status": event.lifecycle_status,
             "match_score": score,
             "match_reasons": reasons,

@@ -431,7 +431,7 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 2. relation 使用 reports/supports/confirms/denies/corrects/mentions。responsible_official 仅用于当前
    原创官方来源在其职责范围内的直接表述；官方账号转发别人不是官方确认。
 3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
-   进展、关键事实和未决点。普通佐证用 corroboration_only，重复用 duplicate，上下文用
+   进展和关键事实。普通佐证用 corroboration_only，重复用 duplicate，上下文用
    context_only，后三者不得改写事件投影。
 4. 每个 material mention 的 importance 必须针对该独立 Event 本体及其 event_family 选择兼容的受控
    profile；综合公告或赛事汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier

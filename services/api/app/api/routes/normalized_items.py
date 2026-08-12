@@ -5,6 +5,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
+from app.domain.importance import FEATURED_MESSAGE_MIN_IMPORTANCE
 from app.domain.message_taxonomy import MESSAGE_TYPE_ORDER, PRODUCTS, TOPIC_RULES
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
@@ -148,6 +149,7 @@ def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 @router.get("/published-page", response_model=PublishedItemPageRead)
 def list_published_items_page(
     message_type: str | None = None,
+    featured: bool = False,
     search: str | None = None,
     sort_by: str = Query(default="time", pattern="^(time|priority|intrinsic)$"),
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
@@ -161,6 +163,8 @@ def list_published_items_page(
     ]
     if message_type:
         conditions.append(NormalizedItem.message_type == message_type)
+    if featured:
+        conditions.append(NormalizedItem.importance_score >= FEATURED_MESSAGE_MIN_IMPORTANCE)
     if search:
         search_value = search.strip()
         if search_value.isdigit():

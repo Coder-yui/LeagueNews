@@ -72,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "064_add_requested_sources.sql"
+    assert files[-1].name == "065_remove_event_unresolved_points.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -138,3 +138,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     assert "'腾讯英雄联盟赛事官网（LPL）'" in requested_sources
     assert "'{\"target\": \"25\"}'::json" in requested_sources
     assert "'064_add_requested_sources'" in requested_sources
+
+    unresolved_points = (MIGRATIONS / "065_remove_event_unresolved_points.sql").read_text()
+    assert "DROP COLUMN IF EXISTS unresolved_points" in unresolved_points
+    assert "'065_remove_event_unresolved_points'" in unresolved_points

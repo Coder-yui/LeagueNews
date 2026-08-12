@@ -8,6 +8,11 @@ from app.domain.message_taxonomy import MESSAGE_TYPES, TOPICS, MessageType, Topi
 
 
 IMPORTANCE_POLICY_VERSION: Final = "importance-v11-repost-weekly-rotation"
+FEATURED_MESSAGE_MIN_IMPORTANCE: Final = 0.75
+
+
+def is_featured_message(score: float) -> bool:
+    return score >= FEATURED_MESSAGE_MIN_IMPORTANCE
 
 ImportanceScale = Literal["minor", "standard", "major"]
 CompetitionRegion = Literal["none", "lpl", "lck", "international", "other"]

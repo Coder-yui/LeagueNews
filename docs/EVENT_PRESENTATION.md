@@ -33,7 +33,7 @@ EventCard
 
 EventDetail
   EventCard fields
-  latest_development, key_facts[], unresolved_points[]
+  latest_development, key_facts[]
   timeline[]
   evidence_groups{reports, supports, confirms, denies, corrects, mentions}
   related_messages[]
@@ -56,13 +56,12 @@ EventDetail
 
 ## 摘要与当前状态
 
-- `title/current_summary/key_facts/unresolved_points/latest_development` 只在创建或
+- `title/current_summary/key_facts/latest_development` 只在创建或
   `material_update` 时应用同一次模型响应中的 proposed changes。
 - `corroboration_only` 可以改变可信度与证据列表；`duplicate/context_only` 可以改变热度和相关
   消息列表；三者都不能重写摘要。
 - 任何变更都写入 `EventRevision` 快照，包含触发 mention、旧值和新值。
 - `current_summary` 描述当前结论，不保留已被否认的断言；历史断言仍可在 timeline/evidence 审计。
-- `unresolved_points` 必须可以显式 resolve，不能通过整段摘要替换悄悄消失。
 
 ## 时间线
 

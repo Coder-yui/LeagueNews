@@ -166,7 +166,6 @@ event_title: string | null
 proposed_summary: string | null
 latest_development: string | null
 key_fact_changes: {add[], replace[], remove[]}
-unresolved_point_changes: {add[], resolve[]}
 importance: {profile, scale?, competition_region?, prominence?, skin_tier?, is_bulk_update?}
 evidence_excerpt: string
 candidate_rejections: [{event_id, reason}]

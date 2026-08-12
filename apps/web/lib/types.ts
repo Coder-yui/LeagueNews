@@ -223,7 +223,6 @@ export type EventRelatedMessage = {
 export type EventDetail = EventCard & {
   latest_development: string;
   key_facts: Array<Record<string, unknown>>;
-  unresolved_points: Array<Record<string, unknown>>;
   canonical_anchors: Record<string, unknown>;
   importance_breakdown: Record<string, unknown>;
   credibility_breakdown: Record<string, unknown>;

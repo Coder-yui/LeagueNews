@@ -267,19 +267,6 @@ def _apply_fact_changes(
     return list(values.values())
 
 
-def _apply_unresolved_changes(
-    current: list[dict[str, Any]], changes: dict[str, Any]
-) -> list[dict[str, Any]]:
-    values = {_fact_identity(value): dict(value) for value in current}
-    for identity in changes.get("resolve", []):
-        values.pop(str(identity), None)
-        for key in [key for key in values if key.endswith(f":{identity}")]:
-            values.pop(key, None)
-    for value in changes.get("add", []):
-        values.setdefault(_fact_identity(value), dict(value))
-    return list(values.values())
-
-
 async def aggregate_normalized_item(
     db: Session,
     item: NormalizedItem,
@@ -394,7 +381,6 @@ async def aggregate_normalized_item(
                     "daily match reminders/results may only create or update concrete esports_match events"
                 )
             fact_changes = decision.key_fact_changes.model_dump(mode="json")
-            unresolved_changes = decision.unresolved_point_changes.model_dump(mode="json")
             claim_fingerprint = _fingerprint(
                 {
                     "family": decision.event_family,
@@ -438,7 +424,6 @@ async def aggregate_normalized_item(
                         content_fingerprint=claim_fingerprint,
                         latest_development=decision.latest_development or "",
                         key_facts=list(decision.key_fact_changes.add),
-                        unresolved_points=list(decision.unresolved_point_changes.add),
                         commit=False,
                         use_savepoint=False,
                     )
@@ -467,9 +452,6 @@ async def aggregate_normalized_item(
                         key_facts=_apply_fact_changes(
                             existing_event.key_facts, fact_changes
                         ),
-                        unresolved_points=_apply_unresolved_changes(
-                            existing_event.unresolved_points, unresolved_changes
-                        ),
                         commit=False,
                         use_savepoint=False,
                     )
@@ -496,9 +478,6 @@ async def aggregate_normalized_item(
                     latest_development=decision.latest_development,
                     canonical_anchors=merged_anchors,
                     key_facts=_apply_fact_changes(event.key_facts, fact_changes),
-                    unresolved_points=_apply_unresolved_changes(
-                        event.unresolved_points, unresolved_changes
-                    ),
                     commit=False,
                     use_savepoint=False,
                 )

@@ -43,7 +43,6 @@ class Event(Base):
 
     latest_development: Mapped[str] = mapped_column(Text, default="")
     key_facts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    unresolved_points: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     lifecycle_status: Mapped[str] = mapped_column(
         String(40), default="developing", index=True
     )

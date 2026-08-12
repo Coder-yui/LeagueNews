@@ -19,6 +19,7 @@ from app.models.event import Event, EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.schemas.event import EventDetailRead
 from app.schemas.event_aggregation import EventAggregationResult
 from app.services.event_candidates import recall_event_candidates
 from app.services.events import create_event
@@ -618,6 +619,9 @@ def test_event_category_mapping_is_centralized(
 
 
 def test_structured_output_rejects_nonmaterial_rewrites_and_bad_indexes() -> None:
+    assert "unresolved_points" not in Event.__table__.columns
+    assert "unresolved_points" not in EventDetailRead.model_fields
+
     with pytest.raises(ValidationError, match="non-material mentions"):
         EventAggregationResult.model_validate(
             {

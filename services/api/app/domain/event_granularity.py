@@ -4,8 +4,13 @@ from app.models.normalized_item import NormalizedItem
 
 
 _ROUNDUP_MARKERS = re.compile(
-    r"(?:今日|今天|今晚|明日|明天|本日|今日赛程|今日赛果|比赛预告|比赛结果|赛前|赛后|"
-    r"today(?:'s)?|tonight|daily|matchday|results? summary|daily summary)",
+    r"(?:"
+    r"(?:今日|今天|今晚|明日|明天|本日)[^。\n]{0,20}(?:赛程|赛果|比赛(?:安排|结果|汇总)|赛事汇总|[一二三四五六七八九十\d]+\s*场比赛|多场比赛)"
+    r"|(?:赛程|赛果|比赛|赛事)\s*(?:汇总|合集|一览|速报)"
+    r"|(?:daily|today(?:'s)?|matchday)\s+(?:matches?|results?|schedule|fixtures?)"
+    r"|(?:matches?|results?)\s+(?:summary|roundup)"
+    r"|schedule\s+roundup"
+    r")",
     re.IGNORECASE,
 )
 _SCHEDULE_CHANGE_MARKERS = re.compile(
@@ -13,32 +18,58 @@ _SCHEDULE_CHANGE_MARKERS = re.compile(
     r"reschedul(?:e|ed)|postpon(?:e|ed)|moved|rematch|venue change|format change|bo[345])",
     re.IGNORECASE,
 )
-_MATCH_PAIR_MARKERS = re.compile(
-    r"(?:\bvs\.?\b|\bv\.?\b|对阵|对战|迎战|交手|对决)", re.IGNORECASE
+_MATCH_PAIR_PATTERN = re.compile(
+    r"(?P<left>[A-Za-z0-9][A-Za-z0-9 ._'’-]{0,35}|[\u4e00-\u9fff]{1,12})"
+    r"(?:\s+vs\.?\s+|\s+v\.?\s+|\s*对阵\s*|\s*对战\s*|\s*迎战\s*|\s*交手\s*|\s*对决\s*)"
+    r"(?P<right>[A-Za-z0-9][A-Za-z0-9 ._'’-]{0,35}|[\u4e00-\u9fff]{1,12})",
+    re.IGNORECASE,
 )
-_SCORE_MARKER = re.compile(r"\b\d+\s*[-:：]\s*\d+\b")
+_MATCH_SCORE_PATTERN = re.compile(
+    r"(?P<left>[A-Za-z][A-Za-z0-9 ._'’-]{0,35})\s*"
+    r"(?P<score>[0-3]\s*[-:：]\s*[0-3])\s*"
+    r"(?P<right>[A-Za-z][A-Za-z0-9 ._'’-]{0,35})",
+    re.IGNORECASE,
+)
 
 
 def _item_text(item: NormalizedItem) -> str:
-    return "\n".join(
-        value
-        for value in (
-            item.normalized_title,
-            item.normalized_text,
+    """Use one canonical text representation so translated copies do not double-count signals."""
+    primary = [item.normalized_title, item.normalized_text]
+    if not any(isinstance(value, str) and value.strip() for value in primary):
+        primary = [
             item.summary,
             item.translated_title,
             item.translated_text,
-        )
-        if isinstance(value, str) and value.strip()
-    )
+        ]
+    parts: list[str] = []
+    seen: set[str] = set()
+    for value in primary:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if normalized and normalized not in seen:
+            parts.append(normalized)
+            seen.add(normalized)
+    return "\n".join(parts)
+
+
+def _match_key(left: str, right: str) -> tuple[str, str]:
+    first = re.sub(r"\s+", " ", left).strip().casefold()
+    second = re.sub(r"\s+", " ", right).strip().casefold()
+    return (first, second) if first <= second else (second, first)
 
 
 def explicit_match_count(item: NormalizedItem) -> int:
     text = _item_text(item)
-    pair_count = len(_MATCH_PAIR_MARKERS.findall(text))
-    score_count = len(_SCORE_MARKER.findall(text))
-    team_count = sum(1 for entity in item.entities if entity.get("type") == "team")
-    return max(pair_count, score_count, team_count // 2)
+    structures = {
+        _match_key(match.group("left"), match.group("right"))
+        for match in _MATCH_PAIR_PATTERN.finditer(text)
+    }
+    structures.update(
+        _match_key(match.group("left"), match.group("right"))
+        for match in _MATCH_SCORE_PATTERN.finditer(text)
+    )
+    return len(structures)
 
 
 def is_daily_match_roundup(item: NormalizedItem) -> bool:

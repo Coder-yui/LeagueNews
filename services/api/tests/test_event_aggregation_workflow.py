@@ -13,7 +13,7 @@ from app.domain.event_families import (
     canonicalize_event_anchors,
     has_complete_mythic_shop_identity,
 )
-from app.domain.event_granularity import is_daily_match_roundup
+from app.domain.event_granularity import explicit_match_count, is_daily_match_roundup
 from app.domain.importance import score_importance_profile
 from app.models.event import Event, EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
@@ -387,6 +387,85 @@ def test_daily_match_roundup_hint_excludes_schedule_summary() -> None:
         )
         assert is_daily_match_roundup(roundup)
         assert not is_daily_match_roundup(postponed)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Dplus Kia 对阵 GenG 的 LCK 比赛预告 19:00",
+        "T1 Home Ground ticket information: opening daily at 14:00",
+        "T1 vs Gen.G tickets: 17:00, presale 14:00, general sale 14:00",
+    ],
+)
+def test_single_match_or_ticket_times_are_not_daily_roundups(title: str) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Precision roundup source")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id=title[:20],
+            title=title,
+            message_type="esports_announcement",
+            topics=["esports_schedule"],
+            entities=[
+                {"type": "team", "canonical_id": "team:t1"},
+                {"type": "team", "canonical_id": "team:geng"},
+            ],
+            products=["lol_esports"],
+        )
+        assert explicit_match_count(item) <= 1
+        assert not is_daily_match_roundup(item)
+
+
+def test_duplicate_normalized_and_translated_match_text_counts_once() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Duplicate text source")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="duplicate-match-text",
+            title="今天比赛 A vs B",
+            message_type="esports_announcement",
+            topics=["esports_schedule"],
+            entities=[],
+            products=["lol_esports"],
+        )
+        item.normalized_text = "今天比赛 A vs B"
+        item.translated_text = "今天比赛 A vs B"
+        assert explicit_match_count(item) == 1
+        assert not is_daily_match_roundup(item)
+
+
+def test_team_entities_do_not_imply_multiple_matches() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Entity precision source")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="team-entities-one-match",
+            title="A vs B 19:00",
+            message_type="esports_announcement",
+            topics=["esports_schedule"],
+            entities=[
+                {"type": "team", "canonical_id": value}
+                for value in ("team:a", "team:b", "team:c", "team:d")
+            ],
+            products=["lol_esports"],
+        )
+        assert explicit_match_count(item) == 1
+        assert not is_daily_match_roundup(item)
 
 
 class DailyRoundupScheduleClient:
@@ -1180,3 +1259,53 @@ def test_strong_anchor_conflict_prevents_similar_event_merge() -> None:
         )
 
         assert candidates == []
+
+
+@pytest.mark.parametrize(
+    ("message_products", "event_products", "expected"),
+    [
+        (["other_lol_product"], ["lol_pc"], False),
+        (["lol_pc"], ["other_lol_product"], False),
+        (["lol_pc", "other_lol_product"], ["lol_pc"], True),
+        (["unknown"], ["lol_pc"], True),
+    ],
+)
+def test_candidate_recall_respects_explicit_product_domains(
+    message_products: list[str], event_products: list[str], expected: bool
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Product boundary source", reliability_score=0.8)
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id=f"message-{message_products}",
+            title="命名内容发布",
+            message_type="other_lol_product_announcement",
+            topics=["gameplay"],
+            entities=[{"type": "product", "canonical_id": "product:demo"}],
+            products=message_products,
+        )
+        db.commit()
+        create_event(
+            db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="gameplay_release",
+            products=event_products,
+            canonical_anchors={"product": "product:demo"},
+            aggregation_key=f"product-boundary-{message_products}-{event_products}",
+            title="命名内容发布",
+            current_summary="内容已发布。",
+            domain_importance_snapshot=_snapshot("gameplay_announcement"),
+        )
+        candidates = recall_event_candidates(
+            db,
+            item=item,
+            family_hints=["gameplay_release"],
+            anchors={"product": "product:demo"},
+        )
+        assert bool(candidates) is expected

@@ -22,6 +22,8 @@ EVENT_FAMILY_IMPORTANCE_PROFILES: Final[dict[EventFamily, frozenset[str]]] = {
             "gameplay_guide",
             "game_discussion",
             "tft_announcement",
+            "other_product_announcement",
+            "other_product_leak",
         }
     ),
     "gameplay_release": frozenset(
@@ -38,6 +40,8 @@ EVENT_FAMILY_IMPORTANCE_PROFILES: Final[dict[EventFamily, frozenset[str]]] = {
             "leak_content",
             "gameplay_guide",
             "game_discussion",
+            "other_product_announcement",
+            "other_product_leak",
         }
     ),
     "cosmetic_release": frozenset(
@@ -50,6 +54,9 @@ EVENT_FAMILY_IMPORTANCE_PROFILES: Final[dict[EventFamily, frozenset[str]]] = {
             "activity_free_skin",
             "leak_content",
             "leak_general",
+            "other_product_announcement",
+            "other_product_promotion",
+            "other_product_leak",
         }
     ),
     "player_activity": frozenset(
@@ -62,6 +69,9 @@ EVENT_FAMILY_IMPORTANCE_PROFILES: Final[dict[EventFamily, frozenset[str]]] = {
             "activity_free_skin",
             "leak_content",
             "leak_general",
+            "other_product_announcement",
+            "other_product_promotion",
+            "other_product_leak",
         }
     ),
     "commercial_offer": frozenset(
@@ -82,6 +92,8 @@ EVENT_FAMILY_IMPORTANCE_PROFILES: Final[dict[EventFamily, frozenset[str]]] = {
             "service_notice",
             "community_service_notice",
             "game_announcement_general",
+            "other_product_announcement",
+            "other_product_leak",
         }
     ),
     "security_enforcement": frozenset(
@@ -157,6 +169,7 @@ EVENT_FAMILY_IMPORTANCE_PROFILES: Final[dict[EventFamily, frozenset[str]]] = {
             "riot_announcement",
             "riot_discussion",
             "other_product_announcement",
+            "other_product_leak",
         }
     ),
     "other_named_development": frozenset(SCORE_BANDS),

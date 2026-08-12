@@ -377,12 +377,19 @@ def test_event_importance_profile_compatibility_guard_accepts_valid_combination(
     assert is_importance_profile_compatible("esports_match", "worlds_key")
 
 
+def test_other_product_gameplay_release_profile_is_compatible() -> None:
+    assert is_importance_profile_compatible(
+        "gameplay_release", "other_product_announcement"
+    )
+
+
 @pytest.mark.parametrize(
     ("event_family", "profile"),
     [
         ("gameplay_balance", "worlds_key"),
         ("cosmetic_release", "patch_official_notes"),
         ("esports_match", "cosmetic_announcement"),
+        ("esports_match", "other_product_announcement"),
     ],
 )
 def test_event_importance_profile_compatibility_guard_rejects_mismatch(

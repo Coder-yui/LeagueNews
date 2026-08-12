@@ -57,6 +57,7 @@ STRONG_ANCHOR_KEYS: Final = frozenset(
         "league",
         "game_mode",
         "champion",
+        "product",
     }
 )
 

@@ -426,7 +426,8 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 规则：
 1. action=create 仅在存在稳定身份锚点且没有同一真实候选时使用；逐一填写同 family 强候选的
    candidate_rejections。action=update 必须引用提供的 candidate_event_id。admission_decision 为
-   update_existing_only 时只能 update 或 ignore。
+   update_existing_only 时只能 update 或 ignore；没有足够可靠的候选时必须 ignore，不能因为
+   hashtags、实体提及或背景旁支而创建事件。
 2. relation 使用 reports/supports/confirms/denies/corrects/mentions。responsible_official 仅用于当前
    原创官方来源在其职责范围内的直接表述；官方账号转发别人不是官方确认。
 3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
@@ -447,6 +448,8 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 8. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
    英雄、皮肤系列、战队、选手、比赛、赛区或时间范围；不得虚构。
 9. mention_index 从 0 连续递增。一个响应可以同时更新多个事件、创建其他事件并忽略非独立内容。
+   discussion、preview、commentary 若没有新的可核验状态变化应 ignore；消息主体之外的旁支话题
+   若没有独立新事实也应 ignore。
 只输出符合 schema 的 JSON。"""
         return await self._validated_json_completion(
             prompt=prompt,

@@ -30,6 +30,16 @@ FAMILY_WINDOWS_DAYS: Final[dict[str, int]] = {
 }
 
 _WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
+_PRODUCT_DOMAINS = frozenset(
+    {
+        "lol_pc",
+        "tft",
+        "lol_esports",
+        "lol_universe",
+        "other_lol_product",
+        "riot_ecosystem",
+    }
+)
 
 
 def _tokens(value: str) -> set[str]:
@@ -72,6 +82,15 @@ def _event_time(event: Event) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _products_conflict(message_products: set[str], event_products: set[str]) -> bool:
+    """Reject candidates from a different explicit product domain."""
+    message_domains = message_products & _PRODUCT_DOMAINS
+    event_domains = event_products & _PRODUCT_DOMAINS
+    if not message_domains or not event_domains:
+        return False
+    return not message_domains.intersection(event_domains)
+
+
 def recall_event_candidates(
     db: Session,
     *,
@@ -102,6 +121,9 @@ def recall_event_candidates(
     }
     for event in events:
         if event.event_family not in ranked_by_family:
+            continue
+        event_product_set = set(event.products)
+        if _products_conflict(product_set, event_product_set):
             continue
         anchor_points, reasons, conflict = _anchor_score(anchors, event.canonical_anchors)
         if conflict:

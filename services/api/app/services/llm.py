@@ -2,6 +2,7 @@ import json
 import hashlib
 import os
 import time
+from datetime import datetime
 from collections.abc import Callable
 from typing import Literal, TypeVar, cast
 from urllib.parse import urlsplit
@@ -36,6 +37,8 @@ from app.domain.event_families import (
     canonicalize_event_anchors,
     determine_mythic_shop_market,
     has_complete_mythic_shop_identity,
+    is_mythic_shop_event,
+    mythic_shop_rotation_period_from_date,
 )
 from app.domain.event_importance import is_importance_profile_compatible
 from app.prompts import prompt_registry
@@ -361,6 +364,33 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
     ) -> EventAggregationResult:
         candidate_by_id = {int(candidate["event_id"]): candidate for candidate in candidates}
 
+        def mythic_shop_expected_identity(
+            message: dict[str, object],
+        ) -> tuple[str, str] | None:
+            """Return (market, rotation_period) for the current message, or None if unknown."""
+            source = message.get("source")
+            if not isinstance(source, dict):
+                return None
+            market = determine_mythic_shop_market(
+                text="\n".join(
+                    str(message.get(key) or "") for key in ("title", "content")
+                ),
+                structured_data=message.get("structured_media"),
+                source_connector_type=source.get("connector_type"),
+            )
+            if market not in {"CN", "GLOBAL"}:
+                return None
+            observed_raw = source.get("published_at") or source.get("ingested_at")
+            observed: datetime | None = None
+            if isinstance(observed_raw, str) and observed_raw.strip():
+                try:
+                    observed = datetime.fromisoformat(observed_raw.replace("Z", "+00:00"))
+                except ValueError:
+                    observed = None
+            if observed is None:
+                return None
+            return market, mythic_shop_rotation_period_from_date(observed.date())
+
         def validate_event_decisions(result: EventAggregationResult) -> str | None:
             guidance = message.get("editorial_granularity_guidance") or []
             daily_match_roundup = "daily_esports_match_roundup" in guidance
@@ -417,6 +447,30 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                         return f"update 只能指向输入候选：{mention.candidate_event_id}"
                     if candidate.get("event_family") != mention.event_family:
                         return "update 的 event_family 必须与候选一致"
+                    candidate_anchors = candidate.get("canonical_anchors") or {}
+                    if (
+                        mention.event_family == "commercial_offer"
+                        and is_mythic_shop_event(mention.event_family, candidate_anchors)
+                    ):
+                        expected = mythic_shop_expected_identity(message)
+                        if expected is not None:
+                            expected_market, expected_period = expected
+                            normalized_candidate = canonicalize_event_anchors(
+                                mention.event_family, candidate_anchors
+                            )
+                            if (
+                                normalized_candidate.get("market") != expected_market
+                                or normalized_candidate.get("rotation_period")
+                                != expected_period
+                            ):
+                                return (
+                                    "mythic shop update 只能命中相同 market 和 rotation week 的候选："
+                                    f"候选={normalized_candidate.get('market')}/"
+                                    f"{normalized_candidate.get('rotation_period')}，"
+                                    f"当前消息={expected_market}/{expected_period}。"
+                                    "请改为 create 当前正确 identity 的新 Event；"
+                                    "若 admission 为 update_existing_only，则 ignore，不能 create"
+                                )
                 if mention.action == "create":
                     strong_ids = {
                         int(candidate["event_id"])
@@ -459,10 +513,12 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
    profile；综合公告或赛事汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier
    features；非 material mention 不填写 importance。不要输出分数。
 5. 神话商店轮换以周为周期、按市场区分，作为一个 commercial_offer Event；轮换中的至臻、臻彩、
-   普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 至少表达
-   {"shop":"mythic_shop", "market":"CN 或 GLOBAL", "rotation_period":"必填"}。系统会用该条消息的
-   发布日期所对应的自然周统一覆盖 rotation_period，因此同一市场同一周期（同一周）的消息会被聚为
-   同一事件并 update，不同市场或不同周必须分开；你只需给出可靠的市场和周期值，不必纠结周格式。
+   普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 表达
+   {"shop":"mythic_shop", "market":"CN 或 GLOBAL", "rotation_period":"占位"}；rotation_period 由系统
+   按该条消息发布日期所在自然周统一覆盖，你无需精确推算周数，只需给可靠的市场。
+   神话商店只能 update 与当前消息相同 market + 相同 rotation week 的候选；若候选属于其他市场或
+   其他周，create_or_update 应 create 当前正确 identity 的新 Event，update_existing_only 下应
+   ignore，绝不能为了完成 update 而去错误绑定其他市场/周的候选。
 6. 普通电竞比赛按每场真实比赛一个 esports_match Event。每日赛前预告、赛后结果汇总只能分别
    mention/update 对应比赛；不要创建 Daily Preview、Daily Schedule、Daily Summary 或 Results Summary
    Event。只有正式公布未知赛程、延期、提前、重赛、场地/对阵/赛制变化才是 esports_schedule。

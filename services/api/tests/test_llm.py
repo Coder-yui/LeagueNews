@@ -409,6 +409,99 @@ def test_event_importance_profile_compatibility_guard_rejects_mismatch(
         )
 
 
+def _mythic_candidate(event_id: int = 99) -> dict[str, object]:
+    return {
+        "event_id": event_id,
+        "event_family": "commercial_offer",
+        "products": ["lol_pc"],
+        "canonical_anchors": {
+            "shop": "mythic_shop",
+            "market": "GLOBAL",
+            "rotation_period": "2026-w32",
+        },
+        "title": "Mythic Shop rotation",
+        "current_summary": "本周神话商城轮换。",
+        "latest_development": "",
+        "key_facts": [],
+        "lifecycle_status": "active",
+        "match_score": 70,
+        "match_reasons": ["family", "anchor:shop"],
+    }
+
+
+def _mythic_update_response(candidate_id: int) -> str:
+    return json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "event_family": "commercial_offer",
+                    "action": "update",
+                    "candidate_event_id": candidate_id,
+                    "relation": "reports",
+                    "source_role": "responsible_official",
+                    "materiality": "corroboration_only",
+                    "canonical_anchors": {
+                        "shop": "mythic_shop",
+                        "market": "CN",
+                        "rotation_period": "2026-w32",
+                    },
+                    "evidence_excerpt": "国服神话商城轮换",
+                }
+            ],
+            "ignored_fragments": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _mythic_cn_message(published: str | None, ingested: str) -> dict[str, object]:
+    return {
+        "title": "国服本周神话商城",
+        "content": "本周国服神话商城轮换",
+        "source": {
+            "connector_type": "baidu_tieba",
+            "published_at": published,
+            "ingested_at": ingested,
+        },
+        "editorial_granularity_guidance": [],
+    }
+
+
+def test_mythic_update_cross_market_candidate_is_rejected() -> None:
+    response = _mythic_update_response(99)
+    client, _ = _client_with_responses([response, response])
+
+    with pytest.raises(LLMAnalysisError, match="mythic shop update 只能命中相同"):
+        asyncio.run(
+            client.aggregate_events(
+                message=_mythic_cn_message(
+                    "2026-08-05T00:00:00+00:00", "2026-08-05T00:00:00+00:00"
+                ),
+                admission_decision="create_or_update",
+                family_hints=["commercial_offer"],
+                candidates=[_mythic_candidate()],
+            )
+        )
+
+
+def test_mythic_update_existing_only_wrong_identity_is_rejected() -> None:
+    response = _mythic_update_response(99)
+    client, _ = _client_with_responses([response, response])
+
+    with pytest.raises(LLMAnalysisError, match="mythic shop update 只能命中相同"):
+        asyncio.run(
+            client.aggregate_events(
+                message=_mythic_cn_message(
+                    "2026-08-05T00:00:00+00:00", "2026-08-05T00:00:00+00:00"
+                ),
+                admission_decision="update_existing_only",
+                family_hints=["commercial_offer"],
+                candidates=[_mythic_candidate()],
+            )
+        )
+
+
 def test_importance_prompt_uses_editorial_policy_contract() -> None:
     response = json.dumps(
         {

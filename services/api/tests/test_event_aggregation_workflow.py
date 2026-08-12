@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -26,8 +27,12 @@ from app.schemas.event_aggregation import EventAggregationResult
 from app.services.event_candidates import recall_event_candidates
 from app.services.events import create_event
 from app.services.llm import LLMAnalysisError
-from app.workflows.event_aggregation import _select_content, aggregate_normalized_item
-from app.workflows.event_aggregation import _aggregation_key
+from app.workflows.event_aggregation import (
+    _aggregation_key,
+    _mythic_shop_anchors,
+    _select_content,
+    aggregate_normalized_item,
+)
 
 
 def _importance(profile: str, **features: object) -> dict[str, object]:
@@ -421,6 +426,65 @@ def test_mythic_shop_rotation_period_is_deterministic_iso_week() -> None:
         products=["lol_pc", "tft"],
         canonical_anchors=direct,
     )
+
+
+def test_mythic_shop_rotation_period_falls_back_to_ingested_at() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Mythic CN source", connector_type="baidu_tieba")
+        db.add(source)
+        db.flush()
+        # RawItem content is immutable; set timestamps at creation time.
+        raw = RawItem(
+            source_id=source.id,
+            external_id="mythic-fallback",
+            native_title="本周国服神话商城轮换",
+            canonical_url="https://example.com/mythic-fallback",
+            content_blocks=[
+                {"type": "paragraph", "text": "本周国服神话商城轮换"}
+            ],
+            published_at=None,
+            ingested_at=datetime(2026, 8, 5, tzinfo=UTC),
+        )
+        db.add(raw)
+        db.flush()
+        item = NormalizedItem(
+            raw_item_id=raw.id,
+            normalized_title="本周国服神话商城轮换",
+            normalized_text="本周国服神话商城轮换",
+            summary="本周国服神话商城轮换",
+            entities=[],
+            products=["lol_pc"],
+            message_type="shop_announcement",
+            topics=["shop_monetization"],
+            content_form="original",
+            importance_score=0.5,
+            importance_calculation={
+                "importance_profile": "gameplay_announcement",
+                "profile_score": 0.5,
+                "final_score": 0.5,
+            },
+            translated_title="本周国服神话商城轮换",
+            translated_text="本周国服神话商城轮换",
+            translated_content_blocks=[{"type": "paragraph", "text": "本周国服神话商城轮换"}],
+            translation_status="not_required",
+            analysis_model="test",
+            analysis_version="test",
+        )
+        db.add(item)
+        db.commit()
+        anchors = _mythic_shop_anchors(
+            item,
+            event_family="commercial_offer",
+            anchors={
+                "shop": "mythic_shop",
+                "market": "unknown",
+                "rotation_period": "none",
+            },
+        )
+        assert re.fullmatch(r"\d{4}-w\d{2}", anchors["rotation_period"])
+        assert anchors["rotation_period"] != "none"
 
 
 def test_daily_match_roundup_hint_excludes_schedule_summary() -> None:

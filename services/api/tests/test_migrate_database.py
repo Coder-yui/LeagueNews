@@ -20,7 +20,7 @@ def test_fresh_database_sources_match_current_connector_baseline() -> None:
         session.commit()
         sources = list(session.scalars(select(Source).order_by(Source.name)))
 
-    assert len(sources) == len(DEFAULT_SOURCES) == 15
+    assert len(sources) == len(DEFAULT_SOURCES) == 26
     assert {source.connector_type for source in sources} == {
         "manual",
         "tencent_lol",
@@ -35,12 +35,33 @@ def test_fresh_database_sources_match_current_connector_baseline() -> None:
             for source in sources
             if source.external_key is not None
         }
-    ) == 14
+    ) == 24
     by_key = {
         source.external_key: source for source in sources if source.external_key is not None
     }
     assert by_key["riotphroxzon"].is_official is True
     assert by_key["riotphroxzon"].reliability_score == 1.0
+    for key in (
+        "loldev",
+        "riotphlox",
+        "lck",
+        "lec",
+        "t1lol",
+        "geng",
+        "g2league",
+        "5926660141",
+        "5449734852",
+    ):
+        assert by_key[key].is_official is True
+        assert by_key[key].reliability_score == 1.0
+    assert by_key["1992350413"].is_official is False
+    assert by_key["1992350413"].reliability_score == 0.6
+    lpl_source = next(source for source in sources if source.name == "腾讯英雄联盟赛事官网（LPL）")
+    assert lpl_source.connector_type == "tencent_lol"
+    assert lpl_source.external_key is None
+    assert lpl_source.connector_config == {"target": "25"}
+    assert lpl_source.is_official is True
+    assert lpl_source.reliability_score == 1.0
     assert {
         by_key[key].reliability_score for key in ("2266865584", "2522098777", "2600241232")
     } == {0.6}
@@ -51,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name.startswith("002_")
-    assert files[-1].name == "063_replace_event_system_with_v1.sql"
+    assert files[-1].name == "064_add_requested_sources.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -99,3 +120,21 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     assert "impact_snapshot jsonb NOT NULL" in event_schema
     assert "uq_event_mentions_item_index_policy" in event_schema
     assert "event-aggregation-v1" in event_schema
+
+    requested_sources = (MIGRATIONS / "064_add_requested_sources.sql").read_text()
+    for external_key in (
+        "loldev",
+        "riotphlox",
+        "lck",
+        "lec",
+        "t1lol",
+        "geng",
+        "g2league",
+        "5926660141",
+        "5449734852",
+        "1992350413",
+    ):
+        assert f"'{external_key}'" in requested_sources
+    assert "'腾讯英雄联盟赛事官网（LPL）'" in requested_sources
+    assert "'{\"target\": \"25\"}'::json" in requested_sources
+    assert "'064_add_requested_sources'" in requested_sources

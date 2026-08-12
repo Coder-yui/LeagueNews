@@ -9,6 +9,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.domain.event_admission import AdmissionDecision, decide_event_admission
+from app.domain.event_families import (
+    canonicalize_event_anchors,
+    is_mythic_shop_event,
+)
+from app.domain.event_granularity import editorial_granularity_guidance
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.core.config import settings
 from app.models.event import Event, EventAggregationRun
@@ -37,9 +42,10 @@ def _fingerprint(value: object) -> str:
 def _aggregation_key(
     *, event_family: str, products: list[str], canonical_anchors: dict[str, Any]
 ) -> str:
+    identity_products = [] if is_mythic_shop_event(event_family, canonical_anchors) else sorted(products)
     identity = {
         "event_family": event_family,
-        "products": sorted(products),
+        "products": identity_products,
         "canonical_anchors": canonical_anchors,
     }
     return f"event-v1:{event_family}:{_fingerprint(identity)[:32]}"
@@ -74,6 +80,16 @@ def _independence_group(item: NormalizedItem) -> str | None:
         upstream = _upstream_url(item)
         return f"upstream:{upstream}" if upstream else None
     return f"source:{item.raw_item.source_id}"
+
+
+def _verified_source_role(item: NormalizedItem, proposed_role: str) -> str:
+    if proposed_role != "responsible_official":
+        return proposed_role
+    if item.content_form == "repost":
+        return "republisher"
+    if not item.raw_item.source.is_official:
+        return "unknown"
+    return proposed_role
 
 
 def _source_payload(item: NormalizedItem) -> dict[str, object]:
@@ -176,6 +192,7 @@ def _message_payload(item: NormalizedItem) -> tuple[dict[str, object], dict[str,
         },
         "structured_media": media_data,
         "source": _source_payload(item),
+        "editorial_granularity_guidance": editorial_granularity_guidance(item),
     }
     return payload, truncation
 
@@ -343,9 +360,16 @@ async def aggregate_normalized_item(
     try:
         applied_count = 0
         affected_event_ids: set[int] = set()
+        daily_match_roundup = "daily_esports_match_roundup" in (
+            message.get("editorial_granularity_guidance") or []
+        )
         for decision in result.mentions:
             if decision.action == "ignore":
                 continue
+            if daily_match_roundup and decision.event_family != "esports_match":
+                raise ValueError(
+                    "daily match reminders/results may only create or update concrete esports_match events"
+                )
             fact_changes = decision.key_fact_changes.model_dump(mode="json")
             unresolved_changes = decision.unresolved_point_changes.model_dump(mode="json")
             claim_fingerprint = _fingerprint(
@@ -356,55 +380,89 @@ async def aggregate_normalized_item(
                 }
             )
             independence_group = _independence_group(item)
-            impact_snapshot = (
-                decision.impact.model_dump(mode="json") if decision.impact is not None else None
+            source_role = _verified_source_role(item, decision.source_role)
+            canonical_anchors = canonicalize_event_anchors(
+                decision.event_family, decision.canonical_anchors
             )
             if decision.action == "create":
-                event, _created = create_event(
-                    db,
-                    normalized_item_id=item.id,
-                    mention_index=decision.mention_index,
+                aggregation_key = _aggregation_key(
                     event_family=decision.event_family,
                     products=item.products,
-                    canonical_anchors=decision.canonical_anchors,
-                    aggregation_key=_aggregation_key(
+                    canonical_anchors=canonical_anchors,
+                )
+                existing_event = db.scalar(
+                    select(Event).where(Event.aggregation_key == aggregation_key)
+                )
+                if existing_event is None:
+                    event, _created = create_event(
+                        db,
+                        normalized_item_id=item.id,
+                        mention_index=decision.mention_index,
                         event_family=decision.event_family,
                         products=item.products,
-                        canonical_anchors=decision.canonical_anchors,
-                    ),
-                    title=decision.event_title or "",
-                    current_summary=decision.proposed_summary or "",
-                    relation=decision.relation,
-                    source_role=decision.source_role,
-                    materiality=decision.materiality,
-                    independence_group=independence_group,
-                    evidence_excerpt=decision.evidence_excerpt,
-                    structured_fact_changes=fact_changes,
-                    impact_snapshot=impact_snapshot,
-                    content_fingerprint=claim_fingerprint,
-                    latest_development=decision.latest_development or "",
-                    key_facts=list(decision.key_fact_changes.add),
-                    unresolved_points=list(decision.unresolved_point_changes.add),
-                    commit=False,
-                    use_savepoint=False,
-                )
+                        canonical_anchors=canonical_anchors,
+                        aggregation_key=aggregation_key,
+                        title=decision.event_title or "",
+                        current_summary=decision.proposed_summary or "",
+                        relation=decision.relation,
+                        source_role=source_role,
+                        materiality=decision.materiality,
+                        independence_group=independence_group,
+                        evidence_excerpt=decision.evidence_excerpt,
+                        structured_fact_changes=fact_changes,
+                        content_fingerprint=claim_fingerprint,
+                        latest_development=decision.latest_development or "",
+                        key_facts=list(decision.key_fact_changes.add),
+                        unresolved_points=list(decision.unresolved_point_changes.add),
+                        commit=False,
+                        use_savepoint=False,
+                    )
+                else:
+                    merged_anchors = {
+                        **existing_event.canonical_anchors,
+                        **canonical_anchors,
+                    }
+                    event, _created = add_event_mention(
+                        db,
+                        event_id=existing_event.id,
+                        normalized_item_id=item.id,
+                        mention_index=decision.mention_index,
+                        relation=decision.relation,
+                        source_role=source_role,
+                        materiality=decision.materiality,
+                        independence_group=independence_group,
+                        evidence_excerpt=decision.evidence_excerpt,
+                        structured_fact_changes=fact_changes,
+                        content_fingerprint=claim_fingerprint,
+                        title=decision.event_title,
+                        current_summary=decision.proposed_summary,
+                        latest_development=decision.latest_development,
+                        canonical_anchors=merged_anchors,
+                        key_facts=_apply_fact_changes(
+                            existing_event.key_facts, fact_changes
+                        ),
+                        unresolved_points=_apply_unresolved_changes(
+                            existing_event.unresolved_points, unresolved_changes
+                        ),
+                        commit=False,
+                        use_savepoint=False,
+                    )
             else:
                 event = db.get(Event, int(decision.candidate_event_id or 0))
                 if event is None:
                     raise ValueError(f"candidate event {decision.candidate_event_id} disappeared")
-                merged_anchors = {**event.canonical_anchors, **decision.canonical_anchors}
+                merged_anchors = {**event.canonical_anchors, **canonical_anchors}
                 add_event_mention(
                     db,
                     event_id=event.id,
                     normalized_item_id=item.id,
                     mention_index=decision.mention_index,
                     relation=decision.relation,
-                    source_role=decision.source_role,
+                    source_role=source_role,
                     materiality=decision.materiality,
                     independence_group=independence_group,
                     evidence_excerpt=decision.evidence_excerpt,
                     structured_fact_changes=fact_changes,
-                    impact_snapshot=impact_snapshot,
                     content_fingerprint=claim_fingerprint,
                     title=decision.event_title,
                     current_summary=decision.proposed_summary,

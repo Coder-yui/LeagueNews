@@ -13,7 +13,6 @@ from app.domain.event_types import (
     EVENT_RELATIONS,
     EVENT_SOURCE_ROLES,
 )
-from app.domain.event_importance import calculate_event_importance
 from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.repositories.events import (
@@ -22,6 +21,7 @@ from app.repositories.events import (
     get_event_for_update,
     get_normalized_item,
 )
+from app.services.event_metrics import refresh_event_importance
 
 
 class EventNotFoundError(ValueError):
@@ -175,11 +175,6 @@ def create_event(
             "responsible_official requires a direct message from an official source"
         )
     observed_at = _message_time(item)
-    importance_score, importance_breakdown = (
-        calculate_event_importance(event_family=event_family, impact=impact_snapshot)
-        if impact_snapshot
-        else (0.0, {})
-    )
     event = Event(
         aggregation_key=aggregation_key,
         title=title,
@@ -198,8 +193,8 @@ def create_event(
         latest_update_message_id=(item.id if materiality == "material_update" else None),
         aggregation_policy_version=aggregation_policy_version,
         message_count_total=1,
-        importance_score=importance_score,
-        importance_breakdown=importance_breakdown,
+        importance_score=0.0,
+        importance_breakdown={},
     )
     try:
         with db.begin_nested() if use_savepoint else nullcontext():
@@ -221,6 +216,7 @@ def create_event(
             )
             db.add(mention)
             db.flush()
+            refresh_event_importance(event, [mention])
             db.add(
                 EventRevision(
                     event_id=event.id,
@@ -322,35 +318,31 @@ def add_event_mention(
     observed_at = _message_time(item)
 
     try:
+        mention = _new_mention(
+            event_id=event.id,
+            item=item,
+            mention_index=mention_index,
+            relation=relation,
+            source_role=source_role,
+            materiality=materiality,
+            independence_group=independence_group,
+            evidence_excerpt=evidence_excerpt,
+            structured_fact_changes=structured_fact_changes,
+            impact_snapshot=impact_snapshot,
+            content_fingerprint=content_fingerprint,
+            aggregation_policy_version=aggregation_policy_version,
+        )
         with db.begin_nested() if use_savepoint else nullcontext():
-            db.add(
-                _new_mention(
-                    event_id=event.id,
-                    item=item,
-                    mention_index=mention_index,
-                    relation=relation,
-                    source_role=source_role,
-                    materiality=materiality,
-                    independence_group=independence_group,
-                    evidence_excerpt=evidence_excerpt,
-                    structured_fact_changes=structured_fact_changes,
-                    impact_snapshot=impact_snapshot,
-                    content_fingerprint=content_fingerprint,
-                    aggregation_policy_version=aggregation_policy_version,
-                )
-            )
+            db.add(mention)
             db.flush()
         event.first_seen_at = _earlier(event.first_seen_at, observed_at)
         event.last_seen_at = _later(event.last_seen_at, observed_at)
         event.message_count_total = count_active_messages(db, event.id)
+        mentions = list(event.mentions)
+        if all(existing.id != mention.id for existing in mentions):
+            mentions.append(mention)
+        refresh_event_importance(event, mentions)
         if materiality == "material_update":
-            if impact_snapshot:
-                event.importance_score, event.importance_breakdown = (
-                    calculate_event_importance(
-                        event_family=event.event_family,
-                        impact=impact_snapshot,
-                    )
-                )
             event.last_material_update_at = _later(event.last_material_update_at, observed_at)
             event.latest_update_message_id = item.id
             event.current_revision += 1

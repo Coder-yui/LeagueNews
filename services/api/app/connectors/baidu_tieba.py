@@ -104,7 +104,9 @@ class BaiduTiebaConnector(BaseConnector[TiebaThreadRecord]):
                     )
                 return FetchBatch(
                     records=records,
-                    truncated=len(threads) >= scan_limit,
+                    # If every discovered thread was already in the cursor,
+                    # there is no remaining work even when the scan cap was hit.
+                    truncated=bool(records) and len(threads) >= scan_limit,
                 )
         except (
             BaiduTiebaConnectorConfigurationError,

@@ -10,6 +10,7 @@ from app.domain.event_types import (
     EVENT_FAMILIES,
     EVENT_LIFECYCLES,
 )
+from app.domain.event_categories import EVENT_CATEGORIES
 from app.domain.message_taxonomy import PRODUCTS
 from app.models.event import Event
 from app.schemas.event import EventDetailRead, EventPageRead
@@ -33,6 +34,7 @@ def _time_key(value: datetime | None) -> float:
 @router.get("", response_model=EventPageRead)
 def list_events(
     product: str | None = None,
+    category: str | None = None,
     event_family: str | None = None,
     lifecycle: str | None = None,
     credibility_level: str | None = None,
@@ -56,6 +58,10 @@ def list_events(
     payloads = [event_card_payload(db, event) for event in events]
     if product:
         payloads = [payload for payload in payloads if product in payload["products"]]
+    if category:
+        if category not in EVENT_CATEGORIES:
+            raise HTTPException(status_code=400, detail="unsupported event category")
+        payloads = [payload for payload in payloads if payload["category"] == category]
     if importance_level:
         payloads = [
             payload for payload in payloads if payload["importance_level"] == importance_level
@@ -95,6 +101,7 @@ def list_events(
         "event_family_options": sorted(EVENT_FAMILIES),
         "lifecycle_options": sorted(EVENT_LIFECYCLES),
         "credibility_options": sorted(CREDIBILITY_LEVELS),
+        "category_options": list(EVENT_CATEGORIES),
     }
 
 

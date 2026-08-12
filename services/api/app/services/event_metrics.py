@@ -5,7 +5,12 @@ from sqlalchemy.orm import Session
 
 from app.domain.event_credibility import CredibilityEvidence, calculate_event_credibility
 from app.domain.event_heat import HeatEvidence, calculate_event_heat
-from app.domain.event_types import CREDIBILITY_POLICY_VERSION, HEAT_POLICY_VERSION
+from app.domain.event_importance import EventImportanceEvidence, calculate_event_importance
+from app.domain.event_types import (
+    CREDIBILITY_POLICY_VERSION,
+    HEAT_POLICY_VERSION,
+    IMPORTANCE_POLICY_VERSION,
+)
 from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
 
@@ -34,6 +39,24 @@ def _mention_time(mention: EventMention) -> datetime:
 
 def _has_public_media(mention: EventMention) -> bool:
     return any(asset.public_path for asset in mention.normalized_item.raw_item.media_assets)
+
+
+def refresh_event_importance(event: Event, mentions: list[EventMention]) -> None:
+    evidence = []
+    for mention in mentions:
+        calculation = mention.normalized_item.importance_calculation
+        if not isinstance(calculation, dict):
+            calculation = {}
+        evidence.append(
+            EventImportanceEvidence(
+                normalized_item_id=mention.normalized_item_id,
+                profile=calculation.get("importance_profile"),
+                domain_score=calculation.get("profile_score"),
+                materiality=mention.materiality,
+            )
+        )
+    event.importance_score, event.importance_breakdown = calculate_event_importance(evidence)
+    event.importance_policy_version = IMPORTANCE_POLICY_VERSION
 
 
 def _refresh_references(event: Event, mentions: list[EventMention]) -> None:
@@ -97,6 +120,7 @@ def refresh_event_metrics(
                 )
             )
         )
+        refresh_event_importance(event, mentions)
         credibility_evidence = [
             CredibilityEvidence(
                 relation=mention.relation,

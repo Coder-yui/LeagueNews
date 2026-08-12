@@ -10,6 +10,7 @@ from app.connectors.base import RawItemCandidate
 from app.content_blocks import content_hash, text_from_content_blocks
 from app.core.database import Base
 from app.models.media_asset import MediaAsset
+from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.services.ingestion import ingest_connector_items
@@ -308,3 +309,54 @@ def test_duplicate_ingestion_repairs_missing_media_without_new_revision() -> Non
         )
         assert media.sha256 == "a" * 64
         assert "storage_path" not in raw_items[0].content_blocks[0]
+
+
+def test_ingestion_can_persist_raw_item_without_enqueueing_downstream() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Raw-only source", connector_type="test_web")
+        db.add(source)
+        db.commit()
+        item = RawItemCandidate(
+            external_id="raw-only-1",
+            native_title="Raw only",
+            canonical_url="https://example.com/raw-only-1",
+            content_kind="article",
+            author_name=None,
+            language="en",
+            published_at=None,
+            content_blocks=[{"type": "paragraph", "text": "Evidence"}],
+            provenance={"fixture": "raw-only"},
+        )
+
+        result = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[item],
+                media_storage=PassThroughMediaStorage(),
+                enqueue_downstream=False,
+            )
+        )
+
+        assert len(result.created) == 1
+        assert db.scalar(select(PipelineJob)) is None
+
+        default_result = asyncio.run(
+            ingest_connector_items(
+                db,
+                source=source,
+                items=[
+                    item.model_copy(
+                        update={
+                            "external_id": "raw-only-2",
+                            "canonical_url": "https://example.com/raw-only-2",
+                        }
+                    )
+                ],
+                media_storage=PassThroughMediaStorage(),
+            )
+        )
+        assert len(default_result.created) == 1
+        assert db.scalar(select(PipelineJob)) is not None

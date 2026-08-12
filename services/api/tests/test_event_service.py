@@ -9,6 +9,7 @@ from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.services.event_metrics import refresh_event_metrics
 from app.services.events import add_event_mention, create_event
 
 
@@ -19,6 +20,10 @@ def _add_item(
     external_id: str,
     published_at: datetime,
     title: str,
+    domain_score: float = 0.5,
+    profile: str = "gameplay_announcement",
+    content_form: str = "original",
+    has_domain_score: bool = True,
 ) -> NormalizedItem:
     raw = RawItem(
         source_id=source.id,
@@ -39,7 +44,19 @@ def _add_item(
         products=["lol_pc"],
         message_type="game_announcement",
         topics=["balance_gameplay"],
-        importance_score=0.5,
+        content_form=content_form,
+        importance_score=round(domain_score - (0.08 if content_form == "repost" else 0), 4),
+        importance_calculation=(
+            {
+                "importance_profile": profile,
+                "profile_score": domain_score,
+                "final_score": round(
+                    domain_score - (0.08 if content_form == "repost" else 0), 4
+                ),
+            }
+            if has_domain_score
+            else {}
+        ),
         target_language="zh-CN",
         translated_title=title,
         translated_text=title,
@@ -299,3 +316,187 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
             select(EventMention).order_by(EventMention.normalized_item_revision)
         ).all()
         assert [mention.normalized_item_revision for mention in mentions] == [1, 2]
+
+
+def test_event_importance_aggregates_material_domain_scores_across_mentions() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Importance source", reliability_score=0.8)
+        db.add(source)
+        db.flush()
+        now = datetime(2026, 8, 11, 8, tzinfo=UTC)
+        initial = _add_item(
+            db,
+            source=source,
+            external_id="important-original-repost",
+            published_at=now,
+            title="重大内容的转载",
+            domain_score=0.8,
+            profile="worlds_key",
+            content_form="repost",
+        )
+        lower = _add_item(
+            db,
+            source=source,
+            external_id="small-followup",
+            published_at=now + timedelta(hours=1),
+            title="普通补充",
+            domain_score=0.55,
+            profile="game_announcement_general",
+        )
+        higher = _add_item(
+            db,
+            source=source,
+            external_id="major-followup",
+            published_at=now + timedelta(hours=2),
+            title="确认重大事实",
+            domain_score=0.84,
+            profile="activity_free_skin",
+        )
+        db.commit()
+
+        event, _ = create_event(
+            db,
+            normalized_item_id=initial.id,
+            mention_index=0,
+            event_family="other_named_development",
+            products=["lol_pc"],
+            canonical_anchors={"subject": "importance"},
+            title="重要性事件",
+            current_summary="初始事实。",
+        )
+        assert initial.importance_score == 0.72
+        assert event.importance_score == 0.8
+        assert event.importance_breakdown["dominant_normalized_item_id"] == initial.id
+
+        event, _ = add_event_mention(
+            db,
+            event_id=event.id,
+            normalized_item_id=lower.id,
+            mention_index=0,
+            relation="reports",
+            source_role="ordinary_account",
+            materiality="material_update",
+        )
+        assert event.importance_score == 0.8
+
+        event, _ = add_event_mention(
+            db,
+            event_id=event.id,
+            normalized_item_id=higher.id,
+            mention_index=0,
+            relation="reports",
+            source_role="ordinary_account",
+            materiality="material_update",
+        )
+        assert event.importance_score == 0.84
+        assert event.importance_breakdown["dominant_profile"] == "activity_free_skin"
+        assert event.importance_breakdown["dominant_normalized_item_id"] == higher.id
+
+
+def test_nonmaterial_mentions_credibility_and_heat_do_not_change_event_importance() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Independent source", reliability_score=0.8)
+        official = Source(name="Official source", is_official=True, reliability_score=1.0)
+        db.add_all([source, official])
+        db.flush()
+        now = datetime(2026, 8, 11, 8, tzinfo=UTC)
+        initial = _add_item(
+            db,
+            source=source,
+            external_id="base-evidence",
+            published_at=now,
+            title="普通事件",
+            domain_score=0.6,
+        )
+        nonmaterial = [
+            _add_item(
+                db,
+                source=official,
+                external_id=f"nonmaterial-{materiality}",
+                published_at=now + timedelta(minutes=index),
+                title=f"{materiality} 高分消息",
+                domain_score=0.95,
+                profile="patch_official_notes",
+            )
+            for index, materiality in enumerate(
+                ("duplicate", "context_only", "corroboration_only"), start=1
+            )
+        ]
+        db.commit()
+        event, _ = create_event(
+            db,
+            normalized_item_id=initial.id,
+            mention_index=0,
+            event_family="gameplay_release",
+            products=["lol_pc"],
+            canonical_anchors={"subject": "orthogonal"},
+            title="正交指标事件",
+            current_summary="初始事实。",
+            independence_group=f"source:{source.id}",
+        )
+        for index, (item, materiality) in enumerate(
+            zip(
+                nonmaterial,
+                ("duplicate", "context_only", "corroboration_only"),
+                strict=True,
+            ),
+            start=1,
+        ):
+            event, _ = add_event_mention(
+                db,
+                event_id=event.id,
+                normalized_item_id=item.id,
+                mention_index=0,
+                relation="confirms" if materiality == "corroboration_only" else "supports",
+                source_role="responsible_official",
+                materiality=materiality,
+                independence_group=f"official:{index}",
+            )
+
+        refresh_event_metrics(db, {event.id}, as_of=now + timedelta(minutes=5))
+        assert event.importance_score == 0.6
+        assert event.importance_breakdown["contribution_count"] == 1
+        assert event.importance_breakdown["ignored_evidence_reasons"] == {
+            "non_material": 3
+        }
+        assert event.credibility_score == 1.0
+        assert event.heat_score > 0
+
+
+def test_event_importance_missing_domain_score_has_auditable_fallback() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Legacy item source")
+        db.add(source)
+        db.flush()
+        item = _add_item(
+            db,
+            source=source,
+            external_id="legacy-item",
+            published_at=datetime(2026, 8, 11, 8, tzinfo=UTC),
+            title="缺少领域分的旧消息",
+            domain_score=0.9,
+            has_domain_score=False,
+        )
+        db.commit()
+
+        event, _ = create_event(
+            db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="other_named_development",
+            products=["lol_pc"],
+            canonical_anchors={"subject": "legacy"},
+            title="旧数据事件",
+            current_summary="缺少领域分。",
+        )
+
+        assert event.importance_score == 0.0
+        assert event.importance_breakdown["ignored_evidence_reasons"] == {
+            "missing_or_invalid_domain_score": 1
+        }

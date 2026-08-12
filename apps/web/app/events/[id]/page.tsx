@@ -48,7 +48,7 @@ export default async function EventPage({ params }: { params: Promise<{ id: stri
             <div><span>重要性</span><strong>{Math.round(event.importance_score * 100)}</strong><small>{event.importance_level}</small></div>
             <div><span>可信度</span><strong>{Math.round(event.credibility_score * 100)}</strong><small>{event.credibility_level}</small></div>
             <div><span>热度</span><strong>{Math.round(event.heat_score * 100)}</strong><small>{event.heat_level}</small></div>
-            <div><span>过去 24 小时</span><strong>{event.message_count_24h}</strong><small>{event.unique_sources_24h} 个来源</small></div>
+            <div><span>事件覆盖</span><strong>{event.message_count}</strong><small>{event.source_count} 家信源 · 消息去重</small></div>
           </div>
         </header>
 

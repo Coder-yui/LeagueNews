@@ -1,4 +1,5 @@
 import asyncio
+import os
 from urllib.parse import urlsplit
 
 import httpx
@@ -11,11 +12,18 @@ class ConnectorHTTPError(RuntimeError):
 
 
 class ConnectorHTTPClient:
-    def __init__(self, *, max_attempts: int = 3) -> None:
+    def __init__(self, *, max_attempts: int = 3, trust_env: bool = False) -> None:
         self.max_attempts = max_attempts
+        proxy = None
+        if trust_env:
+            # Prefer HTTP(S) proxies. Some local environments also export a
+            # SOCKS ALL_PROXY without installing socksio, which would make
+            # httpx fail before it can issue a request.
+            proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self._client = httpx.AsyncClient(
             follow_redirects=True,
             trust_env=False,
+            proxy=proxy,
             timeout=httpx.Timeout(30, connect=10),
             headers={"User-Agent": settings.connector_user_agent},
         )
@@ -27,12 +35,19 @@ class ConnectorHTTPClient:
         await self._client.aclose()
 
     async def get(
-        self, url: str, *, headers: dict[str, str] | None = None
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = True,
     ) -> httpx.Response:
         last_error = "request did not run"
         for attempt in range(1, self.max_attempts + 1):
             try:
-                response = await self._client.get(url, headers=headers)
+                request_options: dict[str, object] = {"headers": headers}
+                if not follow_redirects:
+                    request_options["follow_redirects"] = False
+                response = await self._client.get(url, **request_options)
                 if response.status_code != 429 and response.status_code < 500:
                     response.raise_for_status()
                     return response

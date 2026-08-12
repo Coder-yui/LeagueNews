@@ -6,8 +6,10 @@ from sqlalchemy.orm import Session
 
 from app.domain.event_heat import heat_level
 from app.domain.event_importance import importance_level
+from app.domain.event_categories import event_category
 from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
+from app.models.raw_item import RawItem
 from app.services.event_metrics import refresh_event_metrics
 
 
@@ -61,13 +63,35 @@ def _best_media_url(db: Session, message_id: int | None) -> str | None:
     return next((asset.public_path for asset in assets if asset.public_path), None)
 
 
+def _event_message_counts(db: Session, event_id: int) -> tuple[int, int]:
+    rows = db.execute(
+        select(EventMention.normalized_item_id, RawItem.source_id)
+        .join(EventMention.normalized_item)
+        .join(RawItem, RawItem.id == NormalizedItem.raw_item_id)
+        .where(
+            EventMention.event_id == event_id,
+            NormalizedItem.publication_status == "published",
+        )
+    )
+    message_ids: set[int] = set()
+    source_ids: set[int] = set()
+    for message_id, source_id in rows:
+        message_ids.add(message_id)
+        source_ids.add(source_id)
+    return len(message_ids), len(source_ids)
+
+
 def event_card_payload(db: Session, event: Event) -> dict[str, Any]:
+    message_count, source_count = _event_message_counts(db, event.id)
     return {
         "id": event.id,
         "title": event.title,
         "current_summary": event.current_summary,
         "products": event.products,
         "event_family": event.event_family,
+        "category": event_category(event_family=event.event_family, products=event.products),
+        "message_count": message_count,
+        "source_count": source_count,
         "lifecycle_status": event.lifecycle_status,
         "importance_score": event.importance_score,
         "importance_level": str(

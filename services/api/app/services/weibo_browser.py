@@ -83,6 +83,12 @@ class WeiboBrowserSession:
     async def get_json(self, url: str) -> dict[str, Any]:
         return await self._run(self._get_json, url)
 
+    async def has_cookie(self, name: str) -> bool:
+        return await self._run(self._has_cookie, name)
+
+    async def save_cookies(self, path: Path) -> int:
+        return await self._run(self._save_cookies, path)
+
     def _start(self) -> None:
         self._playwright = sync_playwright().start()
         self._context = self._playwright.chromium.launch_persistent_context(
@@ -95,6 +101,9 @@ class WeiboBrowserSession:
             args=["--disable-blink-features=AutomationControlled"],
         )
         cookie_file = settings.resolved_weibo_cookie_file
+        if cookie_file is None:
+            local_default = settings.project_root / ".secrets" / "weibo-cookies.json"
+            cookie_file = local_default if local_default.is_file() else None
         if cookie_file is not None:
             self._context.add_cookies(_load_cookie_file(cookie_file))
 
@@ -145,6 +154,29 @@ class WeiboBrowserSession:
         if not isinstance(payload, dict):
             raise WeiboBrowserError("Weibo browser returned a non-object JSON response")
         return payload
+
+    def _has_cookie(self, name: str) -> bool:
+        if self._context is None:
+            raise WeiboBrowserError("Weibo browser session is not open")
+        return any(
+            cookie.get("name") == name and bool(cookie.get("value"))
+            for cookie in self._context.cookies("https://weibo.com/")
+        )
+
+    def _save_cookies(self, path: Path) -> int:
+        if self._context is None:
+            raise WeiboBrowserError("Weibo browser session is not open")
+        cookies = self._context.cookies()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(cookies, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return len(cookies)
 
     def _page(self):
         if self._context is None:

@@ -2,7 +2,7 @@ from typing import Final, Literal, get_args
 
 
 AGGREGATION_POLICY_VERSION: Final = "event-aggregation-v1"
-IMPORTANCE_POLICY_VERSION: Final = "event-importance-v1"
+IMPORTANCE_POLICY_VERSION: Final = "event-importance-v2-domain-evidence"
 CREDIBILITY_POLICY_VERSION: Final = "event-credibility-v1"
 HEAT_POLICY_VERSION: Final = "event-heat-v1"
 

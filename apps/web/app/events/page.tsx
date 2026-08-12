@@ -3,8 +3,23 @@ import Link from "next/link";
 import { Activity, ArrowUpRight } from "lucide-react";
 import { getEventsPage } from "@/lib/api";
 
-export default async function EventsPage() {
-  const page = await getEventsPage();
+const categoryTabs = [
+  ["all", "全部"],
+  ["esports", "电竞"],
+  ["lol_pc", "LOL PC"],
+  ["tft", "云顶"],
+  ["other_products", "其他产品"],
+  ["ecosystem", "生态"],
+] as const;
+
+export default async function EventsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ category?: string }>;
+}) {
+  const { category = "all" } = await searchParams;
+  const activeCategory = categoryTabs.some(([value]) => value === category) ? category : "all";
+  const page = await getEventsPage(activeCategory);
   return (
     <main>
       <header className="site-header">
@@ -27,6 +42,13 @@ export default async function EventsPage() {
       </section>
 
       <section className="messages-section">
+        <nav className="event-category-tabs" aria-label="事件分类">
+          {categoryTabs.map(([value, label]) => (
+            <Link className={activeCategory === value ? "active" : ""} href={value === "all" ? "/events" : `/events?category=${value}`} key={value}>
+              {label}
+            </Link>
+          ))}
+        </nav>
         <div className="section-heading">
           <div><span className="kicker">EVENT STREAM</span><h2>事件列表</h2></div>
           <span>{page.total} 个当前事件</span>
@@ -52,7 +74,7 @@ export default async function EventsPage() {
                     <span className="importance-badge">重要性 {Math.round(event.importance_score * 100)}</span>
                     <span className="topic-badge">可信度 {event.credibility_level}</span>
                     <span className="topic-badge">热度 {Math.round(event.heat_score * 100)}</span>
-                    <span className="entity">24h {event.message_count_24h} 条 / {event.unique_sources_24h} 来源</span>
+                    <span className="entity">{event.source_count} 家信源报道 · {event.message_count} 条消息</span>
                   </div>
                   <Link className="message-card-link" href={`/events/${event.id}`}>
                     查看事件详情 <ArrowUpRight size={14} />

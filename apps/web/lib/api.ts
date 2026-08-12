@@ -73,9 +73,11 @@ export async function getPublishedItem(id: number): Promise<PublishedItem | null
   }
 }
 
-export async function getEventsPage(): Promise<EventPage> {
+export async function getEventsPage(category?: string): Promise<EventPage> {
   try {
-    const response = await fetch(`${apiUrl}/events?limit=100`, {
+    const params = new URLSearchParams({ limit: "100" });
+    if (category && category !== "all") params.set("category", category);
+    const response = await fetch(`${apiUrl}/events?${params}`, {
       next: { revalidate: 30 },
     });
     if (!response.ok) throw new Error(`API returned ${response.status}`);
@@ -88,6 +90,7 @@ export async function getEventsPage(): Promise<EventPage> {
       event_family_options: [],
       lifecycle_options: [],
       credibility_options: [],
+      category_options: [],
     };
   }
 }

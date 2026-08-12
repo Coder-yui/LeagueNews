@@ -42,3 +42,11 @@ def test_connector_http_turns_timeout_into_finite_error() -> None:
 
     with pytest.raises(ConnectorHTTPError, match="failed after 1 attempts"):
         asyncio.run(client.get("https://example.com/news"))
+
+
+def test_connector_http_can_opt_into_environment_proxy(monkeypatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:7897")
+    client = ConnectorHTTPClient(trust_env=True)
+    assert len(client._client._mounts) == 1  # type: ignore[attr-defined]
+    asyncio.run(client._client.aclose())

@@ -20,11 +20,12 @@ Source 和已发布媒体。核心 DTO：
 
 ```text
 EventCard
-  id, title, current_summary, products, event_family
+  id, title, current_summary, products, event_family, category
   lifecycle_status
   importance_score, importance_level
   credibility_score, credibility_level
   heat_score, heat_level
+  source_count, message_count
   message_count_24h, unique_sources_24h, message_count_total
   last_material_update_at
   primary_source
@@ -82,7 +83,7 @@ revision id。
 
 ```text
 GET /api/v1/events
-  filters: products, event_family, lifecycle, credibility_level,
+  filters: category, products, event_family, lifecycle, credibility_level,
            importance_level, heat_level, search
   sort: latest | importance | heat
   pagination: limit/offset
@@ -101,6 +102,11 @@ DTO 不暴露模型原始响应或内部匹配分数。
 
 ## 前端
 
+事件列表的一级分类由 API 计算并过滤，前端提供：`全部 | 电竞 | LOL PC | 云顶 | 其他产品 | 生态`。
+`category` 不是 Event 持久化字段，而是由现有 product taxonomy 与 event family 确定性映射：电竞 family
+或 `lol_esports` 优先为 `esports`；其余按 `riot_ecosystem`/`lol_universe`、`lol_pc`、`tft`、
+`other_lol_product` 映射为 `ecosystem`、`lol_pc`、`tft`、`other_products`。
+
 沿用 `apps/web`：
 
 ```text
@@ -110,8 +116,10 @@ DTO 不暴露模型原始响应或内部匹配分数。
 /admin/events           后续管理视图
 ```
 
-事件卡片至少显示标题、当前摘要、三个独立指标、过去 24 小时消息/Source 数、最后实质更新、主要
-来源和代表图片。详情按“当前结论 -> 关键事实/未决问题 -> 时间线 -> 证据 -> 相关消息”排列。
+事件卡片至少显示标题、当前摘要、三个独立指标、`source_count` 家信源报道和 `message_count` 条消息、
+最后实质更新、主要来源和代表图片。两个展示数按已发布消息的 distinct `normalized_item_id` 与
+distinct Source 计算；同一消息在一个事件中有多个 mention 只计一次。详情仍保留热度字段和相关消息列表，
+但卡片不再使用“24h 0/0 来源”作为报道规模展示。
 
 初版保留 `/` 的消息流并增加事件导航，避免在 Phase 4 同时改变现有公开契约。将事件流设为首页是
 单独产品选择，不影响后端 DTO。

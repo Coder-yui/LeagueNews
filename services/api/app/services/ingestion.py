@@ -38,6 +38,7 @@ async def ingest_connector_items(
     source: Source,
     items: list[RawItemCandidate],
     media_storage: MediaStorageProtocol | None = None,
+    enqueue_downstream: bool = True,
 ) -> IngestionResult:
     """Persist canonical connector items through one source-independent path."""
     storage = media_storage or MediaStorage()
@@ -126,7 +127,8 @@ async def ingest_connector_items(
             result.created.append(raw_item)
             if latest_revision:
                 result.revised.append(raw_item)
-            enqueue_pipeline_job(db, raw_item_id=raw_item.id)
+            if enqueue_downstream:
+                enqueue_pipeline_job(db, raw_item_id=raw_item.id)
         db.commit()
     except BaseException:
         db.rollback()

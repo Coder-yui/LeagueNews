@@ -41,7 +41,7 @@ RawItem
 | 产品与内容形式 | `products`、`content_form` | 当前 taxonomy v3 |
 | 消息类型与主题 | `message_type`、`topics` | 用于准入和 event family 路由 |
 | 通用实体 | `entities` | 已有规范类型、名称和 `canonical_id` |
-| 消息重要性 | `importance_score`、`importance_dimensions` | 只作为输入上下文，不上卷为事件重要性 |
+| 领域重要性 | `importance_calculation.profile_score`、`importance_profile` | material mention 作为事件重要性 evidence；不使用含转载修正的最终消息分 |
 | 分类信源 | `facets.classification_source` | 只说明本轮分类依据，不等于事件官方证据 |
 | 来源可靠性 | `RawItem.source.is_official/reliability_score` | 必须结合事件中的实际角色解释 |
 | 原始/引用/转发证据 | `content_form`、`RawItem.content_blocks`、`provenance` | 只读；通过结构化 URL 识别上游 |
@@ -73,6 +73,19 @@ RawItem
 生成迁移文件，不连接或修改生产数据库。
 
 ## 领域模型
+
+### 本轮粒度修正
+
+Event 的粒度核心原则是：**独立生命周期 + 独立更新 + 用户认知上的独立事情**。商品、奖励、组成部分、
+子项目和附件默认属于主 Event 的 `key_facts`、structured facts 或 components，不因实体或 topic 数量
+自动拆分。
+
+周免英雄在 deterministic admission 层直接 `skip`，保存 skip reason 且 0 次事件模型调用。神话商店
+轮换使用 `shop + market + rotation_period` anchors，按市场和周期确定唯一身份；同市场同周期的补充
+或修正 update，下一周期或其他市场 create。普通电竞消息按每场真实比赛生成 `esports_match`，每日
+赛前预告/赛后总结只 mention/update 具体比赛，不生成汇总事件；正式赛程变化仍可生成或更新
+`esports_schedule`。活动和通行证奖励默认是活动 Event 的 components，只有拥有独立发布日期和后续
+生命周期的对象才单独拆 Event。
 
 ### Event
 
@@ -184,6 +197,9 @@ published NormalizedItem
   已注册为 `event-aggregation/v1-multi-mention-single-call`。
 - `workflows/event_aggregation.py` 保存调用审计，在一个外层事务中应用全部动作；
   `automatic_pipeline.py` 在消息成功发布后调用该工作流。
+- `domain/event_granularity.py` 集中管理每日赛事汇总和活动奖励的编辑提示；
+  `domain/event_families.py` 规范化神话商店 identity anchors；`domain/event_categories.py` 集中
+  管理公开分类映射。
 - 固定输出测试验证官网综合公告一次调用更新 A/B、创建 C，0 调用路径、超长正文相关块选择、
   重试幂等以及任一动作失败时整批回滚。
 
@@ -194,8 +210,9 @@ Phase 2 首轮全量验证：Ruff 通过；后端 `164 passed, 1 skipped`，随�
 
 - `domain/event_importance.py`、`event_credibility.py`、`event_heat.py` 分别实现确定性计算；
   `services/event_metrics.py` 只负责从持久化 mention 组装输入和刷新投影。
-- migration 063 为每条 mention 保存事件 impact 快照；基准、权重、阈值与策略版本集中管理。
-- 重要性只在 material update 更新；可信度按同一 Source/上游去重；热度按写入即时刷新并保存
+- migration 063 曾为每条 mention 保存事件 impact 快照；v2 保留该列兼容历史数据，但聚合 schema
+  不再生成四维 impact，事件重要性改为复用 material message 的领域分。
+- 重要性从全部有效 material evidence 取最高领域分；可信度按同一 Source/上游去重；热度按写入即时刷新并保存
   计算时间，跨 Source 转载保留传播权重。
 - 测试覆盖高重要性低热度、低重要性高热度、两个独立来源、官方确认/否认、20 次转载、同源限流、
   完全重复和时间自然衰减。

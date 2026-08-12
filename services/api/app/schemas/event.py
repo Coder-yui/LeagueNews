@@ -18,6 +18,7 @@ class EventCardRead(BaseModel):
     current_summary: str
     products: list[str]
     event_family: str
+    category: str
     lifecycle_status: str
     importance_score: float
     importance_level: str
@@ -25,6 +26,8 @@ class EventCardRead(BaseModel):
     credibility_level: str
     heat_score: float
     heat_level: str
+    message_count: int
+    source_count: int
     message_count_total: int
     message_count_24h: int
     unique_sources_24h: int
@@ -94,3 +97,4 @@ class EventPageRead(BaseModel):
     event_family_options: list[str]
     lifecycle_options: list[str]
     credibility_options: list[str]
+    category_options: list[str]

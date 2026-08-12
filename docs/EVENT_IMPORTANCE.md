@@ -1,126 +1,85 @@
 # 事件重要性
 
-> 状态：Phase 3 已实现
+> 状态：Event Importance v2 已实现
 >
-> 策略版本：`event-importance-v1`
+> 策略版本：`event-importance-v2-domain-evidence`
 
-## 目标与非目标
+## 目标与职责
 
-事件重要性回答“事件本身影响有多大”，与来源身份、消息数量、可信度和热度无关。模型只为每个
-创建或实质更新的 mention 提取离散影响维度，代码用版本化常量确定性计算并保存 breakdown。
+Event Importance 回答“这个现实事件目前已知的整体重要性”。它不重新判断 LeagueNews 对什么
+内容重要，而是复用消息处理阶段已经生成并持久化的 Domain Importance evidence。
 
-本算法不复制 `NormalizedItem.importance_score`，不因官网发布加分，不因多人讨论加分，也不把
-紧急流行误当作长期影响。
+三个概念保持分离：
 
-## 输入、输出与字段
+- Domain Importance：资讯内容本身有多重要，存于 `NormalizedItem.importance_calculation` 的
+  `importance_profile` 和 `profile_score`。
+- Message Importance：具体消息有多值得展示，可能包含 `repost -0.08` 等消息载体修正。
+- Event Importance：一个事件的多条有效领域证据聚合结果。
 
-输入：`event_family`、`products` 与模型输出的四个受控维度。
+Event Importance 与 credibility、heat、消息数量和来源数量正交。确认与多来源传播可以改变可信度
+或热度，但不表示事件本身变得更重要。
 
-```text
-scope: individual | group | product_segment | product_wide | ecosystem
-magnitude: minor | moderate | major | transformative
-duration: transient | short_term | cycle_or_season | long_term
-urgency: none | timely | immediate
-```
+## 输入与算法
 
-输出：
+EventMention 指向 NormalizedItem。刷新事件投影时，从当前已发布 mentions 读取：
 
 ```text
-importance_score: 0.0 .. 1.0
-importance_level: low | medium | high | critical
-importance_breakdown:
-  policy_version, event_family_base, dimensions{}, raw_points, capped_points, evidence[]
+NormalizedItem.importance_calculation.importance_profile
+NormalizedItem.importance_calculation.profile_score
+EventMention.materiality
 ```
 
-数据库沿用 0–1 分数约束，API 展示时乘 100。等级阈值为 `<0.30 low`、`<0.55 medium`、
-`<0.80 high`、其余 `critical`。
-
-## 计算公式
+只有 `materiality=material_update` 且 profile/domain score 合法的 mention 能贡献重要性。
+`duplicate`、`context_only` 和 `corroboration_only` 不贡献分数。
 
 ```text
-points = clamp(
-  event_family_base
-  + scope_points
-  + magnitude_points
-  + duration_points
-  + urgency_points,
-  0,
-  100
-)
-importance_score = points / 100
+event_importance_score = max(valid material domain scores)
 ```
 
-family 基准：
+聚合使用 `profile_score`，不使用最终 `NormalizedItem.importance_score`。因此转载扣分只降低具体消息，
+不会降低它所描述事件的重要性。算法不调用 LLM，不重新分析全文，也不重新执行消息分类。
 
-| family | base |
-| --- | ---: |
-| gameplay_balance | 18 |
-| gameplay_release | 25 |
-| cosmetic_release | 10 |
-| player_activity | 10 |
-| commercial_offer | 8 |
-| service_incident | 20 |
-| security_enforcement | 22 |
-| esports_match | 8 |
-| esports_schedule | 10 |
-| roster_change | 15 |
-| esports_rules | 20 |
-| universe_release | 15 |
-| media_release | 15 |
-| corporate_change | 25 |
-| platform_service | 22 |
-| other_named_development | 10 |
+## 更新语义
 
-维度分：
+Event Importance 是整个 Event 的 projection。创建或 evidence 变化后，系统从事件的全部有效 material
+mentions 重算，而不是用最新一条 material update 覆盖旧值。
 
-| 维度 | 枚举到分值 |
-| --- | --- |
-| scope | individual 0；group 8；product_segment 14；product_wide 22；ecosystem 28 |
-| magnitude | minor 0；moderate 10；major 20；transformative 30 |
-| duration | transient 0；short_term 4；cycle_or_season 10；long_term 16 |
-| urgency | none 0；timely 4；immediate 8 |
+- 0.90 的重大事实后出现 0.55 的普通补充，事件仍为 0.90。
+- 0.60 的初始事实后出现 0.72、0.84 的实质进展，事件升级到 0.84。
+- duplicate、上下文、佐证、来源数量、可信度和热度变化不改变事件重要性。
 
-所有常量进入代码映射并随策略版本持久化。Prompt 只解释枚举，不包含另一套隐藏分值。
+## Breakdown 与回退
 
-## 更新规则
+`importance_breakdown` 保存：
 
-- 创建事件或 `materiality=material_update` 时计算新 breakdown。
-- `corroboration_only`、`duplicate`、`context_only` 不计算也不改变重要性。
-- 官方确认若没有改变影响事实，只改变可信度；不重算重要性。
-- 修正若确实改变 scope/magnitude/duration/urgency，可以升高或降低事件当前分数；旧值保存在
-  `EventRevision` 快照。
-- 同一综合公告拆出的 A、B、C 分别使用各自 impact，不读取整篇消息的重要性作为共同分数。
+```text
+policy_version: event-importance-v2-domain-evidence
+method: max_material_domain_score
+score, level
+dominant_profile
+dominant_normalized_item_id
+contribution_count
+contributing_evidence[]
+ignored_evidence_count
+ignored_evidence_reasons{}
+```
 
-## 示例
+贡献摘要最多保存 10 条，按 domain score 降序排列。每条只包含 normalized item id、profile、domain
+score 和 materiality。
 
-### 高重要性、低热度
+缺失、类型异常、越界或缺少 profile 的 evidence 不回退到最终消息分，也不会触发新模型调用；系统
+忽略该 evidence，在 breakdown 中记录原因。若没有任何有效 evidence，安全回退为 0.0，并保持流程
+可审计。
 
-一条尚未广泛传播的跨产品账户安全变更：`platform_service(22) + ecosystem(28) + major(20) +
-long_term(16) + timely(4) = 90`，重要性 0.90；只有一条消息仍可保持低热度。
+## Impact 四维兼容性
 
-### 低重要性、高热度
+Event aggregation 不再要求模型输出 `scope / magnitude / duration / urgency`，这些字段也不再参与
+Event Importance。现有 `event_mentions.impact_snapshot` 数据库列和服务兼容参数暂时保留，避免为本次
+内部重构新增或扩大 migration；新聚合流程不再写入该字段。后续可在独立的兼容性清理中移除。
 
-大量账号讨论一款普通皮肤：`cosmetic_release(10) + individual(0) + minor(0) +
-cycle_or_season(10) + none(0) = 20`，重要性 0.20；热度可很高。
+## 实现位置
 
-### 官网综合公告
-
-同一官网版本公告中的平衡事件可能为 0.62，活动为 0.28，皮肤发布为 0.20。官方身份不会改变
-这三个分数，只可能改变各自可信度。
-
-## 边界情况
-
-- 事件跨多个产品时按事实实际 scope 判断，不自动使用 ecosystem。
-- `immediate` 表示需要马上应对，不等于重大；服务小故障可以紧急但总体仍不高。
-- 持续很久但影响人数少的事项只在 duration 加分，不能双重抬高 scope。
-- 模型证据与枚举矛盾或缺失时拒绝应用，不以消息重要性兜底。
-- 事件影响已经确定后，纯转发、复述和新增来源不能刷新 breakdown。
-
-## 实现对应、可调参数与未解决问题
-
-实现位于 `services/api/app/domain/event_importance.py`，schema 在
-`schemas/event_aggregation.py`，持久化与 revision 在 `services/events.py`。单元测试覆盖每个枚举、
-封顶、指标正交、确认不加分、修正可降分和综合公告分项。
-
-可调参数是 family base、四维分值和等级阈值。需要通过固定回归集校准电竞决赛、跨产品平台事故
-和大型版本平衡的相对排序；在评估完成前不增加消息分数映射或复杂乘法模型。
+- `domain/importance.py`：唯一的 Domain Importance Policy，以及 Message Importance 和 Priority。
+- `domain/event_importance.py`：有效 evidence 校验、最大值聚合和 breakdown。
+- `services/event_metrics.py`：从 EventMention/NormalizedItem 构造 evidence 并刷新 Event projection。
+- `services/events.py`：创建事件或添加 mention 后调用同一刷新入口，不再按最新 impact 覆盖。

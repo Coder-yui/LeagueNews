@@ -2,37 +2,62 @@ from datetime import UTC, datetime, timedelta
 
 from app.domain.event_credibility import CredibilityEvidence, calculate_event_credibility
 from app.domain.event_heat import HeatEvidence, calculate_event_heat
-from app.domain.event_importance import calculate_event_importance, importance_level
+from app.domain.event_importance import (
+    EventImportanceEvidence,
+    calculate_event_importance,
+    importance_level,
+)
 
 
-def test_event_importance_uses_only_family_and_impact_dimensions() -> None:
-    platform_score, platform = calculate_event_importance(
-        event_family="platform_service",
-        impact={
-            "scope": "ecosystem",
-            "magnitude": "major",
-            "duration": "long_term",
-            "urgency": "timely",
-        },
-    )
-    cosmetic_score, cosmetic = calculate_event_importance(
-        event_family="cosmetic_release",
-        impact={
-            "scope": "individual",
-            "magnitude": "minor",
-            "duration": "cycle_or_season",
-            "urgency": "none",
-        },
+def _importance(
+    normalized_item_id: int,
+    score: object,
+    *,
+    profile: str | None = "gameplay_announcement",
+    materiality: str = "material_update",
+) -> EventImportanceEvidence:
+    return EventImportanceEvidence(
+        normalized_item_id=normalized_item_id,
+        profile=profile,
+        domain_score=score,
+        materiality=materiality,
     )
 
-    assert platform_score == 0.9
-    assert platform["capped_points"] == 90
-    assert importance_level(platform_score) == "critical"
-    assert cosmetic_score == 0.2
-    assert cosmetic["capped_points"] == 20
-    assert importance_level(cosmetic_score) == "low"
-    assert "source" not in platform
-    assert "message_count" not in platform
+
+def test_event_importance_uses_strongest_valid_material_domain_evidence() -> None:
+    score, breakdown = calculate_event_importance(
+        [
+            _importance(1, 0.6, profile="activity_announcement"),
+            _importance(2, 0.72, profile="gameplay_announcement"),
+            _importance(3, 0.84, profile="activity_free_skin"),
+            _importance(4, 0.99, materiality="duplicate"),
+        ]
+    )
+
+    assert score == 0.84
+    assert importance_level(score) == "critical"
+    assert breakdown["policy_version"] == "event-importance-v2-domain-evidence"
+    assert breakdown["method"] == "max_material_domain_score"
+    assert breakdown["dominant_profile"] == "activity_free_skin"
+    assert breakdown["dominant_normalized_item_id"] == 3
+    assert breakdown["contribution_count"] == 3
+    assert breakdown["ignored_evidence_reasons"] == {"non_material": 1}
+
+
+def test_event_importance_fallback_is_zero_and_audits_invalid_evidence() -> None:
+    score, breakdown = calculate_event_importance(
+        [
+            _importance(1, None),
+            _importance(2, 1.2),
+            _importance(3, 0.8, profile=None),
+            _importance(4, 0.9, materiality="context_only"),
+        ]
+    )
+
+    assert score == 0.0
+    assert breakdown["dominant_profile"] is None
+    assert breakdown["contribution_count"] == 0
+    assert breakdown["ignored_evidence_count"] == 4
 
 
 def test_credibility_deduplicates_republishers_and_rewards_independent_support() -> None:

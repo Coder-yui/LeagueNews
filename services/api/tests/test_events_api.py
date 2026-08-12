@@ -165,6 +165,9 @@ def test_event_list_and_detail_present_current_projection_and_material_timeline(
 
         assert page.total == 1
         assert page.items[0].current_summary == "官网确认 26.17 平衡调整。"
+        assert page.items[0].category == "lol_pc"
+        assert page.items[0].message_count == 3
+        assert page.items[0].source_count == 3
         assert page.items[0].credibility_level == "officially_confirmed"
         assert page.items[0].primary_source.source_name == "Presentation official"
         assert page.items[0].best_media_url == "/media/image.jpg"
@@ -180,6 +183,71 @@ def test_event_list_and_detail_present_current_projection_and_material_timeline(
         assert len(detail.related_messages) == 3
         assert len(detail.evidence) == 3
         assert {evidence.message_revision for evidence in detail.evidence} == {1}
+
+
+def test_event_api_category_filter_is_server_side_and_counts_distinct_messages() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        pc_source = Source(name="PC filter source")
+        esports_source = Source(name="Esports filter source")
+        db.add_all([pc_source, esports_source])
+        db.flush()
+        pc = _item(db, source=pc_source, external_id="pc-filter", title="PC event")
+        esports = _item(db, source=esports_source, external_id="esports-filter", title="Esports event")
+        db.commit()
+        pc_event, _ = create_event(
+            db,
+            normalized_item_id=pc.id,
+            mention_index=0,
+            event_family="gameplay_release",
+            products=["lol_pc"],
+            canonical_anchors={"release_name": "pc:event"},
+            aggregation_key="pc-filter-event",
+            title="PC event",
+            current_summary="PC event",
+        )
+        esports_event, _ = create_event(
+            db,
+            normalized_item_id=esports.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={"match": "match:event"},
+            aggregation_key="esports-filter-event",
+            title="Esports event",
+            current_summary="Esports event",
+        )
+        add_event_mention(
+            db,
+            event_id=pc_event.id,
+            normalized_item_id=pc.id,
+            mention_index=1,
+            relation="mentions",
+            source_role="ordinary_account",
+            materiality="context_only",
+        )
+        page = EventPageRead.model_validate(
+            list_events(
+                category="lol_pc",
+                product=None,
+                event_family=None,
+                lifecycle=None,
+                credibility_level=None,
+                importance_level=None,
+                heat_level=None,
+                search=None,
+                sort_by="latest",
+                limit=25,
+                offset=0,
+                db=db,
+            )
+        )
+        assert page.total == 1
+        assert page.items[0].id == pc_event.id
+        assert page.items[0].message_count == 1
+        assert page.items[0].source_count == 1
+        assert esports_event.id != pc_event.id
 
 
 def test_official_denial_updates_credibility_and_lifecycle_without_deleting_event() -> None:

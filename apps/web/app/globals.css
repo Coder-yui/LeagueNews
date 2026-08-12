@@ -202,6 +202,10 @@ nav a.active { color: var(--ink); border-color: var(--ink); }
 footer { display: flex; justify-content: space-between; padding: 26px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 
 .event-hero { padding-bottom: 54px; }
+.event-category-tabs { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 34px; border-bottom: 1px solid var(--line); }
+.event-category-tabs a { padding: 12px 18px 11px; border-bottom: 3px solid transparent; color: var(--muted); font-size: 13px; font-weight: 800; }
+.event-category-tabs a:first-child { padding-left: 0; }
+.event-category-tabs a.active { border-color: var(--ink); color: var(--ink); }
 .event-card .importance-badge { background: #fff0d8; color: #7d4a0d; }
 .event-detail { max-width: 1040px; }
 .event-metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 28px; border: 1px solid var(--ink); background: var(--ink); }

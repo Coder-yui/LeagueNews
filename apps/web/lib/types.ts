@@ -162,6 +162,7 @@ export type EventCard = {
   current_summary: string;
   products: string[];
   event_family: string;
+  category: "esports" | "lol_pc" | "tft" | "other_products" | "ecosystem";
   lifecycle_status: string;
   importance_score: number;
   importance_level: string;
@@ -169,6 +170,8 @@ export type EventCard = {
   credibility_level: string;
   heat_score: number;
   heat_level: string;
+  message_count: number;
+  source_count: number;
   message_count_total: number;
   message_count_24h: number;
   unique_sources_24h: number;
@@ -238,6 +241,7 @@ export type EventPage = {
   event_family_options: string[];
   lifecycle_options: string[];
   credibility_options: string[];
+  category_options: Array<EventCard["category"]>;
 };
 
 export type PipelineJob = {

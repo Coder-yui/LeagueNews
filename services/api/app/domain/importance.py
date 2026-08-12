@@ -117,6 +117,16 @@ class ProfileRoute:
     profile: ImportanceProfile
 
 
+@dataclass(frozen=True, slots=True)
+class DomainImportanceResult:
+    profile: ImportanceProfile
+    score: float
+    band: ScoreBand
+    modifiers: tuple[dict[str, object], ...]
+    modifier_total: float
+    pre_clamp_score: float
+
+
 class ImportanceFeatures(TypedDict):
     scale: ImportanceScale
     audience_region: AudienceRegion
@@ -463,15 +473,14 @@ def _modifier(key: str, value: float, evidence: str) -> dict[str, object]:
     return {"key": key, "value": round(value, 4), "evidence": evidence}
 
 
-def calculate_importance(
+def score_domain_importance(
     features: ImportanceFeatures,
     *,
     message_type: str,
     topics: list[str],
-    content_form: str = "original",
     content: str = "",
-) -> tuple[float, dict[str, object]]:
-    """Calculate message importance from classification and bounded features."""
+) -> DomainImportanceResult:
+    """Score the intrinsic importance of LeagueNews content."""
     profile = derive_importance_profile(
         message_type=message_type,
         topics=topics,
@@ -553,24 +562,50 @@ def calculate_importance(
     profile_modifier_total = sum(float(item["value"]) for item in modifiers)
     pre_clamp = band.base + profile_modifier_total
     profile_score = round(max(band.floor, min(band.cap, pre_clamp)), 4)
+    return DomainImportanceResult(
+        profile=profile,
+        score=profile_score,
+        band=band,
+        modifiers=tuple(modifiers),
+        modifier_total=round(profile_modifier_total, 4),
+        pre_clamp_score=round(pre_clamp, 4),
+    )
+
+
+def calculate_importance(
+    features: ImportanceFeatures,
+    *,
+    message_type: str,
+    topics: list[str],
+    content_form: str = "original",
+    content: str = "",
+) -> tuple[float, dict[str, object]]:
+    """Calculate message importance from domain score and message-only modifiers."""
+    domain = score_domain_importance(
+        features,
+        message_type=message_type,
+        topics=topics,
+        content=content,
+    )
+    modifiers = list(domain.modifiers)
     if content_form == "repost":
         modifiers.append(_modifier("content_form", -0.08, "内容形式为 repost"))
     modifier_total = sum(float(item["value"]) for item in modifiers)
-    content_form_delta = modifier_total - profile_modifier_total
-    final = round(max(0.0, min(1.0, profile_score + content_form_delta)), 4)
+    content_form_delta = modifier_total - domain.modifier_total
+    final = round(max(0.0, min(1.0, domain.score + content_form_delta)), 4)
     return final, {
         "policy_version": IMPORTANCE_POLICY_VERSION,
         "score_kind": "message_importance",
-        "importance_profile": profile,
+        "importance_profile": domain.profile,
         "message_type": message_type,
         "topics": topics,
-        "base_score": band.base,
-        "score_band": {"floor": band.floor, "cap": band.cap},
+        "base_score": domain.band.base,
+        "score_band": {"floor": domain.band.floor, "cap": domain.band.cap},
         "modifiers": modifiers,
         "modifier_total": round(modifier_total, 4),
-        "profile_modifier_total": round(profile_modifier_total, 4),
-        "pre_clamp_score": round(pre_clamp, 4),
-        "profile_score": profile_score,
+        "profile_modifier_total": domain.modifier_total,
+        "pre_clamp_score": domain.pre_clamp_score,
+        "profile_score": domain.score,
         "final_score": final,
     }
 

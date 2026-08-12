@@ -22,6 +22,9 @@ async def setup(uid: str, status_file: Path | None) -> int:
         )
         for _ in range(120):
             try:
+                if not await browser.has_cookie("SUB"):
+                    await asyncio.sleep(5)
+                    continue
                 payload = await browser.get_json(
                     "https://weibo.com/ajax/statuses/searchProfile?"
                     f"uid={uid}&page=1&hasori=1&hastext=1&haspic=1&"
@@ -29,6 +32,9 @@ async def setup(uid: str, status_file: Path | None) -> int:
                 )
                 if payload.get("ok") == 1:
                     count = len((payload.get("data") or {}).get("list") or [])
+                    await browser.save_cookies(
+                        settings.project_root / ".secrets" / "weibo-cookies.json"
+                    )
                     _write_status(
                         status_file,
                         {"status": "authenticated", "sample_count": count},

@@ -1,41 +1,18 @@
-from typing import Any, Final
+from dataclasses import dataclass
+from typing import Any, Final, Iterable
 
 from app.domain.event_types import IMPORTANCE_POLICY_VERSION
 
 
-FAMILY_BASE: Final = {
-    "gameplay_balance": 18,
-    "gameplay_release": 25,
-    "cosmetic_release": 10,
-    "player_activity": 10,
-    "commercial_offer": 8,
-    "service_incident": 20,
-    "security_enforcement": 22,
-    "esports_match": 8,
-    "esports_schedule": 10,
-    "roster_change": 15,
-    "esports_rules": 20,
-    "universe_release": 15,
-    "media_release": 15,
-    "corporate_change": 25,
-    "platform_service": 22,
-    "other_named_development": 10,
-}
-SCOPE_POINTS: Final = {
-    "individual": 0,
-    "group": 8,
-    "product_segment": 14,
-    "product_wide": 22,
-    "ecosystem": 28,
-}
-MAGNITUDE_POINTS: Final = {"minor": 0, "moderate": 10, "major": 20, "transformative": 30}
-DURATION_POINTS: Final = {
-    "transient": 0,
-    "short_term": 4,
-    "cycle_or_season": 10,
-    "long_term": 16,
-}
-URGENCY_POINTS: Final = {"none": 0, "timely": 4, "immediate": 8}
+MAX_BREAKDOWN_EVIDENCE: Final = 10
+
+
+@dataclass(frozen=True, slots=True)
+class EventImportanceEvidence:
+    normalized_item_id: int
+    profile: str | None
+    domain_score: object
+    materiality: str
 
 
 def importance_level(score: float) -> str:
@@ -49,26 +26,50 @@ def importance_level(score: float) -> str:
 
 
 def calculate_event_importance(
-    *, event_family: str, impact: dict[str, Any]
+    evidence: Iterable[EventImportanceEvidence],
 ) -> tuple[float, dict[str, Any]]:
-    try:
-        components = {
-            "event_family_base": FAMILY_BASE[event_family],
-            "scope": SCOPE_POINTS[str(impact["scope"])],
-            "magnitude": MAGNITUDE_POINTS[str(impact["magnitude"])],
-            "duration": DURATION_POINTS[str(impact["duration"])],
-            "urgency": URGENCY_POINTS[str(impact["urgency"])],
-        }
-    except KeyError as exc:
-        raise ValueError(f"unsupported event importance input: {exc.args[0]}") from exc
-    raw_points = sum(components.values())
-    points = min(100, max(0, raw_points))
-    score = round(points / 100, 6)
+    """Aggregate an event's strongest valid material domain evidence."""
+    contributions: list[dict[str, Any]] = []
+    ignored_reasons: dict[str, int] = {}
+    for item in evidence:
+        if item.materiality != "material_update":
+            reason = "non_material"
+        elif not isinstance(item.domain_score, (int, float)) or isinstance(
+            item.domain_score, bool
+        ):
+            reason = "missing_or_invalid_domain_score"
+        elif not 0 <= float(item.domain_score) <= 1:
+            reason = "domain_score_out_of_range"
+        elif not isinstance(item.profile, str) or not item.profile:
+            reason = "missing_or_invalid_profile"
+        else:
+            contributions.append(
+                {
+                    "normalized_item_id": item.normalized_item_id,
+                    "profile": item.profile,
+                    "domain_score": round(float(item.domain_score), 4),
+                    "materiality": item.materiality,
+                }
+            )
+            continue
+        ignored_reasons[reason] = ignored_reasons.get(reason, 0) + 1
+
+    contributions.sort(
+        key=lambda item: (-item["domain_score"], item["normalized_item_id"])
+    )
+    dominant = contributions[0] if contributions else None
+    score = float(dominant["domain_score"]) if dominant else 0.0
     return score, {
         "policy_version": IMPORTANCE_POLICY_VERSION,
-        "impact": dict(impact),
-        "components": components,
-        "raw_points": raw_points,
-        "capped_points": points,
+        "method": "max_material_domain_score",
+        "score": score,
         "level": importance_level(score),
+        "dominant_profile": dominant["profile"] if dominant else None,
+        "dominant_normalized_item_id": (
+            dominant["normalized_item_id"] if dominant else None
+        ),
+        "contribution_count": len(contributions),
+        "contributing_evidence": contributions[:MAX_BREAKDOWN_EVIDENCE],
+        "ignored_evidence_count": sum(ignored_reasons.values()),
+        "ignored_evidence_reasons": ignored_reasons,
     }

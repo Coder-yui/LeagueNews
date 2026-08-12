@@ -143,3 +143,25 @@ def test_tieba_filters_forum_and_concatenates_all_author_floors() -> None:
     assert [post["floor"] for post in item.provenance["author_posts"]] == [1, 3]
     assert [call[1] for call in client.post_calls] == [1, 2]
     assert all(call[2]["only_thread_author"] is True for call in client.post_calls)
+
+
+def test_tieba_finishes_when_scan_only_finds_pending_threads() -> None:
+    threads, pages = load_fixture_objects()
+    client = FakeTiebaClient(threads=threads, post_pages=pages)
+    connector = BaiduTiebaConnector(client_factory=lambda: client)
+    thread_ids = [str(int(thread.tid)) for thread in threads]
+
+    batch = asyncio.run(
+        connector.collect(
+            ConnectorRequest(
+                source=tieba_source(),
+                limit=1,
+                since=None,
+                options={},
+                cursor={"pending_ids": thread_ids},
+            )
+        )
+    )
+
+    assert len(batch) == 0
+    assert batch.truncated is False

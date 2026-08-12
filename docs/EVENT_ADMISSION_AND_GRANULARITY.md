@@ -12,6 +12,24 @@
 准入不重新做消息分类或通用实体提取，不用消息 topic 数量决定事件数量，不按候选逐个问模型，
 也不因追求召回率在 v1 引入向量数据库。
 
+事件粒度的核心原则是：**独立生命周期 + 独立更新 + 用户认知上的独立事情**。商品、奖励、组成部分、
+子项目和附件默认进入主 Event 的 `key_facts`、structured facts 或 components，不因为实体或 topic
+数量自动拆分。
+
+本轮边界规则：
+
+- 周免英雄（中文“周免英雄/免费英雄轮换”、英文 `free champion rotation`）在 event admission 层
+  `skip`，保存明确原因且 0 次事件模型调用；英雄平衡调整和新英雄发布不命中排除规则。
+- 神话商店轮换按每个市场、每个轮换周期一个 `commercial_offer` Event。规范化 anchors 为
+  `shop=mythic_shop`、`market`、`rotation_period`；同市场同周期的补充/修正 update，下一周期或另一
+  市场 create。轮换商品都是该事件的 facts/components。
+- 普通电竞比赛按每场真实比赛一个 `esports_match` Event，适用于 LPL、LCK、LEC 等所有赛事。每日
+  赛前预告或赛后总结只创建/update 对应比赛，不创建 Daily Preview、Daily Schedule、Daily Summary
+  或 Results Summary Event。正式公布未知赛程、延期、提前、重赛、场地/对阵/赛制变化仍可进入
+  `esports_schedule`。
+- 活动、付费活动、通行证、活动商店和奖励体系内的皮肤、臻彩、图标、边框、表情、代币、战利品和
+  其他商品默认归活动主 Event；只有子对象拥有独立发布日期和后续生命周期时才允许另建 Event。
+
 ## 输入与输出
 
 输入是已发布且位于最新 RawItem 版本链末端的 `NormalizedItem`，以及只读的 Source、发布时间、
@@ -63,6 +81,7 @@ family，但不能创造枚举外类型。`products` 原样复用，最多三个
 - `publication_status != published` 或不是最新 RawItem 修订。
 - `content_form in {media_only, link_only}`。
 - `products=[unknown]`、`message_type=unknown`、`topics=[unknown]` 且无可用核心实体。
+- editorial exclusion：周免英雄/免费英雄轮换。
 - 明确的纯观点、指南、泛互动、二创、赛事集锦或推广，且没有版本、日期、命名活动、比赛、
   发布对象等强锚点。
 - 完全重复采集或已存在相同成功运行。
@@ -148,7 +167,6 @@ proposed_summary: string | null
 latest_development: string | null
 key_fact_changes: {add[], replace[], remove[]}
 unresolved_point_changes: {add[], resolve[]}
-impact: {scope, magnitude, duration, urgency}
 evidence_excerpt: string
 candidate_rejections: [{event_id, reason}]
 ```

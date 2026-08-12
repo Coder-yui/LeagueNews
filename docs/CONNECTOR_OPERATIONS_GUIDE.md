@@ -108,26 +108,37 @@ Invoke-RestMethod http://localhost:8000/api/v1/sources |
 调用时推荐始终显式传 `source_id`。如果某个 `connector_type` 有多个启用的 Source，
 省略 `source_id` 会返回 `409 multiple sources match; provide source_id`。
 
-当前迁移数据库中的 Source ID 如下。全新数据库会创建相同的 15 个内置信源，但 ID 不属于
-API 契约；其他环境始终以上述 `/sources` 返回值为准。
+全新数据库会创建以下 26 个内置信源。Source ID 不属于 API 契约；各环境始终以
+`/sources` 返回值为准。
 
-| ID | Connector | Source |
-|---:|---|---|
-| 1 | `manual` | 手动导入 |
-| 2 | `tencent_lol` | 腾讯英雄联盟官方网站 |
-| 3 | `riot_official` | Riot Games Official |
-| 4 | `x_twitter` | RiotPhroxzon |
-| 7 | `x_twitter` | lolesports |
-| 8 | `x_twitter` | Spideraxe30 |
-| 12 | `x_twitter` | SkinSpotlights |
-| 16 | `x_twitter` | LeagueofLegends |
-| 17 | `weibo` | 英雄联盟赛事 |
-| 18 | `weibo` | 英雄联盟 |
-| 19 | `weibo` | 恋恋红茶_244 |
-| 20 | `weibo` | 召唤师Park |
-| 21 | `weibo` | _尧阿尧y_ |
-| 22 | `baidu_tieba` | lol半价吧 · 小老鼠小伟 |
-| 23 | `baidu_tieba` | lol半价吧 · 凤舞天_惊鸿恋 |
+| Connector | Source | 稳定身份/配置 |
+|---|---|---|
+| `manual` | 手动导入 | - |
+| `tencent_lol` | 腾讯英雄联盟官方网站 | `target=24` |
+| `tencent_lol` | 腾讯英雄联盟赛事官网（LPL） | `target=25` |
+| `riot_official` | Riot Games Official | `leagueoflegends.com` |
+| `x_twitter` | Matt Leung-Harrison (@RiotPhroxzon) | `riotphroxzon` |
+| `x_twitter` | League of Legends Dev Team (@LoLDev) | `loldev` |
+| `x_twitter` | Riot Phlox (@RiotPhlox) | `riotphlox` |
+| `x_twitter` | LCK (@LCK) | `lck` |
+| `x_twitter` | LEC (@LEC) | `lec` |
+| `x_twitter` | T1 LoL (@T1LoL) | `t1lol` |
+| `x_twitter` | Gen.G Esports (@GenG) | `geng` |
+| `x_twitter` | G2 League of Legends (@G2League) | `g2league` |
+| `x_twitter` | LoL Esports (@lolesports) | `lolesports` |
+| `x_twitter` | Spideraxe (@Spideraxe30) | `spideraxe30` |
+| `x_twitter` | SkinSpotlights (@SkinSpotlights) | `skinspotlights` |
+| `x_twitter` | League of Legends (@LeagueofLegends) | `leagueoflegends` |
+| `weibo` | 英雄联盟赛事 | `5756404150` |
+| `weibo` | 英雄联盟 | `5720474518` |
+| `weibo` | BLG电子竞技俱乐部 | `5926660141` |
+| `weibo` | 滔搏电子竞技俱乐部 | `5449734852` |
+| `weibo` | 丶涵艺 | `1992350413` |
+| `weibo` | 恋恋红茶_244 | `2266865584` |
+| `weibo` | 召唤师Park | `2522098777` |
+| `weibo` | _尧阿尧y_ | `2600241232` |
+| `baidu_tieba` | lol半价吧 · 小老鼠小伟 | `86124184` |
+| `baidu_tieba` | lol半价吧 · 凤舞天_惊鸿恋 | `770437943` |
 
 ## 3. 统一 Connector Run 调用
 
@@ -274,9 +285,58 @@ Invoke-RestMethod `
 
 - 调用腾讯公开内容列表和详情接口；
 - 获取标题、正文、作者、发布时间和图片；
+- 详情标记为腾讯 LOL 站内跳转时，继续抓取 `lol.qq.com` 目标页；
+- `gicp/news` 跳转页按文章主体提取，自动识别腾讯旧页面的 GBK 编码；
+- 周免活动页不读取会随时间变化的空页面骨架，而是按 URL 中的 `siteId` 读取腾讯 CMS 历史
+  期次及官方英雄表，生成期数、日期、版本和英雄列表；
+- 站内跳转抓取或解析失败时整次运行失败，不以“查看完整公告”占位块入库；站外跳转仅保留
+  `external_link`，不会继续抓取；
 - 清理上游正文中的非法控制字符；
 - 单次最多 50 条；
 - 语言写为 `zh-CN`。
+
+站内跳转成功解析后，RawItem 的 `canonical_url` 是实际目标页。目标 URL、响应长度和提取
+类型会写入脱敏 provenance 摘要，完整 HTML 不会写入数据库。
+
+## 8. 一次性历史批量采集（仅 RawItem）
+
+需要回补某个时间点之后的历史消息时，使用可断点续传脚本，不要循环调用 API 端点：
+
+```bash
+services/api/.venv/bin/python services/api/scripts/bulk_collect_raw_items.py \
+  --since 2026-08-01T00:00:00+08:00 \
+  --limit 10 \
+  --batch-delay 30 \
+  --source-delay 30 \
+  --error-delay 60 \
+  --max-retries 3
+```
+
+脚本只选择 active Source，并排除 `x_twitter` 和 `manual`。如需在代理可用时单独回补 X，
+显式加上 `--include-x --connector-type x_twitter`，并使用独立的状态、报告和日志文件。每次批次会先完成平台抓取和
+共享 ingestion，再原子更新状态 JSON 和 Markdown 报告；调用 ingestion 时显式设置
+`enqueue_downstream=False`，因此本任务不会创建 `pipeline_jobs`，也不会触发下游处理。
+
+默认文件位于 `.run/`：
+
+- `bulk_collect_raw_items_20260801_state.json`：每个 Source 的游标、状态和累计计数；
+- `bulk_collect_raw_items_20260801_report.md`：可直接阅读的采集报告；
+- `bulk_collect_raw_items_20260801.log`：后台标准输出和错误。
+
+进程中断、代理断开或单批重试耗尽后，直接用相同命令重新运行即可。已完成 Source 会跳过，
+未完成 Source 从最近一次成功批次的 cursor 继续。默认批次串行执行并等待 30 秒，网络错误
+按 60 秒、120 秒递增等待；不要在同一状态文件上同时启动两个实例。
+
+X 批量示例（与非 X 批次使用同一 `since`，但状态文件独立）：
+
+```bash
+services/api/.venv/bin/python services/api/scripts/bulk_collect_raw_items.py \
+  --include-x --connector-type x_twitter \
+  --since 2026-08-01T00:00:00+08:00 \
+  --limit 5 --batch-delay 60 --source-delay 90 --error-delay 120 \
+  --state-file .run/bulk_collect_x_20260801_state.json \
+  --report-file .run/bulk_collect_x_20260801_report.md
+```
 
 ### 常见问题
 
@@ -291,6 +351,22 @@ Invoke-RestMethod `
 
 目标详情存在，但 `sContent` 为空或格式变化。用返回的 `docid` 检查详情接口；不要把空正文
 强行入库，应先修正解析。
+
+**`Tencent redirect content is missing` / `Tencent redirect article body is empty`**
+
+详情接口声明了 `lol.qq.com` 站内跳转，但 fetch 没有取得目标页，或目标页主体结构已变化。
+检查 `sRedirectURL` 是否仍可访问以及正文容器是否仍为 `.article`、`article` 或 `main`；修复
+fixture 和解析器后再运行，不要降级为链接占位块。
+
+**`Tencent week-free ...`**
+
+周免 URL 缺少 `siteId`、CMS 中找不到对应历史期次，或英雄 ID 无法在官方英雄表映射时会
+失败。分别检查活动页 URL、`ZMSubject_Board_Site.js` 和 `hero_list.js`；不得用当前最新一期
+替代缺失的历史期次。
+
+修复采集器后需要重采历史区间时，通过标准 Connector Run 传入早于目标消息的 `since`。
+相同 `external_id` 且正文语义哈希变化时，ingestion 会创建新 revision 并保留旧 RawItem，
+不会原地改写历史证据。
 
 ## 6. X 指定账号
 
@@ -390,25 +466,27 @@ uv run python scripts/setup_weibo_browser.py
 程序会打开一个独立 Edge 窗口。完成微博登录后保持窗口开启；脚本每 5 秒验证一次
 “英雄联盟赛事”账号时间线。验证成功后窗口自动关闭。
 
-登录数据保存在：
+登录数据保存在专用 Profile，并在验证成功前自动导出当前 Cookie：
 
 ```text
 E:\leagueNews\.secrets\weibo-browser-profile
+E:\leagueNews\.secrets\weibo-cookies.json
 ```
 
 默认配置：
 
 ```dotenv
 WEIBO_BROWSER_PROFILE=.secrets/weibo-browser-profile
+WEIBO_COOKIE_FILE=
 WEIBO_BROWSER_CHANNEL=msedge
 WEIBO_BROWSER_HEADLESS=true
 WEIBO_BROWSER_USER_AGENT=
 ```
 
-生产环境不能依赖从 Windows 复制 Chromium Profile 后继续读取加密 Cookie。应把本地已登录
-上下文的 `context.cookies()` 导出为 Playwright Cookie JSON，保存为服务器
-`.secrets/weibo-cookies.json`，并通过 `WEIBO_COOKIE_FILE` 挂载。云端还要使用建立该登录态时
-的 `WEIBO_BROWSER_USER_AGENT`；每个浏览器上下文启动时都会重新注入 Cookie。
+`WEIBO_COOKIE_FILE` 留空时，本地自动使用上述默认 Cookie 文件。生产环境不能依赖从
+Windows 复制 Chromium Profile 后继续读取加密 Cookie；应把自动导出的
+`.secrets/weibo-cookies.json` 安全上传并通过 `WEIBO_COOKIE_FILE` 挂载。云端还要使用建立
+该登录态时的 `WEIBO_BROWSER_USER_AGENT`；每个浏览器上下文启动时都会重新注入 Cookie。
 
 关闭占用专用 Profile 的 Edge 后导出：
 

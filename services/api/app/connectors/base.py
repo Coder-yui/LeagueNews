@@ -94,6 +94,7 @@ PlatformRecordT = TypeVar("PlatformRecordT")
 class FetchBatch(Generic[PlatformRecordT], Sequence[PlatformRecordT]):
     records: list[PlatformRecordT]
     truncated: bool = False
+    skipped_ids: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         return len(self.records)
@@ -142,18 +143,25 @@ class BaseConnector(ABC, Generic[PlatformRecordT]):
         if isinstance(fetched, FetchBatch):
             records = fetched.records
             truncated = fetched.truncated
+            skipped_ids = fetched.skipped_ids
         else:
             records = fetched
             # Legacy connectors cannot prove truncation from list length alone.
             # Reliability-sensitive connectors return FetchBatch explicitly.
             truncated = False
+            skipped_ids = ()
         items = [self.map_record(record) for record in records]
         cursor_used = dict(request.cursor or {})
         return CandidateBatch(
             items=items,
             truncated=truncated,
             cursor_used=cursor_used,
-            next_cursor=_advance_cursor(cursor_used, items, truncated=truncated),
+            next_cursor=_advance_cursor(
+                cursor_used,
+                items,
+                truncated=truncated,
+                skipped_ids=skipped_ids,
+            ),
         )
 
     @abstractmethod
@@ -172,6 +180,7 @@ def _advance_cursor(
     items: list[RawItemCandidate],
     *,
     truncated: bool,
+    skipped_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     identifiers = [item.external_id for item in items if item.external_id]
     timestamps = [
@@ -185,6 +194,7 @@ def _advance_cursor(
         if isinstance(value, (str, int))
     }
     pending_ids.update(identifiers)
+    pending_ids.update(str(value) for value in skipped_ids)
     pending_high = _parse_cursor_time(current.get("pending_high_watermark"))
     if timestamps:
         newest = max(timestamps)

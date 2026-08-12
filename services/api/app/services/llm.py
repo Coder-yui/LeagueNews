@@ -32,6 +32,7 @@ from app.domain.message_taxonomy import (
     message_content_error,
 )
 from app.domain.message_entities import EntityType
+from app.domain.event_families import canonicalize_event_anchors, has_complete_mythic_shop_identity
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
@@ -356,7 +357,23 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
         candidate_by_id = {int(candidate["event_id"]): candidate for candidate in candidates}
 
         def validate_event_decisions(result: EventAggregationResult) -> str | None:
+            guidance = message.get("editorial_granularity_guidance") or []
+            daily_match_roundup = "daily_esports_match_roundup" in guidance
             for mention in result.mentions:
+                if daily_match_roundup and mention.action != "ignore" and mention.event_family != "esports_match":
+                    return "daily match reminders/results may only create or update concrete esports_match events"
+                if mention.action == "create":
+                    normalized_anchors = canonicalize_event_anchors(
+                        mention.event_family, mention.canonical_anchors
+                    )
+                    if (
+                        mention.event_family == "commercial_offer"
+                        and normalized_anchors.get("shop") == "mythic_shop"
+                        and not has_complete_mythic_shop_identity(
+                            mention.event_family, normalized_anchors
+                        )
+                    ):
+                        return "mythic shop identity requires shop, market, and rotation_period anchors"
                 if admission_decision == "update_existing_only" and mention.action == "create":
                     return "update_existing_only 不允许 create"
                 if mention.action == "update":
@@ -389,6 +406,10 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 英雄改动通常是一个 gameplay_balance；同批皮肤系列通常是一个 cosmetic_release；版本公告中的
 平衡、活动和皮肤可以是三个独立 mention。宣传、观点、复述和附属素材没有独立状态变化时 ignore。
 
+事件粒度的首要判断是：子内容是否拥有独立生命周期、会独立更新，并且是用户认知上另一件值得单独
+知道的事情。商品、奖励、组成部分、子项目和附件默认是主事件的 key_facts 或 components；不要
+因为实体或 topic 数量拆分事件。
+
 规则：
 1. action=create 仅在存在稳定身份锚点且没有同一真实候选时使用；逐一填写同 family 强候选的
    candidate_rejections。action=update 必须引用提供的 candidate_event_id。admission_decision 为
@@ -396,13 +417,20 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 2. relation 使用 reports/supports/confirms/denies/corrects/mentions。responsible_official 仅用于当前
    原创官方来源在其职责范围内的直接表述；官方账号转发别人不是官方确认。
 3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
-   进展、关键事实、未决点和 impact。普通佐证用 corroboration_only，重复用 duplicate，上下文用
+   进展、关键事实和未决点。普通佐证用 corroboration_only，重复用 duplicate，上下文用
    context_only，后三者不得改写事件投影。
-4. impact 分别评价每个事件本身的 scope/magnitude/duration/urgency，不复制整条消息重要性，不因
-   官方身份、消息数量、热度或可信度改变。
-5. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
+4. 神话商店轮换必须按 market + rotation_period 作为一个 commercial_offer Event；轮换中的至臻、
+   臻彩、普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 至少表达
+   {"shop":"mythic_shop", "market":"...", "rotation_period":"..."}，同市场同周期必须 update，
+   不同市场或周期必须分开。
+5. 普通电竞比赛按每场真实比赛一个 esports_match Event。每日赛前预告、赛后结果汇总只能分别
+   mention/update 对应比赛；不要创建 Daily Preview、Daily Schedule、Daily Summary 或 Results Summary
+   Event。只有正式公布未知赛程、延期、提前、重赛、场地/对阵/赛制变化才是 esports_schedule。
+6. 活动、通行证、活动商店和奖励体系中的皮肤、臻彩、图标、边框、表情、代币和战利品默认是主活动
+   Event 的 key_facts/components；只有明确拥有独立发布日期和后续生命周期的新对象才可单独拆出。
+7. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
    英雄、皮肤系列、战队、选手、比赛、赛区或时间范围；不得虚构。
-6. mention_index 从 0 连续递增。一个响应可以同时更新多个事件、创建其他事件并忽略非独立内容。
+8. mention_index 从 0 连续递增。一个响应可以同时更新多个事件、创建其他事件并忽略非独立内容。
 只输出符合 schema 的 JSON。"""
         return await self._validated_json_completion(
             prompt=prompt,

@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterable
 from typing import Any, Final
 
@@ -58,6 +59,82 @@ STRONG_ANCHOR_KEYS: Final = frozenset(
         "champion",
     }
 )
+
+_MYTHIC_SHOP_VALUES = frozenset({"mythic_shop", "mythicshop", "神话商店"})
+_MYTHIC_SHOP_KEYS = frozenset({"shop", "store", "system", "service", "rotation_type"})
+_MARKET_KEYS = frozenset({"market", "region", "region_scope", "server"})
+_PERIOD_KEYS = frozenset(
+    {"rotation", "rotation_period", "rotation_window", "period", "window"}
+)
+
+
+def _anchor_strings(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _first_anchor_value(anchors: dict[str, Any], keys: frozenset[str]) -> str | None:
+    for key, value in anchors.items():
+        if key.casefold() in keys:
+            values = _anchor_strings(value)
+            if values:
+                return values[0]
+    return None
+
+
+def _normalize_market(value: str) -> str:
+    lowered = value.casefold().strip()
+    if lowered in {"中国", "中国大陆", "国服", "cn server", "china", "cn"}:
+        return "cn"
+    if lowered in {"海外", "外服", "国际服", "海外服", "overseas", "international"}:
+        return "overseas"
+    return re.sub(r"\s+", "_", lowered)
+
+
+def _normalize_period(value: str) -> str:
+    lowered = re.sub(r"\s+", " ", value.casefold().strip())
+    weekly = re.fullmatch(
+        r"(\d{4})\s*(?:(?:年|year)\s*)?(?:(?:第)?\s*(\d{1,2})\s*周|week\s*(\d{1,2}))",
+        lowered,
+    )
+    if weekly:
+        week = weekly.group(2) or weekly.group(3)
+        return f"{weekly.group(1)}-w{int(week):02d}"
+    return lowered.replace(" ", "-").replace("~", "/")
+
+
+def is_mythic_shop_event(event_family: str, anchors: dict[str, Any]) -> bool:
+    if event_family != "commercial_offer":
+        return False
+    return any(
+        str(value).casefold().replace(" ", "_") in _MYTHIC_SHOP_VALUES
+        for key, raw_value in anchors.items()
+        if key.casefold() in _MYTHIC_SHOP_KEYS
+        for value in _anchor_strings(raw_value)
+    )
+
+
+def canonicalize_event_anchors(event_family: str, anchors: dict[str, Any]) -> dict[str, Any]:
+    """Keep recurring mythic-shop identity independent from the listed products."""
+    copied = dict(anchors)
+    if not is_mythic_shop_event(event_family, copied):
+        return copied
+    market = _first_anchor_value(copied, _MARKET_KEYS)
+    period = _first_anchor_value(copied, _PERIOD_KEYS)
+    normalized = {"shop": "mythic_shop"}
+    if market:
+        normalized["market"] = _normalize_market(market)
+    if period:
+        normalized["rotation_period"] = _normalize_period(period)
+    return normalized
+
+
+def has_complete_mythic_shop_identity(event_family: str, anchors: dict[str, Any]) -> bool:
+    normalized = canonicalize_event_anchors(event_family, anchors)
+    return is_mythic_shop_event(event_family, normalized) and all(
+        isinstance(normalized.get(key), str) and bool(normalized[key])
+        for key in ("shop", "market", "rotation_period")
+    )
 
 
 def family_hints(topics: Iterable[str]) -> list[EventFamily]:

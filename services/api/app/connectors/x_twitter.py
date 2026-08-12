@@ -73,19 +73,25 @@ class XTwitterConnector(BaseConnector[object]):
             scan_limit = max(limit + len(pending_ids) + 1, limit + 1)
             scanned = 0
             reached_boundary = False
-            async for tweet in api.user_tweets(user.id, limit=scan_limit):
-                scanned += 1
-                tweet_id = clean_text(_attr(tweet, "id_str", "id"))
-                published_at = _attr(tweet, "date")
-                if isinstance(since, datetime) and isinstance(published_at, datetime):
-                    if published_at < since:
-                        reached_boundary = True
+            tweets = api.user_tweets(user.id, limit=scan_limit)
+            try:
+                async for tweet in tweets:
+                    scanned += 1
+                    tweet_id = clean_text(_attr(tweet, "id_str", "id"))
+                    published_at = _attr(tweet, "date")
+                    if isinstance(since, datetime) and isinstance(published_at, datetime):
+                        if published_at < since:
+                            reached_boundary = True
+                            break
+                    if tweet_id in pending_ids:
+                        continue
+                    records.append(tweet)
+                    if len(records) > limit:
                         break
-                if tweet_id in pending_ids:
-                    continue
-                records.append(tweet)
-                if len(records) > limit:
-                    break
+            finally:
+                close = getattr(tweets, "aclose", None)
+                if close is not None:
+                    await close()
             ordered = sorted(
                 records,
                 key=lambda record: (

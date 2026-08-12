@@ -6,15 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain.event_types import EventFamily, EventMateriality, EventRelation, EventSourceRole
 
 
-class EventImpact(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    scope: Literal["individual", "group", "product_segment", "product_wide", "ecosystem"]
-    magnitude: Literal["minor", "moderate", "major", "transformative"]
-    duration: Literal["transient", "short_term", "cycle_or_season", "long_term"]
-    urgency: Literal["none", "timely", "immediate"]
-
-
 class KeyFactChanges(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -61,7 +52,6 @@ class EventMentionDecision(BaseModel):
     unresolved_point_changes: UnresolvedPointChanges = Field(
         default_factory=UnresolvedPointChanges
     )
-    impact: EventImpact | None = None
     evidence_excerpt: str = Field(default="", max_length=2000)
     candidate_rejections: list[CandidateRejection] = Field(default_factory=list)
 
@@ -76,20 +66,13 @@ class EventMentionDecision(BaseModel):
                 self.proposed_summary or ""
             ).strip():
                 raise ValueError("create requires event_title and proposed_summary")
-            if self.materiality != "material_update" or self.impact is None:
-                raise ValueError("create requires material_update and impact")
+            if self.materiality != "material_update":
+                raise ValueError("create requires material_update")
         elif self.action == "update":
             if self.candidate_event_id is None:
                 raise ValueError("update requires candidate_event_id")
             if not self.evidence_excerpt.strip():
                 raise ValueError("update requires evidence_excerpt")
-
-        if (
-            self.action in {"create", "update"}
-            and self.materiality == "material_update"
-            and self.impact is None
-        ):
-            raise ValueError("material create/update requires impact")
 
         if self.materiality != "material_update" and (
             self.event_title is not None
@@ -97,7 +80,6 @@ class EventMentionDecision(BaseModel):
             or self.latest_development is not None
             or self.key_fact_changes.has_changes()
             or self.unresolved_point_changes.has_changes()
-            or self.impact is not None
         ):
             raise ValueError("non-material mentions cannot change the event projection")
         return self

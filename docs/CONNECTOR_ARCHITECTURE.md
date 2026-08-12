@@ -24,13 +24,34 @@ ConnectorRequest
 ## 四个边界
 
 1. **Source**：一个具体站点或账号。账号标识和平台配置保存在 `sources`。
-2. **fetch**：只访问平台并返回平台形状的 record，不构造 RawItem，不访问数据库。
+2. **fetch**：只访问平台并返回平台形状的 record，不构造 RawItem，不访问数据库。一个平台
+   record 可以由列表、详情、受信任跳转页等多个平台响应组成，但所有网络访问必须在 fetch
+   阶段完成。
 3. **map_record**：纯映射。把一个平台 record 转成 `RawItemCandidate`，不访问网络或数据库。
 4. **ingestion**：与平台无关，统一校验、计算语义哈希、识别 revision、下载图片并事务入库。
    启用自动化时只额外创建 queued job，不在请求内执行 AI。
 
 `RawItemCandidate` 构造时会通过同一套 ContentBlock Pydantic 契约校验。Connector 不能
 返回旧的 `video` block、非 HTTP embed、空文字块或任意未知字段。
+
+## 平台跳转与多资源正文
+
+平台详情有时只返回跳转标记和目标 URL。Connector 不能把平台自有、可解析的正文静默降级
+为 `external_link`：
+
+- fetch 只能跟随 connector 明确允许的协议、主机和页面类型；不得把上游 URL 当作任意网络
+  访问入口；
+- fetch 负责取得跳转页及其必需的公开数据接口，组装成平台 record；
+- map_record 从该 record 生成完整、有序的 ContentBlock，并把实际正文页作为
+  `canonical_url`；
+- provenance 只保存目标 URL、响应长度、提取类型等诊断摘要，不复制整页 HTML；
+- 受支持的跳转页抓取或解析失败时，本次 connector run 必须失败，不能再次写入只有占位链接
+  的 RawItem；真正离开平台信任边界的外部链接仍可保存为 `external_link`。
+
+腾讯 LOL connector 当前只主动抓取 HTTPS `lol.qq.com` 下的两类路径：
+`gicp/news/*.html` 从文章主体提取文字和图片；固定周免活动页按 `siteId` 联合腾讯 CMS
+历史期次与官方英雄表生成期数、日期、版本和英雄列表。这样历史周免不会因活动页默认展示
+最新一期而被错误覆盖。
 
 ## 去重与平台内容更新
 

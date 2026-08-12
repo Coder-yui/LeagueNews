@@ -5,6 +5,7 @@ from app.domain.importance import (
     calculate_importance,
     calculate_message_priority,
     derive_importance_profile,
+    score_domain_importance,
 )
 from app.domain.message_taxonomy import (
     CONTENT_FORM_RULES,
@@ -366,3 +367,86 @@ def test_importance_policy_is_classification_native() -> None:
     assert weekly_score == 0.5
     assert weekly_calculation["importance_profile"] == "weekly_free_champion_rotation"
     assert weekly_calculation["modifiers"] == []
+
+
+def _importance_features(**overrides: object) -> dict[str, object]:
+    return {
+        "scale": "standard",
+        "audience_region": "cn",
+        "competition_region": "none",
+        "prominence": "normal",
+        "skin_tier": "none",
+        "is_bulk_update": False,
+        "evidence": [],
+        **overrides,
+    }
+
+
+def test_shared_domain_policy_preserves_representative_message_scores() -> None:
+    cases = [
+        ("game_patch_notes", ["balance_gameplay"], "版本公告", "patch_official_notes", 0.92),
+        ("game_announcement", ["gameplay"], "玩法公布", "gameplay_announcement", 0.86),
+        ("game_announcement", ["activities_rewards"], "活动公布", "activity_announcement", 0.72),
+        ("game_community_notice", ["activities_rewards"], "免费领取皮肤", "activity_free_skin", 0.84),
+        ("game_announcement", ["cosmetics"], "皮肤公布", "cosmetic_announcement", 0.68),
+        ("game_community_notice", ["shop_monetization"], "皮肤轮换", "shop_cosmetic_rotation", 0.58),
+        ("esports_announcement", ["esports_matches"], "常规赛", "esports_regular", 0.57),
+        ("esports_announcement", ["esports_matches"], "季后赛", "esports_playoffs", 0.67),
+        ("esports_announcement", ["esports_matches"], "决赛", "esports_final", 0.73),
+        ("esports_announcement", ["esports_matches"], "世界赛决赛", "worlds_key", 0.77),
+        ("esports_announcement", ["esports_rosters"], "阵容公布", "roster_announcement", 0.62),
+        ("esports_rumor_speculation", ["esports_rosters"], "转会传闻", "esports_rumor", 0.47),
+        ("other_lol_product_announcement", ["platform_services"], "产品公告", "other_product_announcement", 0.68),
+        ("riot_ecosystem_announcement", ["platform_services"], "生态公告", "riot_announcement", 0.66),
+    ]
+    for message_type, topics, content, profile, expected in cases:
+        features = _importance_features()
+        domain = score_domain_importance(
+            features, message_type=message_type, topics=topics, content=content
+        )
+        message_score, calculation = calculate_importance(
+            features, message_type=message_type, topics=topics, content=content
+        )
+        assert domain.profile == profile
+        assert domain.score == expected
+        assert message_score == expected
+        assert calculation["profile_score"] == expected
+
+
+def test_domain_modifiers_remain_bounded_and_repost_stays_message_only() -> None:
+    esports_features = _importance_features(
+        scale="major", competition_region="lpl", prominence="star"
+    )
+    worlds = score_domain_importance(
+        esports_features,
+        message_type="esports_announcement",
+        topics=["esports_matches"],
+        content="世界赛决赛",
+    )
+    assert worlds.score == 0.86
+    assert {modifier["key"] for modifier in worlds.modifiers} == {
+        "scale",
+        "competition_region",
+        "prominence",
+    }
+
+    cosmetic_features = _importance_features(
+        scale="major", skin_tier="ultimate", is_bulk_update=True
+    )
+    cosmetic = score_domain_importance(
+        cosmetic_features,
+        message_type="game_announcement",
+        topics=["cosmetics"],
+        content="批量终极皮肤上新",
+    )
+    repost_score, calculation = calculate_importance(
+        cosmetic_features,
+        message_type="game_announcement",
+        topics=["cosmetics"],
+        content_form="repost",
+        content="批量终极皮肤上新",
+    )
+    assert cosmetic.score == 0.8
+    assert repost_score == 0.72
+    assert calculation["profile_score"] == cosmetic.score
+    assert calculation["modifiers"][-1]["key"] == "content_form"

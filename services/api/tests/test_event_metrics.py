@@ -27,37 +27,31 @@ def _importance(
 def test_event_importance_uses_strongest_valid_material_domain_evidence() -> None:
     score, breakdown = calculate_event_importance(
         [
-            _importance(1, 0.6, profile="activity_announcement"),
-            _importance(2, 0.72, profile="gameplay_announcement"),
-            _importance(3, 0.84, profile="activity_free_skin"),
+            _importance(1, 0.8, profile="worlds_key"),
+            _importance(2, 0.55, profile="game_announcement_general"),
+            _importance(3, 0.86, profile="activity_free_skin"),
             _importance(4, 0.99, materiality="duplicate"),
+            _importance(5, 0.95, materiality="context_only"),
+            _importance(6, 0.96, materiality="corroboration_only"),
+            _importance(7, None),
+            _importance(8, 1.2),
+            _importance(9, 0.8, profile=None),
         ]
     )
 
-    assert score == 0.84
+    assert score == 0.86
     assert importance_level(score) == "critical"
-    assert breakdown["policy_version"] == "event-importance-v2-domain-evidence"
+    assert breakdown["policy_version"] == "event-importance-v3-mention-snapshot"
     assert breakdown["method"] == "max_material_domain_score"
     assert breakdown["dominant_profile"] == "activity_free_skin"
     assert breakdown["dominant_normalized_item_id"] == 3
     assert breakdown["contribution_count"] == 3
-    assert breakdown["ignored_evidence_reasons"] == {"non_material": 1}
-
-
-def test_event_importance_fallback_is_zero_and_audits_invalid_evidence() -> None:
-    score, breakdown = calculate_event_importance(
-        [
-            _importance(1, None),
-            _importance(2, 1.2),
-            _importance(3, 0.8, profile=None),
-            _importance(4, 0.9, materiality="context_only"),
-        ]
-    )
-
-    assert score == 0.0
-    assert breakdown["dominant_profile"] is None
-    assert breakdown["contribution_count"] == 0
-    assert breakdown["ignored_evidence_count"] == 4
+    assert breakdown["ignored_evidence_reasons"] == {
+        "non_material": 3,
+        "missing_or_invalid_domain_score": 1,
+        "domain_score_out_of_range": 1,
+        "missing_or_invalid_profile": 1,
+    }
 
 
 def test_credibility_deduplicates_republishers_and_rewards_independent_support() -> None:

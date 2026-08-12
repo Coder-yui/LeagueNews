@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,6 +12,13 @@ from app.domain.event_types import (
     EVENT_MATERIALITIES,
     EVENT_RELATIONS,
     EVENT_SOURCE_ROLES,
+)
+from app.domain.importance import (
+    IMPORTANCE_POLICY_VERSION,
+    SCORE_BANDS,
+    DomainImportanceFeatures,
+    ImportanceProfile,
+    score_importance_profile,
 )
 from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
@@ -61,6 +68,7 @@ def _validate_mention_values(
     relation: str,
     source_role: str,
     materiality: str,
+    domain_importance_snapshot: dict[str, Any] | None,
 ) -> None:
     if mention_index < 0:
         raise EventInputError("mention_index must be non-negative")
@@ -70,6 +78,35 @@ def _validate_mention_values(
         raise EventInputError(f"unsupported event source role: {source_role}")
     if materiality not in EVENT_MATERIALITIES:
         raise EventInputError(f"unsupported event materiality: {materiality}")
+    if materiality != "material_update":
+        if domain_importance_snapshot is not None:
+            raise EventInputError("non-material mention cannot carry domain importance")
+        return
+    if domain_importance_snapshot is None:
+        raise EventInputError("material mention requires domain importance snapshot")
+    score = domain_importance_snapshot.get("score")
+    profile = domain_importance_snapshot.get("profile")
+    features = domain_importance_snapshot.get("features")
+    modifiers = domain_importance_snapshot.get("modifiers")
+    if (
+        domain_importance_snapshot.get("policy_version") != IMPORTANCE_POLICY_VERSION
+        or profile not in SCORE_BANDS
+        or not isinstance(score, (int, float))
+        or isinstance(score, bool)
+        or not 0 <= float(score) <= 1
+        or not isinstance(features, dict)
+        or not isinstance(modifiers, list)
+    ):
+        raise EventInputError("invalid domain importance snapshot")
+    try:
+        result = score_importance_profile(
+            cast(ImportanceProfile, profile),
+            cast(DomainImportanceFeatures, features),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EventInputError("invalid domain importance snapshot") from exc
+    if result.score != score or list(result.modifiers) != modifiers:
+        raise EventInputError("domain importance snapshot does not match policy")
 
 
 def _get_published_item(db: Session, normalized_item_id: int) -> NormalizedItem:
@@ -92,7 +129,7 @@ def _new_mention(
     independence_group: str | None,
     evidence_excerpt: str,
     structured_fact_changes: dict[str, Any] | None,
-    impact_snapshot: dict[str, Any] | None,
+    domain_importance_snapshot: dict[str, Any] | None,
     content_fingerprint: str | None,
     aggregation_policy_version: str,
 ) -> EventMention:
@@ -108,7 +145,11 @@ def _new_mention(
         materiality=materiality,
         evidence_excerpt=evidence_excerpt,
         structured_fact_changes=structured_fact_changes or {},
-        impact_snapshot=impact_snapshot or {},
+        impact_snapshot=(
+            {"domain_importance": domain_importance_snapshot}
+            if domain_importance_snapshot is not None
+            else {}
+        ),
         content_fingerprint=content_fingerprint,
         source_reliability_snapshot=item.raw_item.source.reliability_score,
         source_published_at=item.raw_item.published_at,
@@ -131,7 +172,7 @@ def create_event(
     independence_group: str | None = None,
     evidence_excerpt: str = "",
     structured_fact_changes: dict[str, Any] | None = None,
-    impact_snapshot: dict[str, Any] | None = None,
+    domain_importance_snapshot: dict[str, Any] | None = None,
     content_fingerprint: str | None = None,
     aggregation_key: str | None = None,
     lifecycle_status: str = "developing",
@@ -147,6 +188,7 @@ def create_event(
         relation=relation,
         source_role=source_role,
         materiality=materiality,
+        domain_importance_snapshot=domain_importance_snapshot,
     )
     if event_family not in EVENT_FAMILIES:
         raise EventInputError(f"unsupported event family: {event_family}")
@@ -210,7 +252,7 @@ def create_event(
                 independence_group=independence_group,
                 evidence_excerpt=evidence_excerpt,
                 structured_fact_changes=structured_fact_changes,
-                impact_snapshot=impact_snapshot,
+                domain_importance_snapshot=domain_importance_snapshot,
                 content_fingerprint=content_fingerprint,
                 aggregation_policy_version=aggregation_policy_version,
             )
@@ -267,7 +309,7 @@ def add_event_mention(
     independence_group: str | None = None,
     evidence_excerpt: str = "",
     structured_fact_changes: dict[str, Any] | None = None,
-    impact_snapshot: dict[str, Any] | None = None,
+    domain_importance_snapshot: dict[str, Any] | None = None,
     content_fingerprint: str | None = None,
     title: str | None = None,
     current_summary: str | None = None,
@@ -285,6 +327,7 @@ def add_event_mention(
         relation=relation,
         source_role=source_role,
         materiality=materiality,
+        domain_importance_snapshot=domain_importance_snapshot,
     )
     if lifecycle_status is not None and lifecycle_status not in EVENT_LIFECYCLES:
         raise EventInputError(f"unsupported event lifecycle: {lifecycle_status}")
@@ -328,7 +371,7 @@ def add_event_mention(
             independence_group=independence_group,
             evidence_excerpt=evidence_excerpt,
             structured_fact_changes=structured_fact_changes,
-            impact_snapshot=impact_snapshot,
+            domain_importance_snapshot=domain_importance_snapshot,
             content_fingerprint=content_fingerprint,
             aggregation_policy_version=aggregation_policy_version,
         )

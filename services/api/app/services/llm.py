@@ -419,18 +419,21 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
    进展、关键事实和未决点。普通佐证用 corroboration_only，重复用 duplicate，上下文用
    context_only，后三者不得改写事件投影。
-4. 神话商店轮换必须按 market + rotation_period 作为一个 commercial_offer Event；轮换中的至臻、
+4. 每个 material mention 的 importance 必须针对该独立 Event 本体选择受控 profile；综合公告或赛事
+   汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier
+   features；非 material mention 不填写 importance。不要输出分数。
+5. 神话商店轮换必须按 market + rotation_period 作为一个 commercial_offer Event；轮换中的至臻、
    臻彩、普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 至少表达
    {"shop":"mythic_shop", "market":"...", "rotation_period":"..."}，同市场同周期必须 update，
    不同市场或周期必须分开。
-5. 普通电竞比赛按每场真实比赛一个 esports_match Event。每日赛前预告、赛后结果汇总只能分别
+6. 普通电竞比赛按每场真实比赛一个 esports_match Event。每日赛前预告、赛后结果汇总只能分别
    mention/update 对应比赛；不要创建 Daily Preview、Daily Schedule、Daily Summary 或 Results Summary
    Event。只有正式公布未知赛程、延期、提前、重赛、场地/对阵/赛制变化才是 esports_schedule。
-6. 活动、通行证、活动商店和奖励体系中的皮肤、臻彩、图标、边框、表情、代币和战利品默认是主活动
+7. 活动、通行证、活动商店和奖励体系中的皮肤、臻彩、图标、边框、表情、代币和战利品默认是主活动
    Event 的 key_facts/components；只有明确拥有独立发布日期和后续生命周期的新对象才可单独拆出。
-7. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
+8. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
    英雄、皮肤系列、战队、选手、比赛、赛区或时间范围；不得虚构。
-8. mention_index 从 0 连续递增。一个响应可以同时更新多个事件、创建其他事件并忽略非独立内容。
+9. mention_index 从 0 连续递增。一个响应可以同时更新多个事件、创建其他事件并忽略非独立内容。
 只输出符合 schema 的 JSON。"""
         return await self._validated_json_completion(
             prompt=prompt,

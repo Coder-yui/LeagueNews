@@ -14,8 +14,8 @@
 
 系统区分三个概念：
 
-1. **领域重要性 `profile_score`**：衡量这件 LOL / Riot 资讯本身有多重要。它由
-   `importance_profile`、档案区间和领域修正项确定，是 Message 和 Event 共用的领域政策结果。
+1. **领域重要性 `profile_score`**：衡量一份内容证据所描述事实本身有多重要。Message 和
+   EventMention 共用 profile、档案区间与领域修正政策，但分别针对整条消息和独立 Event 本体评分。
 2. **消息重要性 `importance_score`**：衡量这条具体消息有多值得展示。在领域分上叠加消息载体
    修正；当前只有纯转发 `repost -0.08`。
 3. **消息排序优先级 `priority_score`**：只在消息重要性上叠加引用形式和受众范围等投放约束，
@@ -269,8 +269,9 @@ LLM 不输出分数，只提取：
 
 所有修正后的结果都必须限制在当前档案的下限和上限之间。
 
-这些判断由 `score_domain_importance()` 集中实现，Message 和 Event 不各自维护赛事、外观、活动、
-商城等另一套领域权重。
+这些判断由 `score_importance_profile()` 集中实现。Message 先通过 `derive_importance_profile()` 从
+整条消息派生 profile；EventMention 使用事件聚合已有调用输出的受控 event-specific profile。两者不
+各自维护赛事、外观、活动、商城等另一套领域权重。
 
 档案区间限制完成后，若 `content_form` 为 `repost`，消息重要性再扣 8 分，并限制在 0-100。
 这是消息载体修正，不属于 Domain Importance，也不得进入 Event Importance。
@@ -309,5 +310,6 @@ LLM 不输出分数，只提取：
 6. `unknown` 固定为 0。
 7. LLM 不得直接决定基准、上下限、修正值或最终分数。
 8. `repost` 只在消息重要性中扣 8 分，排序阶段不得重复扣分。
-9. `profile_score` 是共享的 Domain Importance；Event 只复用该分数，不读取包含消息载体修正的
-   `importance_score`。
+9. 共享的是 Domain Importance Policy，不是整条 Message 的 `profile_score`。每个 material
+   EventMention 针对其独立事件语义使用同一 scorer，并固化自己的 domain snapshot；Event 不读取包含
+   消息载体修正的 `importance_score`。

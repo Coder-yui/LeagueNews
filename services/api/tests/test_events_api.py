@@ -10,17 +10,41 @@ from app.models.media_asset import MediaAsset
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.domain.importance import score_importance_profile
 from app.schemas.event import EventDetailRead, EventPageRead
 from app.services.event_metrics import refresh_event_metrics
-from app.services.events import add_event_mention, create_event
+from app.services.events import add_event_mention as _add_event_mention
+from app.services.events import create_event as _create_event
 
 
-IMPACT = {
-    "scope": "product_segment",
-    "magnitude": "moderate",
-    "duration": "cycle_or_season",
-    "urgency": "timely",
+_DOMAIN_RESULT = score_importance_profile(
+    "gameplay_announcement",
+    {
+        "scale": "standard",
+        "competition_region": "none",
+        "prominence": "normal",
+        "skin_tier": "none",
+        "is_bulk_update": False,
+    },
+)
+DOMAIN_IMPORTANCE = {
+    "policy_version": "importance-v11-repost-weekly-rotation",
+    "profile": "gameplay_announcement",
+    "score": _DOMAIN_RESULT.score,
+    "features": dict(_DOMAIN_RESULT.features),
+    "modifiers": list(_DOMAIN_RESULT.modifiers),
 }
+
+
+def create_event(*args: object, **kwargs: object):
+    kwargs.setdefault("domain_importance_snapshot", DOMAIN_IMPORTANCE)
+    return _create_event(*args, **kwargs)
+
+
+def add_event_mention(*args: object, **kwargs: object):
+    if kwargs.get("materiality") == "material_update":
+        kwargs.setdefault("domain_importance_snapshot", DOMAIN_IMPORTANCE)
+    return _add_event_mention(*args, **kwargs)
 
 
 def _item(
@@ -116,7 +140,6 @@ def test_event_list_and_detail_present_current_projection_and_material_timeline(
             source_role="known_leaker",
             relation="reports",
             independence_group=f"source:{leaker.id}",
-            impact_snapshot=IMPACT,
             evidence_excerpt="首次爆料",
         )
         add_event_mention(
@@ -138,7 +161,6 @@ def test_event_list_and_detail_present_current_projection_and_material_timeline(
             source_role="responsible_official",
             materiality="material_update",
             independence_group=f"source:{official.id}",
-            impact_snapshot=IMPACT,
             evidence_excerpt="官网确认",
             current_summary="官网确认 26.17 平衡调整。",
             latest_development="官网确认",
@@ -274,7 +296,6 @@ def test_official_denial_updates_credibility_and_lifecycle_without_deleting_even
             relation="reports",
             source_role="known_leaker",
             independence_group=f"source:{leaker.id}",
-            impact_snapshot=IMPACT,
         )
         add_event_mention(
             db,
@@ -285,7 +306,6 @@ def test_official_denial_updates_credibility_and_lifecycle_without_deleting_even
             source_role="responsible_official",
             materiality="material_update",
             independence_group=f"source:{official.id}",
-            impact_snapshot=IMPACT,
             current_summary="官方已否认该传闻。",
             latest_development="官方否认",
         )

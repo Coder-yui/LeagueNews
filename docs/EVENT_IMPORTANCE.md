@@ -1,85 +1,71 @@
 # 事件重要性
 
-> 状态：Event Importance v2 已实现
+> 状态：Event Importance v3 已实现
 >
-> 策略版本：`event-importance-v2-domain-evidence`
+> 策略版本：`event-importance-v3-mention-snapshot`
 
-## 目标与职责
+## 职责
 
-Event Importance 回答“这个现实事件目前已知的整体重要性”。它不重新判断 LeagueNews 对什么
-内容重要，而是复用消息处理阶段已经生成并持久化的 Domain Importance evidence。
+Event Importance 回答“这个现实事件目前已知的整体重要性”。Message 和 EventMention 共用同一套
+LeagueNews Domain Importance Policy，但共享 policy 不等于继承整条 Message 的 domain score：
 
-三个概念保持分离：
+- Message Domain Importance 针对整条消息，由 `message_type + topics + content` 派生 profile。
+- EventMention Domain Importance 针对该独立 Event 本体，由事件聚合的现有一次模型调用选择受控
+  profile 和必要的 bounded features，再由服务器端共享 scorer 确定分数。
+- Event Importance 聚合多个不可变 EventMention evidence。
 
-- Domain Importance：资讯内容本身有多重要，存于 `NormalizedItem.importance_calculation` 的
-  `importance_profile` 和 `profile_score`。
-- Message Importance：具体消息有多值得展示，可能包含 `repost -0.08` 等消息载体修正。
-- Event Importance：一个事件的多条有效领域证据聚合结果。
+因此一篇 `patch_official_notes=0.92` 的综合公告拆出的平衡、活动、皮肤 Event 不会全部继承 0.92；
+它们分别使用自身的 gameplay、activity、cosmetic profile。模型永远不输出分数，也没有新增调用。
 
-Event Importance 与 credibility、heat、消息数量和来源数量正交。确认与多来源传播可以改变可信度
-或热度，但不表示事件本身变得更重要。
+## EventMention Snapshot
 
-## 输入与算法
-
-EventMention 指向 NormalizedItem。刷新事件投影时，从当前已发布 mentions 读取：
+每个 material EventMention 创建时固化：
 
 ```text
-NormalizedItem.importance_calculation.importance_profile
-NormalizedItem.importance_calculation.profile_score
-EventMention.materiality
+normalized_item_id + normalized_item_revision + mention_index
+impact_snapshot.domain_importance:
+  policy_version
+  profile
+  score
+  features{}
+  modifiers[]
 ```
 
-只有 `materiality=material_update` 且 profile/domain score 合法的 mention 能贡献重要性。
-`duplicate`、`context_only` 和 `corroboration_only` 不贡献分数。
+`impact_snapshot` 是旧四维 impact 遗留的现有 JSON 列。本版本复用该列，运行时只使用清晰的
+`domain_importance` 子结构，因此不需要 migration，也不同时保留两套 snapshot。服务 API 参数已经改为
+`domain_importance_snapshot`；新聚合路径不再产生 scope/magnitude/duration/urgency。
+
+Snapshot 对应 mention 的 NormalizedItem revision，创建后不再读取 NormalizedItem 当前
+`importance_calculation`。消息之后重新处理或进入新 revision，不会静默改变旧 evidence；新 revision
+若生成 mention，会拥有自己的 snapshot。
+
+## 聚合与过滤
+
+刷新入口从 `EventMention.domain_importance_snapshot` 构造 evidence：
 
 ```text
-event_importance_score = max(valid material domain scores)
+event_importance_score = max(valid material mention domain scores)
 ```
 
-聚合使用 `profile_score`，不使用最终 `NormalizedItem.importance_score`。因此转载扣分只降低具体消息，
-不会降低它所描述事件的重要性。算法不调用 LLM，不重新分析全文，也不重新执行消息分类。
+只有 `materiality=material_update` 且 profile/score 合法的 snapshot 能贡献。`duplicate`、
+`context_only`、`corroboration_only` 不贡献；credibility、heat、message/source count 仍然正交。
 
-## 更新语义
+- 0.80 后出现 0.55 的普通补充，Event 保持 0.80。
+- 之后出现 0.86 的重大事实，Event 升级到 0.86。
+- repost 只降低 Message final score；EventMention 仍使用事件自身的 domain score。
 
-Event Importance 是整个 Event 的 projection。创建或 evidence 变化后，系统从事件的全部有效 material
-mentions 重算，而不是用最新一条 material update 覆盖旧值。
+新 material mention 必须携带经服务器端校验的 snapshot，非 material mention 禁止携带。历史或开发
+数据缺失 snapshot 时，刷新会记录 `missing_or_invalid_domain_score` 并按 0 处理，绝不回读当前
+NormalizedItem score 作为静默 fallback。
 
-- 0.90 的重大事实后出现 0.55 的普通补充，事件仍为 0.90。
-- 0.60 的初始事实后出现 0.72、0.84 的实质进展，事件升级到 0.84。
-- duplicate、上下文、佐证、来源数量、可信度和热度变化不改变事件重要性。
-
-## Breakdown 与回退
-
-`importance_breakdown` 保存：
-
-```text
-policy_version: event-importance-v2-domain-evidence
-method: max_material_domain_score
-score, level
-dominant_profile
-dominant_normalized_item_id
-contribution_count
-contributing_evidence[]
-ignored_evidence_count
-ignored_evidence_reasons{}
-```
-
-贡献摘要最多保存 10 条，按 domain score 降序排列。每条只包含 normalized item id、profile、domain
-score 和 materiality。
-
-缺失、类型异常、越界或缺少 profile 的 evidence 不回退到最终消息分，也不会触发新模型调用；系统
-忽略该 evidence，在 breakdown 中记录原因。若没有任何有效 evidence，安全回退为 0.0，并保持流程
-可审计。
-
-## Impact 四维兼容性
-
-Event aggregation 不再要求模型输出 `scope / magnitude / duration / urgency`，这些字段也不再参与
-Event Importance。现有 `event_mentions.impact_snapshot` 数据库列和服务兼容参数暂时保留，避免为本次
-内部重构新增或扩大 migration；新聚合流程不再写入该字段。后续可在独立的兼容性清理中移除。
+Breakdown 保存 dominant profile/item、贡献数量、最多 10 条简要 evidence，以及被忽略 evidence 的
+原因。每条 evidence 同时记录 normalized item revision 和 mention index，便于审计。
 
 ## 实现位置
 
-- `domain/importance.py`：唯一的 Domain Importance Policy，以及 Message Importance 和 Priority。
-- `domain/event_importance.py`：有效 evidence 校验、最大值聚合和 breakdown。
-- `services/event_metrics.py`：从 EventMention/NormalizedItem 构造 evidence 并刷新 Event projection。
-- `services/events.py`：创建事件或添加 mention 后调用同一刷新入口，不再按最新 impact 覆盖。
+- `domain/importance.py`：profile 路由、唯一共享 profile scorer、Message consumer 和 Priority。
+- `schemas/event_aggregation.py`：受控 EventMention importance semantics。
+- `workflows/event_aggregation.py`：调用共享 scorer 并生成不可变 snapshot。
+- `services/events.py`：校验并持久化 snapshot。
+- `domain/event_importance.py`：简单的有效 evidence 最大值聚合。
+- `services/event_metrics.py`：只从 mention snapshot 刷新 Event projection。

@@ -201,6 +201,11 @@ class EventMention(Base):
         back_populates="event_mentions"
     )
 
+    @property
+    def domain_importance_snapshot(self) -> dict[str, Any]:
+        value = self.impact_snapshot.get("domain_importance")
+        return value if isinstance(value, dict) else {}
+
     __table_args__ = (
         UniqueConstraint(
             "normalized_item_id",

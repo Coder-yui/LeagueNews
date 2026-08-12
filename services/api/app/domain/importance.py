@@ -121,19 +121,23 @@ class ProfileRoute:
 class DomainImportanceResult:
     profile: ImportanceProfile
     score: float
+    features: DomainImportanceFeatures
     band: ScoreBand
     modifiers: tuple[dict[str, object], ...]
     modifier_total: float
     pre_clamp_score: float
 
 
-class ImportanceFeatures(TypedDict):
+class DomainImportanceFeatures(TypedDict):
     scale: ImportanceScale
-    audience_region: AudienceRegion
     competition_region: CompetitionRegion
     prominence: Prominence
     skin_tier: SkinTier
     is_bulk_update: bool
+
+
+class ImportanceFeatures(DomainImportanceFeatures):
+    audience_region: AudienceRegion
     evidence: list[str]
 
 
@@ -452,11 +456,11 @@ def derive_importance_profile(
 
 
 def normalize_importance_features(
-    features: ImportanceFeatures,
+    features: DomainImportanceFeatures,
     *,
     profile: ImportanceProfile,
     content: str,
-) -> ImportanceFeatures:
+) -> DomainImportanceFeatures:
     normalized = dict(features)
     if profile not in {"cosmetic_announcement", "promotion_cosmetic"}:
         normalized["skin_tier"] = "none"
@@ -466,26 +470,20 @@ def normalize_importance_features(
         and not _EXPLICIT_PRESTIGE_OR_MYTHIC.search(content)
     ):
         normalized["skin_tier"] = "standard"
-    return cast(ImportanceFeatures, normalized)
+    return cast(DomainImportanceFeatures, normalized)
 
 
 def _modifier(key: str, value: float, evidence: str) -> dict[str, object]:
     return {"key": key, "value": round(value, 4), "evidence": evidence}
 
 
-def score_domain_importance(
-    features: ImportanceFeatures,
+def score_importance_profile(
+    profile: ImportanceProfile,
+    features: DomainImportanceFeatures,
     *,
-    message_type: str,
-    topics: list[str],
     content: str = "",
 ) -> DomainImportanceResult:
-    """Score the intrinsic importance of LeagueNews content."""
-    profile = derive_importance_profile(
-        message_type=message_type,
-        topics=topics,
-        content=content,
-    )
+    """Score one controlled profile with the shared domain policy."""
     features = normalize_importance_features(
         features,
         profile=profile,
@@ -565,11 +563,28 @@ def score_domain_importance(
     return DomainImportanceResult(
         profile=profile,
         score=profile_score,
+        features=features,
         band=band,
         modifiers=tuple(modifiers),
         modifier_total=round(profile_modifier_total, 4),
         pre_clamp_score=round(pre_clamp, 4),
     )
+
+
+def score_domain_importance(
+    features: ImportanceFeatures,
+    *,
+    message_type: str,
+    topics: list[str],
+    content: str = "",
+) -> DomainImportanceResult:
+    """Derive and score the domain importance of a whole message."""
+    profile = derive_importance_profile(
+        message_type=message_type,
+        topics=topics,
+        content=content,
+    )
+    return score_importance_profile(profile, features, content=content)
 
 
 def calculate_importance(

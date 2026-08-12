@@ -15,9 +15,11 @@ from app.domain.event_families import (
 )
 from app.domain.event_granularity import editorial_granularity_guidance
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
+from app.domain.importance import IMPORTANCE_POLICY_VERSION, score_importance_profile
 from app.core.config import settings
 from app.models.event import Event, EventAggregationRun
 from app.models.normalized_item import NormalizedItem
+from app.schemas.event_aggregation import EventMentionDecision
 from app.services.event_candidates import recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import add_event_mention, create_event
@@ -90,6 +92,27 @@ def _verified_source_role(item: NormalizedItem, proposed_role: str) -> str:
     if not item.raw_item.source.is_official:
         return "unknown"
     return proposed_role
+
+
+def _domain_importance_snapshot(
+    decision: EventMentionDecision,
+) -> dict[str, Any] | None:
+    semantics = decision.importance
+    if semantics is None:
+        return None
+    features = semantics.model_dump(mode="json", exclude={"profile"})
+    result = score_importance_profile(
+        semantics.profile,
+        features,
+        content=decision.evidence_excerpt,
+    )
+    return {
+        "policy_version": IMPORTANCE_POLICY_VERSION,
+        "profile": result.profile,
+        "score": result.score,
+        "features": dict(result.features),
+        "modifiers": list(result.modifiers),
+    }
 
 
 def _source_payload(item: NormalizedItem) -> dict[str, object]:
@@ -381,6 +404,7 @@ async def aggregate_normalized_item(
             )
             independence_group = _independence_group(item)
             source_role = _verified_source_role(item, decision.source_role)
+            domain_importance_snapshot = _domain_importance_snapshot(decision)
             canonical_anchors = canonicalize_event_anchors(
                 decision.event_family, decision.canonical_anchors
             )
@@ -410,6 +434,7 @@ async def aggregate_normalized_item(
                         independence_group=independence_group,
                         evidence_excerpt=decision.evidence_excerpt,
                         structured_fact_changes=fact_changes,
+                        domain_importance_snapshot=domain_importance_snapshot,
                         content_fingerprint=claim_fingerprint,
                         latest_development=decision.latest_development or "",
                         key_facts=list(decision.key_fact_changes.add),
@@ -433,6 +458,7 @@ async def aggregate_normalized_item(
                         independence_group=independence_group,
                         evidence_excerpt=decision.evidence_excerpt,
                         structured_fact_changes=fact_changes,
+                        domain_importance_snapshot=domain_importance_snapshot,
                         content_fingerprint=claim_fingerprint,
                         title=decision.event_title,
                         current_summary=decision.proposed_summary,
@@ -463,6 +489,7 @@ async def aggregate_normalized_item(
                     independence_group=independence_group,
                     evidence_excerpt=decision.evidence_excerpt,
                     structured_fact_changes=fact_changes,
+                    domain_importance_snapshot=domain_importance_snapshot,
                     content_fingerprint=claim_fingerprint,
                     title=decision.event_title,
                     current_summary=decision.proposed_summary,

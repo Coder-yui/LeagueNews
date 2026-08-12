@@ -6,6 +6,7 @@ from app.domain.importance import (
     calculate_message_priority,
     derive_importance_profile,
     score_domain_importance,
+    score_importance_profile,
 )
 from app.domain.message_taxonomy import (
     CONTENT_FORM_RULES,
@@ -404,11 +405,13 @@ def test_shared_domain_policy_preserves_representative_message_scores() -> None:
         domain = score_domain_importance(
             features, message_type=message_type, topics=topics, content=content
         )
+        shared = score_importance_profile(domain.profile, features, content=content)
         message_score, calculation = calculate_importance(
             features, message_type=message_type, topics=topics, content=content
         )
         assert domain.profile == profile
         assert domain.score == expected
+        assert shared == domain
         assert message_score == expected
         assert calculation["profile_score"] == expected
 

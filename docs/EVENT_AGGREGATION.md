@@ -2,7 +2,7 @@
 
 > 状态：Phase 0–5 已完成
 >
-> 设计版本：`event-aggregation-v1`
+> 设计版本：`event-aggregation-v2-mention-importance`
 >
 > 更新时间：2026-08-11
 
@@ -41,7 +41,7 @@ RawItem
 | 产品与内容形式 | `products`、`content_form` | 当前 taxonomy v3 |
 | 消息类型与主题 | `message_type`、`topics` | 用于准入和 event family 路由 |
 | 通用实体 | `entities` | 已有规范类型、名称和 `canonical_id` |
-| 领域重要性 | `importance_calculation.profile_score`、`importance_profile` | material mention 作为事件重要性 evidence；不使用含转载修正的最终消息分 |
+| 领域重要性 | 共享 profile policy、消息上下文 | 每个 material mention 输出受控 event-specific semantics；不复制整条消息分数 |
 | 分类信源 | `facets.classification_source` | 只说明本轮分类依据，不等于事件官方证据 |
 | 来源可靠性 | `RawItem.source.is_official/reliability_score` | 必须结合事件中的实际角色解释 |
 | 原始/引用/转发证据 | `content_form`、`RawItem.content_blocks`、`provenance` | 只读；通过结构化 URL 识别上游 |
@@ -210,8 +210,8 @@ Phase 2 首轮全量验证：Ruff 通过；后端 `164 passed, 1 skipped`，随�
 
 - `domain/event_importance.py`、`event_credibility.py`、`event_heat.py` 分别实现确定性计算；
   `services/event_metrics.py` 只负责从持久化 mention 组装输入和刷新投影。
-- migration 063 曾为每条 mention 保存事件 impact 快照；v2 保留该列兼容历史数据，但聚合 schema
-  不再生成四维 impact，事件重要性改为复用 material message 的领域分。
+- migration 063 曾为每条 mention 保存事件 impact 快照；v2 复用该 JSON 列保存不可变的
+  event-specific domain importance snapshot，聚合 schema 不再生成四维 impact。
 - 重要性从全部有效 material evidence 取最高领域分；可信度按同一 Source/上游去重；热度按写入即时刷新并保存
   计算时间，跨 Source 转载保留传播权重。
 - 测试覆盖高重要性低热度、低重要性高热度、两个独立来源、官方确认/否认、20 次转载、同源限流、

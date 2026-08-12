@@ -14,6 +14,7 @@ from app.domain.event_families import (
     has_complete_mythic_shop_identity,
 )
 from app.domain.event_granularity import is_daily_match_roundup
+from app.domain.importance import score_importance_profile
 from app.models.event import Event, EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
@@ -24,6 +25,29 @@ from app.services.events import create_event
 from app.services.llm import LLMAnalysisError
 from app.workflows.event_aggregation import _select_content, aggregate_normalized_item
 from app.workflows.event_aggregation import _aggregation_key
+
+
+def _importance(profile: str, **features: object) -> dict[str, object]:
+    return {"profile": profile, **features}
+
+
+def _snapshot(profile: str = "gameplay_announcement", **overrides: object) -> dict[str, object]:
+    features = {
+        "scale": "standard",
+        "competition_region": "none",
+        "prominence": "normal",
+        "skin_tier": "none",
+        "is_bulk_update": False,
+        **overrides,
+    }
+    result = score_importance_profile(profile, features)
+    return {
+        "policy_version": "importance-v11-repost-weekly-rotation",
+        "profile": profile,
+        "score": result.score,
+        "features": dict(result.features),
+        "modifiers": list(result.modifiers),
+    }
 
 
 def _item(
@@ -37,6 +61,8 @@ def _item(
     entities: list[dict[str, object]],
     content_form: str = "original",
     products: list[str] | None = None,
+    importance_profile: str = "gameplay_announcement",
+    domain_score: float = 0.5,
 ) -> NormalizedItem:
     raw = RawItem(
         source_id=source.id,
@@ -58,11 +84,11 @@ def _item(
         message_type=message_type,
         topics=topics,
         content_form=content_form,
-        importance_score=0.5,
+        importance_score=domain_score,
         importance_calculation={
-            "importance_profile": "gameplay_announcement",
-            "profile_score": 0.5,
-            "final_score": 0.5,
+            "importance_profile": importance_profile,
+            "profile_score": domain_score,
+            "final_score": domain_score,
         },
         translated_title=title,
         translated_text=title,
@@ -101,6 +127,7 @@ class ScenarioClient:
                     "event_title": "26.17 版本平衡调整",
                     "proposed_summary": "爆料称 26.17 将进行平衡调整。",
                     "latest_development": "首次爆料",
+                    "importance": _importance("leak_gameplay"),
                     "evidence_excerpt": "26.17 平衡爆料",
                 }
             ]
@@ -118,6 +145,7 @@ class ScenarioClient:
                     "event_title": "星界活动",
                     "proposed_summary": "爆料称星界活动将在下版本开放。",
                     "latest_development": "首次爆料",
+                    "importance": _importance("leak_content"),
                     "evidence_excerpt": "星界活动爆料",
                 }
             ]
@@ -136,6 +164,7 @@ class ScenarioClient:
                     "event_title": "26.17 版本平衡调整",
                     "proposed_summary": "官网确认 26.17 版本平衡调整。",
                     "latest_development": "官网确认",
+                    "importance": _importance("gameplay_announcement"),
                     "evidence_excerpt": "官网确认平衡调整",
                 },
                 {
@@ -150,6 +179,7 @@ class ScenarioClient:
                     "event_title": "星界活动",
                     "proposed_summary": "官网确认星界活动。",
                     "latest_development": "官网确认",
+                    "importance": _importance("activity_announcement"),
                     "evidence_excerpt": "官网确认活动",
                 },
                 {
@@ -164,6 +194,7 @@ class ScenarioClient:
                     "event_title": "星界系列皮肤发布",
                     "proposed_summary": "官网公布星界系列皮肤。",
                     "latest_development": "官网首次公布",
+                    "importance": _importance("cosmetic_announcement"),
                     "evidence_excerpt": "星界系列皮肤",
                 },
             ]
@@ -376,6 +407,7 @@ class DailyRoundupScheduleClient:
                         "canonical_anchors": {"date": "2026-08-12"},
                         "event_title": "今日赛程汇总",
                         "proposed_summary": "今日比赛安排。",
+                        "importance": _importance("esports_schedule"),
                         "evidence_excerpt": "今日三场比赛",
                     }
                 ]
@@ -398,6 +430,10 @@ class DailyMatchClient:
                         "canonical_anchors": {"match": f"match:{index}"},
                         "event_title": f"第 {index + 1} 场比赛",
                         "proposed_summary": f"第 {index + 1} 场比赛安排。",
+                        "importance": _importance(
+                            ("esports_regular", "esports_playoffs", "worlds_key")[index],
+                            competition_region=("lck", "lpl", "international")[index],
+                        ),
                         "evidence_excerpt": f"第 {index + 1} 场",
                     }
                     for index in range(3)
@@ -433,6 +469,11 @@ async def test_three_match_roundup_creates_three_match_events_without_daily_even
         assert {
             event.event_family for event in db.scalars(select(Event)).all()
         } == {"esports_match"}
+        assert sorted(event.importance_score for event in db.scalars(select(Event))) == [
+            0.6,
+            0.73,
+            0.81,
+        ]
 
 
 @pytest.mark.anyio
@@ -531,6 +572,42 @@ def test_structured_output_rejects_nonmaterial_rewrites_and_bad_indexes() -> Non
                 ]
             }
         )
+    with pytest.raises(ValidationError, match="requires importance semantics"):
+        EventAggregationResult.model_validate(
+            {
+                "mentions": [
+                    {
+                        "mention_index": 0,
+                        "event_family": "gameplay_balance",
+                        "action": "create",
+                        "relation": "reports",
+                        "source_role": "known_leaker",
+                        "materiality": "material_update",
+                        "canonical_anchors": {"patch_version": "patch:missing"},
+                        "event_title": "缺少重要性语义",
+                        "proposed_summary": "必须被拒绝。",
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ValidationError, match="non-material mentions"):
+        EventAggregationResult.model_validate(
+            {
+                "mentions": [
+                    {
+                        "mention_index": 0,
+                        "event_family": "gameplay_balance",
+                        "action": "update",
+                        "candidate_event_id": 1,
+                        "relation": "supports",
+                        "source_role": "independent_media",
+                        "materiality": "context_only",
+                        "importance": _importance("patch_official_notes"),
+                        "evidence_excerpt": "仅为上下文",
+                    }
+                ]
+            }
+        )
     duplicate_create = {
         "event_family": "gameplay_balance",
         "action": "create",
@@ -541,6 +618,7 @@ def test_structured_output_rejects_nonmaterial_rewrites_and_bad_indexes() -> Non
         "canonical_anchors": {"patch_version": "patch:collision"},
         "event_title": "冲突事件",
         "proposed_summary": "相同身份只能创建一次。",
+        "importance": _importance("leak_gameplay"),
         "evidence_excerpt": "冲突",
     }
     with pytest.raises(ValidationError, match="must be merged"):
@@ -629,6 +707,8 @@ async def test_one_official_call_updates_two_events_and_creates_a_third() -> Non
                 {"type": "activity", "canonical_id": "activity:star"},
                 {"type": "skin", "canonical_id": "skin:star-series"},
             ],
+            importance_profile="patch_official_notes",
+            domain_score=0.92,
         )
         db.commit()
         client = ScenarioClient()
@@ -655,7 +735,28 @@ async def test_one_official_call_updates_two_events_and_creates_a_third() -> Non
         assert by_family["gameplay_balance"].current_summary.startswith("官网确认")
         assert by_family["gameplay_balance"].credibility_level == "officially_confirmed"
         assert by_family["gameplay_balance"].credibility_score == 1
-        assert by_family["gameplay_balance"].importance_score == 0.5
+        assert official_item.importance_score == 0.92
+        assert {
+            family: by_family[family].importance_score
+            for family in ("gameplay_balance", "player_activity", "cosmetic_release")
+        } == {
+            "gameplay_balance": 0.86,
+            "player_activity": 0.72,
+            "cosmetic_release": 0.68,
+        }
+        snapshots = {
+            mention.mention_index: mention.domain_importance_snapshot
+            for mention in db.scalars(
+                select(EventMention).where(
+                    EventMention.normalized_item_id == official_item.id
+                )
+            )
+        }
+        assert [snapshots[index]["profile"] for index in range(3)] == [
+            "gameplay_announcement",
+            "activity_announcement",
+            "cosmetic_announcement",
+        ]
         assert by_family["gameplay_balance"].heat_score > 0
 
         repeated = await aggregate_normalized_item(db, official_item, llm_client=client)
@@ -724,6 +825,7 @@ class CollisionClient:
                         "event_title": "冲突事件",
                         "proposed_summary": "第一项会先进入待提交事务。",
                         "latest_development": "测试事务回滚",
+                        "importance": _importance("leak_gameplay"),
                         "evidence_excerpt": "冲突",
                     },
                     {
@@ -736,6 +838,7 @@ class CollisionClient:
                         "materiality": "material_update",
                         "canonical_anchors": {"patch_version": "patch:missing"},
                         "proposed_summary": "第二项引用已消失的候选。",
+                        "importance": _importance("leak_gameplay"),
                         "evidence_excerpt": "不存在的候选",
                     },
                 ]
@@ -769,6 +872,7 @@ class DuplicateIdentityClient:
                         "key_fact_changes": {
                             "add": [{"fact": title}],
                         },
+                        "importance": _importance("esports_schedule"),
                         "evidence_excerpt": title,
                     }
                 ]
@@ -838,6 +942,9 @@ async def test_official_repost_cannot_claim_responsible_official_role() -> None:
             title="8 月 1 日赛程",
             current_summary="赛程已公布。",
             source_role="responsible_official",
+            domain_importance_snapshot=_snapshot(
+                "esports_schedule", competition_region="lck"
+            ),
         )
 
         await aggregate_normalized_item(db, repost, llm_client=RepostOfficialRoleClient())
@@ -986,6 +1093,7 @@ class PartialTopicClient:
                                 {"fact": "边框 D"},
                             ]
                         },
+                        "importance": _importance("activity_announcement"),
                         "evidence_excerpt": "活动公布",
                     }
                 ],
@@ -1061,6 +1169,7 @@ def test_strong_anchor_conflict_prevents_similar_event_merge() -> None:
             aggregation_key="patch-26-17-event",
             title="版本平衡调整",
             current_summary="26.17 平衡调整。",
+            domain_importance_snapshot=_snapshot(),
         )
 
         candidates = recall_event_candidates(

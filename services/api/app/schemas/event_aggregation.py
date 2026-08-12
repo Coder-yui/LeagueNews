@@ -4,6 +4,24 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.event_types import EventFamily, EventMateriality, EventRelation, EventSourceRole
+from app.domain.importance import (
+    CompetitionRegion,
+    ImportanceProfile,
+    ImportanceScale,
+    Prominence,
+    SkinTier,
+)
+
+
+class EventImportanceSemantics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: ImportanceProfile
+    scale: ImportanceScale = "standard"
+    competition_region: CompetitionRegion = "none"
+    prominence: Prominence = "normal"
+    skin_tier: SkinTier = "none"
+    is_bulk_update: bool = False
 
 
 class KeyFactChanges(BaseModel):
@@ -52,6 +70,7 @@ class EventMentionDecision(BaseModel):
     unresolved_point_changes: UnresolvedPointChanges = Field(
         default_factory=UnresolvedPointChanges
     )
+    importance: EventImportanceSemantics | None = None
     evidence_excerpt: str = Field(default="", max_length=2000)
     candidate_rejections: list[CandidateRejection] = Field(default_factory=list)
 
@@ -74,12 +93,20 @@ class EventMentionDecision(BaseModel):
             if not self.evidence_excerpt.strip():
                 raise ValueError("update requires evidence_excerpt")
 
+        if (
+            self.action in {"create", "update"}
+            and self.materiality == "material_update"
+            and self.importance is None
+        ):
+            raise ValueError("material create/update requires importance semantics")
+
         if self.materiality != "material_update" and (
             self.event_title is not None
             or self.proposed_summary is not None
             or self.latest_development is not None
             or self.key_fact_changes.has_changes()
             or self.unresolved_point_changes.has_changes()
+            or self.importance is not None
         ):
             raise ValueError("non-material mentions cannot change the event projection")
         return self

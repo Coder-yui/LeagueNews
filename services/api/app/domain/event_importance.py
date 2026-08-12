@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Iterable
 
 from app.domain.event_types import IMPORTANCE_POLICY_VERSION
+from app.domain.importance import SCORE_BANDS
 
 
 MAX_BREAKDOWN_EVIDENCE: Final = 10
@@ -13,6 +14,8 @@ class EventImportanceEvidence:
     profile: str | None
     domain_score: object
     materiality: str
+    normalized_item_revision: int = 1
+    mention_index: int = 0
 
 
 def importance_level(score: float) -> str:
@@ -40,12 +43,14 @@ def calculate_event_importance(
             reason = "missing_or_invalid_domain_score"
         elif not 0 <= float(item.domain_score) <= 1:
             reason = "domain_score_out_of_range"
-        elif not isinstance(item.profile, str) or not item.profile:
+        elif item.profile not in SCORE_BANDS:
             reason = "missing_or_invalid_profile"
         else:
             contributions.append(
                 {
                     "normalized_item_id": item.normalized_item_id,
+                    "normalized_item_revision": item.normalized_item_revision,
+                    "mention_index": item.mention_index,
                     "profile": item.profile,
                     "domain_score": round(float(item.domain_score), 4),
                     "materiality": item.materiality,
@@ -55,7 +60,12 @@ def calculate_event_importance(
         ignored_reasons[reason] = ignored_reasons.get(reason, 0) + 1
 
     contributions.sort(
-        key=lambda item: (-item["domain_score"], item["normalized_item_id"])
+        key=lambda item: (
+            -item["domain_score"],
+            item["normalized_item_id"],
+            item["normalized_item_revision"],
+            item["mention_index"],
+        )
     )
     dominant = contributions[0] if contributions else None
     score = float(dominant["domain_score"]) if dominant else 0.0

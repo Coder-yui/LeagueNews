@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.domain.event_admission import AdmissionDecision, decide_event_admission
 from app.domain.event_families import (
     canonicalize_event_anchors,
+    determine_mythic_shop_market,
     is_mythic_shop_event,
 )
 from app.domain.event_granularity import editorial_granularity_guidance
@@ -119,6 +120,7 @@ def _source_payload(item: NormalizedItem) -> dict[str, object]:
     return {
         "source_id": item.raw_item.source_id,
         "source_name": item.raw_item.source.name,
+        "connector_type": item.raw_item.source.connector_type,
         "is_official": item.raw_item.source.is_official,
         "reliability_score": item.raw_item.source.reliability_score,
         "content_form": item.content_form,
@@ -218,6 +220,45 @@ def _message_payload(item: NormalizedItem) -> tuple[dict[str, object], dict[str,
         "editorial_granularity_guidance": editorial_granularity_guidance(item),
     }
     return payload, truncation
+
+
+def _mythic_shop_anchors(
+    item: NormalizedItem,
+    *,
+    event_family: str,
+    anchors: dict[str, Any],
+) -> dict[str, Any]:
+    if not is_mythic_shop_event(event_family, anchors):
+        return canonicalize_event_anchors(event_family, anchors)
+    text = "\n".join(
+        value
+        for value in (
+            item.raw_item.native_title,
+            item.translated_title,
+            item.normalized_title,
+            item.normalized_text,
+            item.translated_text,
+        )
+        if isinstance(value, str) and value.strip()
+    )
+    structured_data: list[Any] = [anchors, item.facets]
+    structured_data.extend(
+        value
+        for link in item.media_links
+        for value in (
+            link.media_extraction.structured_data,
+            link.translated_structured_data,
+        )
+    )
+    market = determine_mythic_shop_market(
+        text=text,
+        structured_data=structured_data,
+        source_connector_type=item.raw_item.source.connector_type,
+    )
+    return canonicalize_event_anchors(
+        event_family,
+        {**anchors, "market": market},
+    )
 
 
 def _record_for_item(db: Session, item: NormalizedItem) -> EventAggregationRun | None:
@@ -391,8 +432,10 @@ async def aggregate_normalized_item(
             independence_group = _independence_group(item)
             source_role = _verified_source_role(item, decision.source_role)
             domain_importance_snapshot = _domain_importance_snapshot(decision)
-            canonical_anchors = canonicalize_event_anchors(
-                decision.event_family, decision.canonical_anchors
+            canonical_anchors = _mythic_shop_anchors(
+                item,
+                event_family=decision.event_family,
+                anchors=decision.canonical_anchors,
             )
             if decision.action == "create":
                 aggregation_key = _aggregation_key(
@@ -459,6 +502,16 @@ async def aggregate_normalized_item(
                 event = db.get(Event, int(decision.candidate_event_id or 0))
                 if event is None:
                     raise ValueError(f"candidate event {decision.candidate_event_id} disappeared")
+                if is_mythic_shop_event(decision.event_family, canonical_anchors):
+                    expected_key = _aggregation_key(
+                        event_family=decision.event_family,
+                        products=item.products,
+                        canonical_anchors=canonical_anchors,
+                    )
+                    if event.aggregation_key != expected_key:
+                        raise ValueError(
+                            "mythic shop update candidate does not match market and rotation identity"
+                        )
                 merged_anchors = {**event.canonical_anchors, **canonical_anchors}
                 add_event_mention(
                     db,

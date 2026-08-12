@@ -67,6 +67,15 @@ _MARKET_KEYS = frozenset({"market", "region", "region_scope", "server"})
 _PERIOD_KEYS = frozenset(
     {"rotation", "rotation_period", "rotation_window", "period", "window"}
 )
+_CN_MARKET_TEXT = re.compile(r"国服|中国大陆|\b(?:china|cn)\s+server\b", re.IGNORECASE)
+_GLOBAL_MARKET_TEXT = re.compile(
+    r"外服|非国服|global|worldwide|international|overseas|"
+    r"\b(?:na|euw|eune|kr|jp|sea|oce|br|lan|las|tr|ru)\b",
+    re.IGNORECASE,
+)
+_GLOBAL_MARKET_CODES = re.compile(
+    r"\b(?:na|euw|eune|kr|jp|sea|oce|br|lan|las|tr|ru)\b", re.IGNORECASE
+)
 
 
 def _anchor_strings(value: Any) -> list[str]:
@@ -86,10 +95,97 @@ def _first_anchor_value(anchors: dict[str, Any], keys: frozenset[str]) -> str | 
 def _normalize_market(value: str) -> str:
     lowered = value.casefold().strip()
     if lowered in {"中国", "中国大陆", "国服", "cn server", "china", "cn"}:
-        return "cn"
-    if lowered in {"海外", "外服", "国际服", "海外服", "overseas", "international"}:
-        return "overseas"
-    return re.sub(r"\s+", "_", lowered)
+        return "CN"
+    if (
+        lowered in {
+            "全球",
+            "全球服",
+            "海外",
+            "外服",
+            "国际服",
+            "海外服",
+            "global",
+            "worldwide",
+            "international",
+            "overseas",
+        }
+        or _GLOBAL_MARKET_CODES.search(lowered)
+    ):
+        return "GLOBAL"
+    return "unknown"
+
+
+def _structured_market_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key, nested in value.items():
+            if str(key).casefold() in _MARKET_KEYS:
+                for candidate in _anchor_strings(nested):
+                    normalized = _normalize_market(candidate)
+                    if normalized != "unknown":
+                        values.append(normalized)
+            else:
+                values.extend(_structured_market_values(nested))
+        return values
+    if isinstance(value, list):
+        values: list[str] = []
+        for nested in value:
+            values.extend(_structured_market_values(nested))
+        return values
+    return []
+
+
+def _structured_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(
+            part
+            for key, nested in value.items()
+            for part in (str(key), _structured_text(nested))
+            if part
+        )
+    if isinstance(value, list):
+        return " ".join(_structured_text(nested) for nested in value)
+    return str(value or "")
+
+
+def _explicit_text_market(text: str) -> str | None:
+    cn = bool(_CN_MARKET_TEXT.search(text))
+    global_market = bool(_GLOBAL_MARKET_TEXT.search(text))
+    if cn and global_market:
+        return "unknown"
+    if cn:
+        return "CN"
+    if global_market:
+        return "GLOBAL"
+    return None
+
+
+def determine_mythic_shop_market(
+    *,
+    text: str = "",
+    structured_data: Any = None,
+    source_connector_type: str | None = None,
+) -> str:
+    """Resolve mythic-shop market from evidence, then platform, without guessing."""
+    explicit_text = _explicit_text_market(text)
+    if explicit_text is not None:
+        return explicit_text
+
+    structured_text = _explicit_text_market(_structured_text(structured_data))
+    if structured_text is not None:
+        return structured_text
+
+    structured_values = set(_structured_market_values(structured_data))
+    if len(structured_values) == 1:
+        return structured_values.pop()
+    if len(structured_values) > 1:
+        return "unknown"
+
+    if source_connector_type == "x_twitter":
+        return "GLOBAL"
+    if source_connector_type == "baidu_tieba":
+        return "CN"
+    return "unknown"
 
 
 def _normalize_period(value: str) -> str:
@@ -135,7 +231,7 @@ def has_complete_mythic_shop_identity(event_family: str, anchors: dict[str, Any]
     return is_mythic_shop_event(event_family, normalized) and all(
         isinstance(normalized.get(key), str) and bool(normalized[key])
         for key in ("shop", "market", "rotation_period")
-    )
+    ) and normalized.get("market") in {"CN", "GLOBAL"}
 
 
 def family_hints(topics: Iterable[str]) -> list[EventFamily]:

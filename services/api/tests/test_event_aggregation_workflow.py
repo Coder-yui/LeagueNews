@@ -11,6 +11,7 @@ from app.domain.event_admission import decide_event_admission
 from app.domain.event_categories import event_category
 from app.domain.event_families import (
     canonicalize_event_anchors,
+    determine_mythic_shop_market,
     has_complete_mythic_shop_identity,
 )
 from app.domain.event_granularity import explicit_match_count, is_daily_match_roundup
@@ -317,11 +318,11 @@ def test_mythic_shop_identity_is_market_and_rotation_period() -> None:
     }
     assert canonicalize_event_anchors("commercial_offer", anchors) == {
         "shop": "mythic_shop",
-        "market": "cn",
+        "market": "CN",
         "rotation_period": "2026-w32",
     }
     assert has_complete_mythic_shop_identity(
-        "commercial_offer", {"shop": "mythic_shop", "market": "cn", "rotation_period": "2026-w32"}
+        "commercial_offer", {"shop": "mythic_shop", "market": "CN", "rotation_period": "2026-w32"}
     )
     same_rotation_different_products = _aggregation_key(
         event_family="commercial_offer",
@@ -338,7 +339,7 @@ def test_mythic_shop_identity_is_market_and_rotation_period() -> None:
         products=["lol_pc"],
         canonical_anchors={
             "shop": "mythic_shop",
-            "market": "cn",
+            "market": "CN",
             "rotation_period": "2026-w33",
         },
     )
@@ -347,13 +348,50 @@ def test_mythic_shop_identity_is_market_and_rotation_period() -> None:
         products=["lol_pc"],
         canonical_anchors={
             "shop": "mythic_shop",
-            "market": "overseas",
+            "market": "GLOBAL",
             "rotation_period": "2026-w32",
         },
     )
     assert same_rotation_different_products == same_rotation_more_products
     assert same_rotation_different_products != next_rotation
     assert same_rotation_different_products != overseas
+
+
+@pytest.mark.parametrize(
+    ("connector_type", "text", "expected"),
+    [
+        ("x_twitter", "Mythic Shop weekly rotation", "GLOBAL"),
+        ("baidu_tieba", "神话商城本周轮换", "CN"),
+        ("x_twitter", "国服本周神话商城", "CN"),
+        ("baidu_tieba", "global Mythic Shop rotation", "GLOBAL"),
+    ],
+)
+def test_mythic_shop_market_prefers_explicit_text_over_source_fallback(
+    connector_type: str, text: str, expected: str
+) -> None:
+    assert (
+        determine_mythic_shop_market(
+            text=text,
+            source_connector_type=connector_type,
+        )
+        == expected
+    )
+
+
+def test_mythic_shop_market_identity_changes_by_market_and_week() -> None:
+    def key(market: str, period: str) -> str:
+        return _aggregation_key(
+            event_family="commercial_offer",
+            products=["lol_pc"],
+            canonical_anchors={
+                "shop": "mythic_shop",
+                "market": market,
+                "rotation_period": period,
+            },
+        )
+
+    assert key("CN", "2026-w32") != key("GLOBAL", "2026-w32")
+    assert key("CN", "2026-w32") != key("CN", "2026-w33")
 
 
 def test_daily_match_roundup_hint_excludes_schedule_summary() -> None:

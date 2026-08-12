@@ -32,7 +32,11 @@ from app.domain.message_taxonomy import (
     message_content_error,
 )
 from app.domain.message_entities import EntityType
-from app.domain.event_families import canonicalize_event_anchors, has_complete_mythic_shop_identity
+from app.domain.event_families import (
+    canonicalize_event_anchors,
+    determine_mythic_shop_market,
+    has_complete_mythic_shop_identity,
+)
 from app.domain.event_importance import is_importance_profile_compatible
 from app.prompts import prompt_registry
 from app.prompts.registry import (
@@ -379,6 +383,24 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                     normalized_anchors = canonicalize_event_anchors(
                         mention.event_family, mention.canonical_anchors
                     )
+                    if (
+                        mention.event_family == "commercial_offer"
+                        and normalized_anchors.get("shop") == "mythic_shop"
+                        and normalized_anchors.get("market") not in {"CN", "GLOBAL"}
+                    ):
+                        source = message.get("source")
+                        source_connector_type = (
+                            source.get("connector_type")
+                            if isinstance(source, dict)
+                            else None
+                        )
+                        normalized_anchors["market"] = determine_mythic_shop_market(
+                            text="\n".join(
+                                str(message.get(key) or "") for key in ("title", "content")
+                            ),
+                            structured_data=message.get("structured_media"),
+                            source_connector_type=source_connector_type,
+                        )
                     if (
                         mention.event_family == "commercial_offer"
                         and normalized_anchors.get("shop") == "mythic_shop"

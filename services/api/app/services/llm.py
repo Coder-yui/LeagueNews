@@ -458,10 +458,11 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 4. 每个 material mention 的 importance 必须针对该独立 Event 本体及其 event_family 选择兼容的受控
    profile；综合公告或赛事汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier
    features；非 material mention 不填写 importance。不要输出分数。
-5. 神话商店轮换必须按 market + rotation_period 作为一个 commercial_offer Event；轮换中的至臻、
-   臻彩、普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 至少表达
-   {"shop":"mythic_shop", "market":"...", "rotation_period":"..."}，同市场同周期必须 update，
-   不同市场或周期必须分开。
+5. 神话商店轮换以周为周期、按市场区分，作为一个 commercial_offer Event；轮换中的至臻、臻彩、
+   普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 至少表达
+   {"shop":"mythic_shop", "market":"CN 或 GLOBAL", "rotation_period":"必填"}。系统会用该条消息的
+   发布日期所对应的自然周统一覆盖 rotation_period，因此同一市场同一周期（同一周）的消息会被聚为
+   同一事件并 update，不同市场或不同周必须分开；你只需给出可靠的市场和周期值，不必纠结周格式。
 6. 普通电竞比赛按每场真实比赛一个 esports_match Event。每日赛前预告、赛后结果汇总只能分别
    mention/update 对应比赛；不要创建 Daily Preview、Daily Schedule、Daily Summary 或 Results Summary
    Event。只有正式公布未知赛程、延期、提前、重赛、场地/对阵/赛制变化才是 esports_schedule。

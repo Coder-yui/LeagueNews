@@ -13,6 +13,7 @@ from app.domain.event_families import (
     canonicalize_event_anchors,
     determine_mythic_shop_market,
     has_complete_mythic_shop_identity,
+    mythic_shop_rotation_period_from_date,
 )
 from app.domain.event_granularity import explicit_match_count, is_daily_match_roundup
 from app.domain.importance import score_importance_profile
@@ -392,6 +393,34 @@ def test_mythic_shop_market_identity_changes_by_market_and_week() -> None:
 
     assert key("CN", "2026-w32") != key("GLOBAL", "2026-w32")
     assert key("CN", "2026-w32") != key("CN", "2026-w33")
+
+
+def test_mythic_shop_rotation_period_is_deterministic_iso_week() -> None:
+    from datetime import date
+
+    assert mythic_shop_rotation_period_from_date(date(2026, 8, 3)) == "2026-w32"
+    assert mythic_shop_rotation_period_from_date(date(2026, 8, 9)) == "2026-w32"
+    assert mythic_shop_rotation_period_from_date(date(2026, 8, 10)) == "2026-w33"
+    # Same ISO week and market unify into one identity regardless of phrasing.
+    normalized = canonicalize_event_anchors(
+        "commercial_offer",
+        {"shop": "mythic_shop", "market": "CN", "rotation_period": "daily browse"},
+    )
+    assert normalized["rotation_period"] == "daily-browse"
+    direct = {
+        "shop": "mythic_shop",
+        "market": "CN",
+        "rotation_period": mythic_shop_rotation_period_from_date(date(2026, 8, 6)),
+    }
+    assert _aggregation_key(
+        event_family="commercial_offer",
+        products=["lol_pc"],
+        canonical_anchors=direct,
+    ) == _aggregation_key(
+        event_family="commercial_offer",
+        products=["lol_pc", "tft"],
+        canonical_anchors=direct,
+    )
 
 
 def test_daily_match_roundup_hint_excludes_schedule_summary() -> None:

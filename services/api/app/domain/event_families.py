@@ -1,5 +1,6 @@
 import re
 from collections.abc import Iterable
+from datetime import date
 from typing import Any, Final
 
 from app.domain.event_types import EventFamily
@@ -198,6 +199,17 @@ def _normalize_period(value: str) -> str:
         week = weekly.group(2) or weekly.group(3)
         return f"{weekly.group(1)}-w{int(week):02d}"
     return lowered.replace(" ", "-").replace("~", "/")
+
+
+def mythic_shop_rotation_period_from_date(published_on: date) -> str:
+    """Derive the deterministic weekly rotation identity for a mythic-shop message.
+
+    The rotation cycle is anchored to the ISO week of the message publication date so
+    that all messages in the same week (and market) unify into one event regardless of
+    how the LLM phrased the period.
+    """
+    iso = published_on.isocalendar()
+    return f"{iso[0]}-w{iso[1]:02d}"
 
 
 def is_mythic_shop_event(event_family: str, anchors: dict[str, Any]) -> bool:

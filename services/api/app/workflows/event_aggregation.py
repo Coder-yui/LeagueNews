@@ -13,6 +13,7 @@ from app.domain.event_families import (
     canonicalize_event_anchors,
     determine_mythic_shop_market,
     is_mythic_shop_event,
+    mythic_shop_rotation_period_from_date,
 )
 from app.domain.event_granularity import editorial_granularity_guidance
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
@@ -255,9 +256,15 @@ def _mythic_shop_anchors(
         structured_data=structured_data,
         source_connector_type=item.raw_item.source.connector_type,
     )
+    published_at = item.raw_item.published_at
+    rotation_period = (
+        mythic_shop_rotation_period_from_date(published_at.date())
+        if published_at is not None
+        else None
+    )
     return canonicalize_event_anchors(
         event_family,
-        {**anchors, "market": market},
+        {**anchors, "market": market, "rotation_period": rotation_period},
     )
 
 
@@ -509,9 +516,37 @@ async def aggregate_normalized_item(
                         canonical_anchors=canonical_anchors,
                     )
                     if event.aggregation_key != expected_key:
-                        raise ValueError(
-                            "mythic shop update candidate does not match market and rotation identity"
+                        # Mythic-shop identity (market + week) differs from the
+                        # candidate. Start a separate event for this message's own
+                        # identity instead of failing the update. This keeps overseas
+                        # and domestic rotations apart and splits by rotation week.
+                        event = db.scalar(
+                            select(Event).where(Event.aggregation_key == expected_key)
                         )
+                        if event is None:
+                            event, _created = create_event(
+                                db,
+                                normalized_item_id=item.id,
+                                mention_index=decision.mention_index,
+                                event_family=decision.event_family,
+                                products=item.products,
+                                canonical_anchors=canonical_anchors,
+                                aggregation_key=expected_key,
+                                title=decision.event_title or "",
+                                current_summary=decision.proposed_summary or "",
+                                relation=decision.relation,
+                                source_role=source_role,
+                                materiality=decision.materiality,
+                                independence_group=independence_group,
+                                evidence_excerpt=decision.evidence_excerpt,
+                                structured_fact_changes=fact_changes,
+                                domain_importance_snapshot=domain_importance_snapshot,
+                                content_fingerprint=claim_fingerprint,
+                                latest_development=decision.latest_development or "",
+                                key_facts=list(decision.key_fact_changes.add),
+                                commit=False,
+                                use_savepoint=False,
+                            )
                 merged_anchors = {**event.canonical_anchors, **canonical_anchors}
                 add_event_mention(
                     db,

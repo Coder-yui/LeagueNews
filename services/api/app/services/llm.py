@@ -33,6 +33,7 @@ from app.domain.message_taxonomy import (
 )
 from app.domain.message_entities import EntityType
 from app.domain.event_families import canonicalize_event_anchors, has_complete_mythic_shop_identity
+from app.domain.event_importance import is_importance_profile_compatible
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
@@ -362,6 +363,18 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             for mention in result.mentions:
                 if daily_match_roundup and mention.action != "ignore" and mention.event_family != "esports_match":
                     return "daily match reminders/results may only create or update concrete esports_match events"
+                if (
+                    mention.action in {"create", "update"}
+                    and mention.materiality == "material_update"
+                    and mention.importance is not None
+                    and not is_importance_profile_compatible(
+                        mention.event_family, mention.importance.profile
+                    )
+                ):
+                    return (
+                        "material mention 的 importance.profile 必须与 event_family 兼容："
+                        f"{mention.event_family} + {mention.importance.profile}"
+                    )
                 if mention.action == "create":
                     normalized_anchors = canonicalize_event_anchors(
                         mention.event_family, mention.canonical_anchors
@@ -419,8 +432,8 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
    进展、关键事实和未决点。普通佐证用 corroboration_only，重复用 duplicate，上下文用
    context_only，后三者不得改写事件投影。
-4. 每个 material mention 的 importance 必须针对该独立 Event 本体选择受控 profile；综合公告或赛事
-   汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier
+4. 每个 material mention 的 importance 必须针对该独立 Event 本体及其 event_family 选择兼容的受控
+   profile；综合公告或赛事汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier
    features；非 material mention 不填写 importance。不要输出分数。
 5. 神话商店轮换必须按 market + rotation_period 作为一个 commercial_offer Event；轮换中的至臻、
    臻彩、普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 至少表达

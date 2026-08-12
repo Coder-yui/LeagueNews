@@ -15,6 +15,7 @@ from app.services.llm import (
     TranslationResult,
     execution_metadata,
 )
+from app.domain.event_importance import is_importance_profile_compatible
 from app.workflows.translate_item import build_translation, detect_language
 
 
@@ -331,6 +332,74 @@ def _client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeComple
     completions = _FakeCompletions(responses)
     client.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return client, completions
+
+
+def _event_aggregation_response(event_family: str, profile: str) -> str:
+    return json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "event_family": event_family,
+                    "action": "create",
+                    "candidate_event_id": None,
+                    "relation": "reports",
+                    "source_role": "known_leaker",
+                    "materiality": "material_update",
+                    "canonical_anchors": {"subject": "test:event"},
+                    "event_title": "测试事件",
+                    "proposed_summary": "测试事件摘要。",
+                    "importance": {"profile": profile},
+                    "evidence_excerpt": "测试事件证据",
+                }
+            ],
+            "ignored_fragments": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_event_importance_profile_compatibility_guard_accepts_valid_combination() -> None:
+    client, _ = _client_with_responses(
+        [_event_aggregation_response("esports_match", "worlds_key")]
+    )
+
+    result = asyncio.run(
+        client.aggregate_events(
+            message={"title": "测试", "editorial_granularity_guidance": []},
+            admission_decision="create_or_update",
+            family_hints=["esports_match"],
+            candidates=[],
+        )
+    )
+
+    assert result.mentions[0].importance is not None
+    assert is_importance_profile_compatible("esports_match", "worlds_key")
+
+
+@pytest.mark.parametrize(
+    ("event_family", "profile"),
+    [
+        ("gameplay_balance", "worlds_key"),
+        ("cosmetic_release", "patch_official_notes"),
+        ("esports_match", "cosmetic_announcement"),
+    ],
+)
+def test_event_importance_profile_compatibility_guard_rejects_mismatch(
+    event_family: str, profile: str
+) -> None:
+    response = _event_aggregation_response(event_family, profile)
+    client, _ = _client_with_responses([response, response])
+
+    with pytest.raises(LLMAnalysisError, match="importance.profile"):
+        asyncio.run(
+            client.aggregate_events(
+                message={"title": "测试", "editorial_granularity_guidance": []},
+                admission_decision="create_or_update",
+                family_hints=[event_family],
+                candidates=[],
+            )
+        )
 
 
 def test_importance_prompt_uses_editorial_policy_contract() -> None:

@@ -1,11 +1,172 @@
 from dataclasses import dataclass
 from typing import Any, Final, Iterable
 
-from app.domain.event_types import IMPORTANCE_POLICY_VERSION
+from app.domain.event_types import EventFamily, IMPORTANCE_POLICY_VERSION
 from app.domain.importance import SCORE_BANDS
 
 
 MAX_BREAKDOWN_EVIDENCE: Final = 10
+
+
+EVENT_FAMILY_IMPORTANCE_PROFILES: Final[dict[EventFamily, frozenset[str]]] = {
+    "gameplay_balance": frozenset(
+        {
+            "patch_official_notes",
+            "patch_full_preview",
+            "official_gameplay_preview",
+            "gameplay_announcement",
+            "game_announcement_general",
+            "patch_hotfix",
+            "promotion_gameplay",
+            "leak_gameplay",
+            "gameplay_guide",
+            "game_discussion",
+            "tft_announcement",
+        }
+    ),
+    "gameplay_release": frozenset(
+        {
+            "patch_official_notes",
+            "patch_full_preview",
+            "official_gameplay_preview",
+            "official_content_preview",
+            "gameplay_announcement",
+            "tft_announcement",
+            "game_announcement_general",
+            "promotion_gameplay",
+            "leak_gameplay",
+            "leak_content",
+            "gameplay_guide",
+            "game_discussion",
+        }
+    ),
+    "cosmetic_release": frozenset(
+        {
+            "official_content_preview",
+            "cosmetic_announcement",
+            "promotion_cosmetic",
+            "shop_cosmetic_rotation",
+            "shop_rare_cosmetic",
+            "activity_free_skin",
+            "leak_content",
+            "leak_general",
+        }
+    ),
+    "player_activity": frozenset(
+        {
+            "official_content_preview",
+            "activity_announcement",
+            "promotion_activity",
+            "promotion_cosmetic",
+            "free_reward",
+            "activity_free_skin",
+            "leak_content",
+            "leak_general",
+        }
+    ),
+    "commercial_offer": frozenset(
+        {
+            "commerce_announcement",
+            "promotion_general",
+            "promotion_cosmetic",
+            "shop_daily_standard",
+            "shop_cosmetic_rotation",
+            "shop_rare_cosmetic",
+            "shop_bulk_refresh",
+            "free_reward",
+        }
+    ),
+    "service_incident": frozenset(
+        {
+            "patch_hotfix",
+            "service_notice",
+            "community_service_notice",
+            "game_announcement_general",
+        }
+    ),
+    "security_enforcement": frozenset(
+        {"security_notice", "service_notice", "community_service_notice"}
+    ),
+    "esports_match": frozenset(
+        {
+            "esports_regular",
+            "esports_playoffs",
+            "esports_final",
+            "worlds_regular",
+            "worlds_key",
+            "esports_rumor",
+        }
+    ),
+    "esports_schedule": frozenset(
+        {
+            "esports_schedule",
+            "esports_announcement_general",
+            "esports_promotion",
+            "esports_rumor",
+        }
+    ),
+    "roster_change": frozenset(
+        {"roster_announcement", "esports_rumor", "esports_announcement_general", "esports_analysis"}
+    ),
+    "esports_rules": frozenset(
+        {
+            "esports_announcement_general",
+            "esports_analysis",
+            "esports_discussion",
+            "esports_promotion",
+            "esports_rumor",
+        }
+    ),
+    "universe_release": frozenset(
+        {
+            "official_content_preview",
+            "universe_announcement",
+            "universe_promotion",
+            "universe_leak",
+            "universe_discussion",
+            "media_release",
+        }
+    ),
+    "media_release": frozenset(
+        {
+            "official_content_preview",
+            "media_release",
+            "promotion_community",
+            "promotion_general",
+            "leak_content",
+            "leak_general",
+        }
+    ),
+    "corporate_change": frozenset(
+        {
+            "partnership",
+            "riot_announcement",
+            "riot_promotion",
+            "riot_leak",
+            "riot_discussion",
+            "other_product_announcement",
+            "other_product_promotion",
+            "other_product_leak",
+        }
+    ),
+    "platform_service": frozenset(
+        {
+            "service_notice",
+            "community_service_notice",
+            "patch_hotfix",
+            "riot_announcement",
+            "riot_discussion",
+            "other_product_announcement",
+        }
+    ),
+    "other_named_development": frozenset(SCORE_BANDS),
+}
+
+
+def is_importance_profile_compatible(event_family: str, profile: str) -> bool:
+    """Return whether a controlled profile describes the given event family."""
+    allowed = EVENT_FAMILY_IMPORTANCE_PROFILES.get(event_family)
+    return allowed is not None and profile in allowed
 
 
 @dataclass(frozen=True, slots=True)

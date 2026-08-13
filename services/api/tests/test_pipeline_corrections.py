@@ -547,6 +547,41 @@ async def test_event_recovery_cancels_job_when_publication_is_withdrawn(db: Sess
 
 
 @pytest.mark.anyio
+async def test_event_recovery_cancels_old_job_when_active_job_exists(db: Session) -> None:
+    item = _published_item(db, suffix=" active event retry")
+    old_event_job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="failed",
+        current_stage="event_aggregation",
+    )
+    current_event_job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="queued",
+        current_stage="event_aggregation",
+    )
+    db.add_all([old_event_job, current_event_job])
+    db.commit()
+
+    recovered = await recover_failed_job(
+        db,
+        job_id=old_event_job.id,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="importance",
+            resume_mode="automatic",
+            reason="重试事件聚合",
+        ),
+    )
+
+    assert recovered.id == old_event_job.id
+    assert old_event_job.status == "cancelled"
+    assert old_event_job.error_message == "superseded by active pipeline job"
+    assert old_event_job.completed_at is not None
+    assert current_event_job.status == "queued"
+    assert db.scalar(select(PipelineCorrection)) is None
+    assert item.publication_status == "published"
+
+
+@pytest.mark.anyio
 async def test_message_job_recovery_still_creates_message_correction(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,

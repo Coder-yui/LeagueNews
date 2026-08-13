@@ -253,6 +253,16 @@ async def recover_failed_job(
             job.status = "cancelled"
             job.error_message = "published NormalizedItem is no longer current"
             job.completed_at = datetime.now(UTC)
+        elif db.scalar(
+            select(PipelineJob).where(
+                PipelineJob.raw_item_id == job.raw_item_id,
+                PipelineJob.id != job.id,
+                PipelineJob.status.in_(["queued", "running"]),
+            )
+        ) is not None:
+            job.status = "cancelled"
+            job.error_message = "superseded by active pipeline job"
+            job.completed_at = datetime.now(UTC)
         else:
             job.status = "queued"
             job.error_message = None

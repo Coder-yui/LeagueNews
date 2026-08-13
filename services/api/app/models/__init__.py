@@ -1,5 +1,6 @@
 from app.models.connector_run import ConnectorRun
 from app.models.collection_schedule import SourceCollectionSchedule
+from app.models.daily_report import DailyReport, DailyReportItem
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
@@ -17,6 +18,8 @@ from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, Revi
 
 __all__ = [
     "ConnectorRun",
+    "DailyReport",
+    "DailyReportItem",
     "Event",
     "EventAggregationRun",
     "EventMention",

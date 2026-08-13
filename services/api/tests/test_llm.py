@@ -335,6 +335,18 @@ def _client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeComple
 
 
 def _event_aggregation_response(event_family: str, profile: str) -> str:
+    anchors_by_family = {
+        "esports_match": {
+            "match": "IG_vs_LNG",
+            "date": "2026-08-02",
+            "league": "lpl",
+        },
+        "gameplay_balance": {
+            "champion": "内瑟斯",
+            "change_signature": "changes:326>376",
+        },
+        "cosmetic_release": {"skin_series": "花仙子", "patch_version": "26.16"},
+    }
     return json.dumps(
         {
             "mentions": [
@@ -346,11 +358,17 @@ def _event_aggregation_response(event_family: str, profile: str) -> str:
                     "relation": "reports",
                     "source_role": "known_leaker",
                     "materiality": "material_update",
-                    "canonical_anchors": {"subject": "test:event"},
+                    "canonical_anchors": anchors_by_family.get(
+                        event_family, {"release_name": "test:event"}
+                    ),
                     "event_title": "测试事件",
                     "proposed_summary": "测试事件摘要。",
                     "importance": {"profile": profile},
-                    "evidence_excerpt": "测试事件证据",
+                    "evidence_excerpt": (
+                        "内瑟斯法力值 326 → 376"
+                        if event_family == "gameplay_balance"
+                        else "IG vs LNG"
+                    ),
                 }
             ],
             "ignored_fragments": [],
@@ -366,7 +384,12 @@ def test_event_importance_profile_compatibility_guard_accepts_valid_combination(
 
     result = asyncio.run(
         client.aggregate_events(
-            message={"title": "测试", "editorial_granularity_guidance": []},
+            message={
+                "title": "IG vs LNG",
+                "content": "IG vs LNG",
+                "source": {"published_at": "2026-08-02T10:00:00+08:00"},
+                "editorial_granularity_guidance": [],
+            },
             admission_decision="create_or_update",
             family_hints=["esports_match"],
             candidates=[],
@@ -407,6 +430,135 @@ def test_event_importance_profile_compatibility_guard_rejects_mismatch(
                 candidates=[],
             )
         )
+
+
+def test_event_aggregation_rejects_english_only_projection() -> None:
+    payload = json.loads(_event_aggregation_response("gameplay_balance", "leak_gameplay"))
+    payload["mentions"][0]["event_title"] = "Nasus balance changes leaked"
+    payload["mentions"][0]["proposed_summary"] = "Leaked changes to Nasus."
+    response = json.dumps(payload, ensure_ascii=False)
+    client, _ = _client_with_responses([response, response])
+
+    with pytest.raises(LLMAnalysisError, match="简体中文"):
+        asyncio.run(
+            client.aggregate_events(
+                message={"title": "内瑟斯改动", "editorial_granularity_guidance": []},
+                admission_decision="create_or_update",
+                family_hints=["gameplay_balance"],
+                candidates=[],
+            )
+        )
+
+
+def test_event_aggregation_rejects_incompatible_match_update() -> None:
+    response = json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "event_family": "esports_match",
+                    "action": "update",
+                    "candidate_event_id": 125,
+                    "relation": "reports",
+                    "source_role": "responsible_official",
+                    "materiality": "material_update",
+                    "canonical_anchors": {
+                        "match": "AL_vs_TT",
+                        "date": "2026-08-02",
+                        "league": "lpl",
+                    },
+                    "event_title": "AL 对阵 TT",
+                    "proposed_summary": "AL 对阵 TT 的比赛已经结束。",
+                    "importance": {"profile": "esports_regular"},
+                    "evidence_excerpt": "AL 对阵 TT",
+                }
+            ],
+            "ignored_fragments": [],
+        },
+        ensure_ascii=False,
+    )
+    candidate = {
+        "event_id": 125,
+        "event_family": "esports_match",
+        "products": ["lol_esports"],
+        "canonical_anchors": {
+            "match": "AL_vs_EDG",
+            "date": "2026-08-02",
+            "league": "lpl",
+        },
+        "match_score": 68,
+    }
+    client, _ = _client_with_responses([response, response])
+
+    with pytest.raises(LLMAnalysisError, match="Event identity"):
+        asyncio.run(
+            client.aggregate_events(
+                message={"title": "AL 对阵 TT", "editorial_granularity_guidance": []},
+                admission_decision="create_or_update",
+                family_hints=["esports_match"],
+                candidates=[candidate],
+            )
+        )
+
+
+def test_event_aggregation_rejects_create_when_exact_identity_candidate_exists() -> None:
+    response = _event_aggregation_response("gameplay_balance", "leak_gameplay")
+    candidate = {
+        "event_id": 77,
+        "event_family": "gameplay_balance",
+        "products": ["lol_pc"],
+        "canonical_anchors": {
+            "champion": "内瑟斯",
+            "change_signature": "changes:326>376",
+        },
+        "match_score": 1,
+    }
+    client, _ = _client_with_responses([response, response])
+
+    with pytest.raises(LLMAnalysisError, match="必须 update 而不是 create"):
+        asyncio.run(
+            client.aggregate_events(
+                message={"title": "内瑟斯改动", "editorial_granularity_guidance": []},
+                admission_decision="create_or_update",
+                family_hints=["gameplay_balance"],
+                candidates=[candidate],
+            )
+        )
+
+
+def test_event_aggregation_salvages_valid_mentions_after_retry() -> None:
+    valid = json.loads(_event_aggregation_response("gameplay_balance", "leak_gameplay"))[
+        "mentions"
+    ][0]
+    invalid = {
+        **valid,
+        "mention_index": 1,
+        "event_family": "esports_match",
+        "canonical_anchors": {"league": "lpl"},
+        "importance": {"profile": "esports_regular"},
+        "evidence_excerpt": "没有明确对阵的附属片段",
+    }
+    response = json.dumps(
+        {"mentions": [valid, invalid], "ignored_fragments": []}, ensure_ascii=False
+    )
+    client, _ = _client_with_responses([response, response])
+
+    result = asyncio.run(
+        client.aggregate_events(
+            message={
+                "title": "内瑟斯改动",
+                "content": "内瑟斯法力值 326 → 376；没有明确对阵的附属片段",
+                "editorial_granularity_guidance": [],
+            },
+            admission_decision="create_or_update",
+            family_hints=["gameplay_balance", "esports_match"],
+            candidates=[],
+        )
+    )
+
+    assert [mention.event_family for mention in result.mentions] == ["gameplay_balance"]
+    assert result.ignored_fragments[0].startswith("模型 mention[1]")
+    assert execution_metadata(result)["error_type"] == "partial_acceptance"
 
 
 def _mythic_candidate(event_id: int = 99) -> dict[str, object]:

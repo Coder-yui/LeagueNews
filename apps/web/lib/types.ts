@@ -148,6 +148,20 @@ export type PublishedItemPage = {
   topic_options: string[];
 };
 
+export type DailyReport = {
+  id: number;
+  report_date: string;
+  status: string;
+  sections: {
+    lolpc: PublishedItem[];
+    esports: PublishedItem[];
+    tft: PublishedItem[];
+    other: PublishedItem[];
+  };
+  created_at: string;
+  updated_at: string;
+};
+
 export type EventSource = {
   message_id: number;
   source_id: number;

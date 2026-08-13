@@ -32,6 +32,8 @@ ANCHOR_KEY_BY_ENTITY_TYPE: Final = {
     "patch": "patch_version",
     "activity": "activity_name",
     "champion": "champion",
+    "item": "item",
+    "rune": "rune",
     "skin": "skin",
     "game_mode": "game_mode",
     "team": "team",
@@ -58,6 +60,8 @@ STRONG_ANCHOR_KEYS: Final = frozenset(
         "league",
         "game_mode",
         "champion",
+        "item",
+        "rune",
         "product",
     }
 )
@@ -223,8 +227,11 @@ def is_mythic_shop_event(event_family: str, anchors: dict[str, Any]) -> bool:
     )
 
 
-def canonicalize_event_anchors(event_family: str, anchors: dict[str, Any]) -> dict[str, Any]:
-    """Keep recurring mythic-shop identity independent from the listed products."""
+def canonicalize_event_anchors(
+    event_family: str,
+    anchors: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep recurring mythic-shop identity independent from listed products."""
     copied = dict(anchors)
     if not is_mythic_shop_event(event_family, copied):
         return copied
@@ -259,13 +266,19 @@ def anchors_from_entities(entities: Iterable[dict[str, Any]]) -> dict[str, Any]:
     collected: dict[str, list[str]] = {}
     for entity in entities:
         key = ANCHOR_KEY_BY_ENTITY_TYPE.get(str(entity.get("type") or ""))
-        value = str(
-            entity.get("canonical_id")
-            or entity.get("canonical_name")
-            or entity.get("display_name")
-            or entity.get("name")
-            or ""
-        ).strip()
+        value_fields = (
+            ("display_name", "name", "canonical_id", "canonical_name")
+            if key == "champion"
+            else ("canonical_id", "canonical_name", "display_name", "name")
+        )
+        value = next(
+            (
+                str(entity.get(field)).strip()
+                for field in value_fields
+                if str(entity.get(field) or "").strip()
+            ),
+            "",
+        )
         if not key or not value:
             continue
         collected.setdefault(key, [])

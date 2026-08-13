@@ -2,7 +2,7 @@
 
 > 状态：Phase 0–5 已完成
 >
-> 设计版本：`event-aggregation-v2-mention-importance`
+> 设计版本：`event-aggregation-v3-deterministic-identity`
 >
 > 更新时间：2026-08-11
 

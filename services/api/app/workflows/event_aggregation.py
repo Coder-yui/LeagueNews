@@ -15,6 +15,15 @@ from app.domain.event_families import (
     is_mythic_shop_event,
     mythic_shop_rotation_period_from_date,
 )
+from app.domain.event_identity import (
+    event_identity_key,
+    event_identity_matches,
+    identity_is_supported_by_message,
+    identity_anchors_with_hints,
+    project_event_identity,
+    resolve_esports_match_anchors,
+    select_identity_evidence,
+)
 from app.domain.event_granularity import editorial_granularity_guidance
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.domain.importance import IMPORTANCE_POLICY_VERSION, score_importance_profile
@@ -47,10 +56,13 @@ def _aggregation_key(
     *, event_family: str, products: list[str], canonical_anchors: dict[str, Any]
 ) -> str:
     identity_products = [] if is_mythic_shop_event(event_family, canonical_anchors) else sorted(products)
+    identity_key = event_identity_key(event_family, canonical_anchors)
+    if identity_key is None:
+        raise ValueError(f"{event_family} lacks a deterministic identity")
     identity = {
         "event_family": event_family,
         "products": identity_products,
-        "canonical_anchors": canonical_anchors,
+        "identity_key": identity_key,
     }
     return f"event-v1:{event_family}:{_fingerprint(identity)[:32]}"
 
@@ -424,6 +436,7 @@ async def aggregate_normalized_item(
         daily_match_roundup = "daily_esports_match_roundup" in (
             message.get("editorial_granularity_guidance") or []
         )
+        admission_anchors = admission.strong_anchors
         for decision in result.mentions:
             if decision.action == "ignore":
                 continue
@@ -447,7 +460,57 @@ async def aggregate_normalized_item(
                 event_family=decision.event_family,
                 anchors=decision.canonical_anchors,
             )
+            canonical_anchors = identity_anchors_with_hints(
+                decision.event_family, canonical_anchors, admission_anchors
+            )
+            observed_at = item.raw_item.published_at or item.raw_item.ingested_at
+            identity_evidence = select_identity_evidence(
+                decision.event_family,
+                message_text="\n".join(
+                    value
+                    for value in (
+                        str(message.get("title") or ""),
+                        str(message.get("summary") or ""),
+                        str(message.get("content") or ""),
+                    )
+                    if value
+                ),
+                mention_excerpt=decision.evidence_excerpt,
+            )
+            incoming_anchors = canonical_anchors
+            message_identity_text = "\n".join(
+                str(message.get(key) or "") for key in ("title", "summary", "content")
+            )
+            if decision.event_family == "esports_match":
+                incoming_anchors = resolve_esports_match_anchors(
+                    incoming_anchors,
+                    message_text=message_identity_text,
+                    mention_excerpt=decision.evidence_excerpt,
+                    observed_on=observed_at,
+                )
+            if not identity_is_supported_by_message(
+                decision.event_family,
+                incoming_anchors,
+                message_text=message_identity_text,
+                mention_excerpt=decision.evidence_excerpt,
+                message_anchors=admission_anchors,
+                observed_on=observed_at,
+            ):
+                raise ValueError(
+                    f"mention[{decision.mention_index}] identity is not supported by message evidence"
+                )
+            projected_identity = project_event_identity(
+                decision.event_family,
+                incoming_anchors,
+                evidence_text=identity_evidence,
+                observed_on=observed_at,
+            )
+            if not projected_identity:
+                raise ValueError(
+                    f"{decision.event_family} mention lacks a deterministic identity"
+                )
             if decision.action == "create":
+                canonical_anchors = projected_identity
                 aggregation_key = _aggregation_key(
                     event_family=decision.event_family,
                     products=item.products,
@@ -481,10 +544,6 @@ async def aggregate_normalized_item(
                         use_savepoint=False,
                     )
                 else:
-                    merged_anchors = {
-                        **existing_event.canonical_anchors,
-                        **canonical_anchors,
-                    }
                     event, _created = add_event_mention(
                         db,
                         event_id=existing_event.id,
@@ -501,7 +560,7 @@ async def aggregate_normalized_item(
                         title=decision.event_title,
                         current_summary=decision.proposed_summary,
                         latest_development=decision.latest_development,
-                        canonical_anchors=merged_anchors,
+                        canonical_anchors=existing_event.canonical_anchors,
                         key_facts=_apply_fact_changes(
                             existing_event.key_facts, fact_changes
                         ),
@@ -512,21 +571,16 @@ async def aggregate_normalized_item(
                 event = db.get(Event, int(decision.candidate_event_id or 0))
                 if event is None:
                     raise ValueError(f"candidate event {decision.candidate_event_id} disappeared")
-                if is_mythic_shop_event(decision.event_family, canonical_anchors):
-                    expected_key = _aggregation_key(
-                        event_family=decision.event_family,
-                        products=item.products,
-                        canonical_anchors=canonical_anchors,
-                    )
-                    if event.aggregation_key != expected_key:
-                        # Mythic-shop identity (market + week) differs from the candidate.
-                        # The business validator must reject this before apply; never
-                        # silently switch/create an event here, which would bypass
-                        # update_existing_only admission.
-                        raise ValueError(
-                            "mythic shop update candidate does not match market and rotation identity"
-                        )
-                merged_anchors = {**event.canonical_anchors, **canonical_anchors}
+                if event.event_family != decision.event_family:
+                    raise ValueError("candidate event family does not match")
+                if not event_identity_matches(
+                    decision.event_family,
+                    event.canonical_anchors,
+                    incoming_anchors,
+                    evidence_text=identity_evidence,
+                    observed_on=observed_at,
+                ):
+                    raise ValueError("event update candidate identity does not match")
                 add_event_mention(
                     db,
                     event_id=event.id,
@@ -543,7 +597,7 @@ async def aggregate_normalized_item(
                     title=decision.event_title,
                     current_summary=decision.proposed_summary,
                     latest_development=decision.latest_development,
-                    canonical_anchors=merged_anchors,
+                    canonical_anchors=event.canonical_anchors,
                     key_facts=_apply_fact_changes(event.key_facts, fact_changes),
                     commit=False,
                     use_savepoint=False,

@@ -11,10 +11,20 @@ from app.core.database import Base
 from app.domain.event_admission import decide_event_admission
 from app.domain.event_categories import event_category
 from app.domain.event_families import (
+    anchors_from_entities,
     canonicalize_event_anchors,
     determine_mythic_shop_market,
     has_complete_mythic_shop_identity,
     mythic_shop_rotation_period_from_date,
+)
+from app.domain.event_identity import (
+    balance_change_signature,
+    event_identity_key,
+    event_identity_matches,
+    identity_is_supported_by_message,
+    identity_anchors_with_hints,
+    project_event_identity,
+    resolve_esports_match_anchors,
 )
 from app.domain.event_granularity import explicit_match_count, is_daily_match_roundup
 from app.domain.importance import score_importance_profile
@@ -71,6 +81,7 @@ def _item(
     products: list[str] | None = None,
     importance_profile: str = "gameplay_announcement",
     domain_score: float = 0.5,
+    published_at: datetime | None = None,
 ) -> NormalizedItem:
     raw = RawItem(
         source_id=source.id,
@@ -78,7 +89,7 @@ def _item(
         native_title=title,
         canonical_url=f"https://example.com/{external_id}",
         content_blocks=[{"type": "paragraph", "text": title}],
-        published_at=datetime.now(UTC),
+        published_at=published_at or datetime.now(UTC),
     )
     db.add(raw)
     db.flush()
@@ -149,7 +160,10 @@ class ScenarioClient:
                     "relation": "reports",
                     "source_role": "known_leaker",
                     "materiality": "material_update",
-                    "canonical_anchors": {"activity_name": "activity:star"},
+                    "canonical_anchors": {
+                        "activity_name": "activity:star",
+                        "window_start": "2026-08-20",
+                    },
                     "event_title": "星界活动",
                     "proposed_summary": "爆料称星界活动将在下版本开放。",
                     "latest_development": "首次爆料",
@@ -183,7 +197,10 @@ class ScenarioClient:
                     "relation": "confirms",
                     "source_role": "responsible_official",
                     "materiality": "material_update",
-                    "canonical_anchors": {"activity_name": "activity:star"},
+                    "canonical_anchors": {
+                        "activity_name": "activity:star",
+                        "window_end": "2026-09-01",
+                    },
                     "event_title": "星界活动",
                     "proposed_summary": "官网确认星界活动。",
                     "latest_development": "官网确认",
@@ -361,6 +378,193 @@ def test_mythic_shop_identity_is_market_and_rotation_period() -> None:
     assert same_rotation_different_products == same_rotation_more_products
     assert same_rotation_different_products != next_rotation
     assert same_rotation_different_products != overseas
+
+
+def test_esports_match_identity_accepts_reversed_pair_and_rejects_other_match() -> None:
+    existing = {
+        "match": "IG_vs_LNG",
+        "date": "2026-08-02",
+        "league": "lpl",
+    }
+    reversed_pair = {
+        "match": "LNG vs IG",
+        "date": "2026-08-02",
+        "league": "LPL",
+    }
+    other_match = {
+        "match": "TT_vs_WE",
+        "date": "2026-08-02",
+        "league": "lpl",
+    }
+
+    assert event_identity_matches("esports_match", existing, reversed_pair)
+    assert not event_identity_matches("esports_match", existing, other_match)
+
+    assert project_event_identity(
+        "esports_match",
+        {
+            "team_home": "LNG",
+            "team_away": "IG",
+            "match_time": "2026-08-02T17:00:00+08:00",
+            "league": "LPL",
+        },
+    ) == {"match": "ig_vs_lng", "date": "2026-08-02", "league": "lpl"}
+
+
+def test_esports_match_identity_requires_a_complete_pair() -> None:
+    roundup = {"team": ["AL", "EDG", "WE", "BLG"], "date": "2026-07-31", "league": "lpl"}
+
+    assert event_identity_key("esports_match", roundup) is None
+    assert event_identity_key(
+        "esports_match",
+        {"match": "AL_vs_EDG", "date": "2026-07-31", "league": "lpl"},
+    ) is not None
+    assert event_identity_key("esports_match", {"match": "match:0"}) is None
+
+
+def test_esports_update_identity_requires_current_message_pair_evidence() -> None:
+    anchors = {
+        "match": "BLG_vs_WE",
+        "date": "2026-07-31",
+        "league": "lpl",
+    }
+    observed_at = datetime(2026, 7, 31, 8, tzinfo=UTC)
+
+    assert not identity_is_supported_by_message(
+        "esports_match",
+        anchors,
+        message_text="今日预测：2-0 2-1 #Bin #BLG",
+        mention_excerpt="今日预测：2-0 2-1",
+        observed_on=observed_at,
+    )
+    assert identity_is_supported_by_message(
+        "esports_match",
+        anchors,
+        message_text="今日赛程：AL vs EDG；GEN vs T1；17:00 WE vs BLG",
+        mention_excerpt="17:00 WE vs BLG",
+        observed_on=observed_at,
+    )
+
+
+def test_esports_identity_resolves_date_and_league_from_message_evidence() -> None:
+    resolved = resolve_esports_match_anchors(
+        {"match": "艾欧尼亚队_vs_德玛西亚队"},
+        message_text="#2026LPL第三赛段#",
+        mention_excerpt="艾欧尼亚队 1:0 德玛西亚队",
+        observed_on=datetime(2026, 7, 31, 12, tzinfo=UTC),
+    )
+
+    assert resolved["date"] == "2026-07-31"
+    assert resolved["league"] == "lpl"
+    assert identity_is_supported_by_message(
+        "esports_match",
+        resolved,
+        message_text="#2026LPL第三赛段# 艾欧尼亚队 1:0 德玛西亚队",
+        mention_excerpt="艾欧尼亚队 1:0 德玛西亚队",
+        observed_on=datetime(2026, 7, 31, 12, tzinfo=UTC),
+    )
+
+
+def test_generic_identity_requires_a_complete_shape_and_ignores_optional_facts() -> None:
+    assert event_identity_key("esports_schedule", {"date": "2026-08-01"}) is None
+    assert project_event_identity(
+        "player_activity",
+        {
+            "activity_name": "星界活动",
+            "window_start": "2026-08-01",
+            "market": "CN",
+        },
+    ) == {"activity_name": "星界活动"}
+    assert event_identity_matches(
+        "player_activity",
+        {"activity_name": "星界活动"},
+        {
+            "activity_name": "星界活动",
+            "window_start": "2026-08-01",
+            "market": "CN",
+        },
+    )
+
+
+def test_message_identity_hints_only_fill_missing_single_values() -> None:
+    assert identity_anchors_with_hints(
+        "gameplay_balance",
+        {"champion": "Nasus"},
+        {"champion": "内瑟斯"},
+    ) == {"champion": "内瑟斯"}
+    assert identity_anchors_with_hints(
+        "gameplay_balance",
+        {"champion": "内瑟斯"},
+        {"champion": ["阿狸", "内瑟斯"]},
+    ) == {"champion": "内瑟斯"}
+
+
+def test_gameplay_balance_uses_display_subject_and_change_signature() -> None:
+    english = anchors_from_entities(
+        [{"type": "champion", "name": "内瑟斯", "canonical_name": "Nasus"}]
+    )
+    chinese = anchors_from_entities(
+        [{"type": "champion", "canonical_name": "内瑟斯"}]
+    )
+
+    assert english == chinese == {"champion": "内瑟斯"}
+    assert balance_change_signature("法力值 326 → 376，回复 1.49 → 1.59") == (
+        "changes:1.49>1.59|326>376"
+    )
+
+
+def test_gameplay_balance_aliases_produce_same_aggregation_key() -> None:
+    text = "内瑟斯基础法力值 326 → 376，法力回复 1.49 → 1.59，Q 3 → 4、12 → 10"
+    english = project_event_identity(
+        "gameplay_balance",
+        {"champion": "内瑟斯", "game_version": "unknown"},
+        evidence_text=text,
+    )
+    chinese = project_event_identity(
+        "gameplay_balance",
+        {"champion": "内瑟斯", "patch": "测试服7月31日"},
+        evidence_text=text,
+    )
+
+    assert _aggregation_key(
+        event_family="gameplay_balance",
+        products=["lol_pc"],
+        canonical_anchors=english,
+    ) == _aggregation_key(
+        event_family="gameplay_balance",
+        products=["lol_pc"],
+        canonical_anchors=chinese,
+    )
+
+    different_change = project_event_identity(
+        "gameplay_balance",
+        {"champion": "内瑟斯"},
+        evidence_text="内瑟斯基础法力值 376 → 400",
+    )
+    assert different_change != english
+
+
+def test_gameplay_balance_patch_identity_overrides_change_signature() -> None:
+    first = project_event_identity(
+        "gameplay_balance",
+        {"patch_version": "Patch 26.17", "champion": "内瑟斯"},
+        evidence_text="法力值 326 → 376",
+    )
+    second = project_event_identity(
+        "gameplay_balance",
+        {"patch": "26.17", "champion": ["阿狸", "内瑟斯"]},
+        evidence_text="伤害 10 → 20",
+    )
+
+    assert first == second == {"patch_version": "patch:26.17"}
+    assert project_event_identity(
+        "gameplay_balance",
+        {"patch_version": "2026.7.31", "champion": "内瑟斯"},
+        evidence_text="内瑟斯基础法力值 326 → 376",
+    ) == {
+        "champion": "内瑟斯",
+        "change_signature": "changes:326>376",
+    }
 
 
 @pytest.mark.parametrize(
@@ -628,6 +832,7 @@ class DailyRoundupScheduleClient:
 
 class DailyMatchClient:
     async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
+        matches = (("A", "B"), ("C", "D"), ("E", "F"))
         return EventAggregationResult.model_validate(
             {
                 "mentions": [
@@ -638,14 +843,21 @@ class DailyMatchClient:
                         "relation": "reports",
                         "source_role": "responsible_official",
                         "materiality": "material_update",
-                        "canonical_anchors": {"match": f"match:{index}"},
+                        "canonical_anchors": {
+                            "team1": matches[index][0],
+                            "team2": matches[index][1],
+                            "date": "2026-08-12",
+                            "league": "LCK",
+                        },
                         "event_title": f"第 {index + 1} 场比赛",
                         "proposed_summary": f"第 {index + 1} 场比赛安排。",
                         "importance": _importance(
                             ("esports_regular", "esports_playoffs", "worlds_key")[index],
                             competition_region=("lck", "lpl", "international")[index],
                         ),
-                        "evidence_excerpt": f"第 {index + 1} 场",
+                        "evidence_excerpt": (
+                            f"{matches[index][0]} vs {matches[index][1]}"
+                        ),
                     }
                     for index in range(3)
                 ]
@@ -670,6 +882,7 @@ async def test_three_match_roundup_creates_three_match_events_without_daily_even
             topics=["esports_schedule"],
             entities=[],
             products=["lol_esports"],
+            published_at=datetime(2026, 8, 12, tzinfo=UTC),
         )
         db.commit()
 
@@ -829,7 +1042,7 @@ def test_structured_output_rejects_nonmaterial_rewrites_and_bad_indexes() -> Non
         "relation": "reports",
         "source_role": "known_leaker",
         "materiality": "material_update",
-        "canonical_anchors": {"patch_version": "patch:collision"},
+        "canonical_anchors": {"patch_version": "patch:26.99"},
         "event_title": "冲突事件",
         "proposed_summary": "相同身份只能创建一次。",
         "importance": _importance("leak_gameplay"),
@@ -945,6 +1158,9 @@ async def test_one_official_call_updates_two_events_and_creates_a_third() -> Non
         }
         assert by_family["gameplay_balance"].message_count_total == 2
         assert by_family["player_activity"].message_count_total == 2
+        assert by_family["player_activity"].canonical_anchors == {
+            "activity_name": "activity:star"
+        }
         assert by_family["cosmetic_release"].message_count_total == 1
         assert by_family["gameplay_balance"].current_summary.startswith("官网确认")
         assert by_family["gameplay_balance"].credibility_level == "officially_confirmed"
@@ -1035,7 +1251,7 @@ class CollisionClient:
                         "relation": "reports",
                         "source_role": "known_leaker",
                         "materiality": "material_update",
-                        "canonical_anchors": {"patch_version": "patch:collision"},
+                        "canonical_anchors": {"patch_version": "patch:26.99"},
                         "event_title": "冲突事件",
                         "proposed_summary": "第一项会先进入待提交事务。",
                         "latest_development": "测试事务回滚",
@@ -1050,7 +1266,7 @@ class CollisionClient:
                         "relation": "supports",
                         "source_role": "known_leaker",
                         "materiality": "material_update",
-                        "canonical_anchors": {"patch_version": "patch:missing"},
+                        "canonical_anchors": {"patch_version": "patch:26.98"},
                         "proposed_summary": "第二项引用已消失的候选。",
                         "importance": _importance("leak_gameplay"),
                         "evidence_excerpt": "不存在的候选",
@@ -1109,7 +1325,10 @@ class RepostOfficialRoleClient:
                         "relation": "supports",
                         "source_role": "responsible_official",
                         "materiality": "corroboration_only",
-                        "canonical_anchors": {"date": "2026-08-01"},
+                        "canonical_anchors": {
+                            "league": "LCK",
+                            "date": "2026-08-01",
+                        },
                         "evidence_excerpt": "官方账号转载同日赛程",
                     }
                 ]
@@ -1151,7 +1370,7 @@ async def test_official_repost_cannot_claim_responsible_official_role() -> None:
             mention_index=0,
             event_family="esports_schedule",
             products=["lol_pc"],
-            canonical_anchors={"date": "2026-08-01"},
+            canonical_anchors={"league": "LCK", "date": "2026-08-01"},
             aggregation_key="schedule-2026-08-01",
             title="8 月 1 日赛程",
             current_summary="赛程已公布。",
@@ -1267,7 +1486,7 @@ async def test_multi_mention_application_is_atomic() -> None:
             title="一次响应包含冲突动作",
             message_type="game_leak",
             topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:collision"}],
+            entities=[{"type": "patch", "canonical_id": "patch:26.99"}],
         )
         db.commit()
 
@@ -1444,3 +1663,59 @@ def test_candidate_recall_respects_explicit_product_domains(
             anchors={"product": "product:demo"},
         )
         assert bool(candidates) is expected
+
+
+def test_candidate_snapshot_identity_key_belongs_to_each_event() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Candidate identity source", reliability_score=0.8)
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="candidate-identity-message",
+            title="两个活动的后续消息",
+            message_type="game_announcement",
+            topics=["activities_rewards"],
+            entities=[],
+        )
+        for index, activity in enumerate(("星界活动", "峡谷活动")):
+            origin = _item(
+                db,
+                source=source,
+                external_id=f"candidate-identity-{index}",
+                title=activity,
+                message_type="game_announcement",
+                topics=["activities_rewards"],
+                entities=[{"type": "activity", "canonical_id": activity}],
+            )
+            create_event(
+                db,
+                normalized_item_id=origin.id,
+                mention_index=0,
+                event_family="player_activity",
+                products=["lol_pc"],
+                canonical_anchors={"activity_name": activity},
+                aggregation_key=f"activity-{index}",
+                title=activity,
+                current_summary=f"{activity}已公布。",
+                domain_importance_snapshot=_snapshot("activity_announcement"),
+            )
+
+        candidates = recall_event_candidates(
+            db,
+            item=item,
+            family_hints=["player_activity"],
+            anchors={},
+        )
+
+        assert len(candidates) == 2
+        assert {
+            candidate["identity_key"] for candidate in candidates
+        } == {
+            event_identity_key("player_activity", candidate["canonical_anchors"])
+            for candidate in candidates
+        }
+        assert len({candidate["identity_key"] for candidate in candidates}) == 2

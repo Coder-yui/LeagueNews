@@ -1,4 +1,4 @@
-import type { EventDetail, EventPage, PublishedItem, PublishedItemPage } from "./types";
+import type { DailyReport, EventDetail, EventPage, PublishedItem, PublishedItemPage } from "./types";
 
 export const apiUrl =
   process.env.INTERNAL_API_URL ??
@@ -70,6 +70,19 @@ export async function getPublishedItem(id: number): Promise<PublishedItem | null
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`API returned ${response.status}`);
     return (await response.json()) as PublishedItem;
+  } catch {
+    return null;
+  }
+}
+
+export async function getDailyReport(reportDate: string): Promise<DailyReport | null> {
+  try {
+    const response = await fetch(`${apiUrl}/reports/daily/${reportDate}`, {
+      next: { revalidate: 30 },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`API returned ${response.status}`);
+    return (await response.json()) as DailyReport;
   } catch {
     return null;
   }

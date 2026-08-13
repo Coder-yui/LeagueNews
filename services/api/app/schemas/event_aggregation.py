@@ -1,9 +1,9 @@
-import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.event_types import EventFamily, EventMateriality, EventRelation, EventSourceRole
+from app.domain.event_identity import event_identity_key, event_identity_matches
 from app.domain.importance import (
     CompetitionRegion,
     ImportanceProfile,
@@ -109,24 +109,36 @@ class EventAggregationResult(BaseModel):
         indexes = [mention.mention_index for mention in self.mentions]
         if indexes != list(range(len(indexes))):
             raise ValueError("mention_index must be unique, ordered, and contiguous from zero")
-        create_identities: dict[tuple[str, str], int] = {}
+        create_mentions: list[EventMentionDecision] = []
         for mention in self.mentions:
             if mention.action != "create":
                 continue
-            identity = (
+            identity_key = event_identity_key(
                 mention.event_family,
-                json.dumps(
-                    mention.canonical_anchors,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
+                mention.canonical_anchors,
+                evidence_text=mention.evidence_excerpt,
             )
-            previous_index = create_identities.get(identity)
-            if previous_index is not None:
-                raise ValueError(
-                    "create mentions with the same family and anchors must be merged "
-                    f"into one event: indexes {previous_index} and {mention.mention_index}"
+            if identity_key is None:
+                continue
+            for previous in create_mentions:
+                if previous.event_family != mention.event_family:
+                    continue
+                same_identity = event_identity_matches(
+                    mention.event_family,
+                    previous.canonical_anchors,
+                    mention.canonical_anchors,
+                    evidence_text=mention.evidence_excerpt,
+                ) or event_identity_matches(
+                    mention.event_family,
+                    mention.canonical_anchors,
+                    previous.canonical_anchors,
+                    evidence_text=previous.evidence_excerpt,
                 )
-            create_identities[identity] = mention.mention_index
+                if same_identity:
+                    raise ValueError(
+                        "create mentions with the same family and anchors must be merged "
+                        f"into one event: indexes {previous.mention_index} and "
+                        f"{mention.mention_index}"
+                    )
+            create_mentions.append(mention)
         return self

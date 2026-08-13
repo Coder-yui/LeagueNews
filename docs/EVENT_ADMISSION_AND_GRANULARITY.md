@@ -2,7 +2,7 @@
 
 > 状态：Phase 2 已实现
 >
-> 策略版本：`event-aggregation-v2-mention-importance`
+> 策略版本：`event-aggregation-v3-deterministic-identity`
 
 ## 目标与非目标
 
@@ -126,8 +126,9 @@ window_start, window_end, product
 - 普通常规赛可按明确比赛标识；缺少稳定比赛锚点时不凭战队名和同日相似文本强行合并。
 - 宣传、观点、复述和附属素材没有独立状态变化时返回 `ignore` 或 `context_only`。
 
-`aggregation_key` 由代码根据标准化 anchors 生成，模型只能提供/修正 anchor 值，不能自由输出
-最终 key。无足够强锚点的事件可使用带命名主体、family、产品和时间桶的受控散列 key。
+`aggregation_key` 由代码根据 family-specific identity 投影生成，模型只能提供 anchor 值，不能自由
+输出最终 key。候选相似度只用于召回和排序；create/update 必须具备可重复计算的完整 identity，
+无完整 identity 时拒绝写入，不使用文本相似度或时间桶代替身份。
 
 ## 候选召回
 
@@ -135,7 +136,7 @@ window_start, window_end, product
 
 | 信号 | 分值 |
 | --- | ---: |
-| aggregation key 或唯一强 anchor 完全一致 | 100 |
+| deterministic identity 完全一致 | 100 |
 | patch / match / named activity 等核心 anchor 一致 | 60 |
 | family 与产品重合 | 20 |
 | 核心实体 canonical id 重合 | 每个 12，最多 36 |
@@ -174,11 +175,11 @@ candidate_rejections: [{event_id, reason}]
 业务校验至少要求：
 
 - `create` 不得携带 candidate id，并满足 family 的最小 anchor 要求。
-- `update` 必须指向输入候选，family 与强 anchors 不冲突。
+- `update` 必须指向输入候选，且 deterministic identity 与候选完全一致。
 - `ignore` 不写事件，可解释为什么不是独立事实。
 - `corroboration_only/duplicate/context_only` 不得修改摘要、关键事实或最新进展。
 - `confirms/denies/corrects` 必须有支持该关系的 excerpt；Source 角色由代码二次校验。
-- 选择 `create` 时要解释所有同 family 强候选为何不是同一事件。
+- 选择 `create` 时若候选中已有相同 deterministic identity，业务校验必须拒绝。
 - mention_index 在响应内连续、唯一；响应外再与本次策略版本形成幂等键。
 
 ## 输入裁剪与异常调用

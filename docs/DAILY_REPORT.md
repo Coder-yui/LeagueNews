@@ -1,0 +1,27 @@
+# 日报 V1
+
+日报是从已经完成处理的消息中生成的一份精选列表，不重新调用 LLM 做日报总结、重要性判断或产品分类。
+
+## 规则
+
+- 候选消息使用 `RawItem.published_at` 按 `Asia/Shanghai` 自然日划分，查询使用 UTC 时区感知的半开区间 `[00:00, 次日 00:00)`。
+- 只保留 `NormalizedItem.publication_status = published`、`content_form = original` 且 `importance_score >= 0.60` 的消息。
+- 通过已有 `EventMention` 的 `event_id` 去重。候选按重要性降序后，每个事件只保留先遇到的消息；没有事件关联的消息各自独立，不互相去重。
+- 去重发生在栏目截取之前，随后按产品归属、重要性降序、发布时间降序和消息 ID 进行稳定排序。
+
+栏目和上限是：`lolpc` 5 条、`esports` 3 条、`tft` 3 条、`other` 3 条。多产品消息按固定优先级只进入一个栏目：电竞、LoL PC、TFT、其他。未知产品和其他英雄联盟产品进入 `other`。
+
+## 数据与接口
+
+`daily_reports` 按 `report_date` 唯一保存日报主记录，`daily_report_items` 保存已有 `normalized_item_id`、栏目和栏目内位置，不复制消息正文。同一天再次生成会删除该日报的条目并重建，因此是覆盖式幂等行为。
+
+- `GET /api/v1/reports/daily/{date}`：读取已保存日报。
+- `POST /api/v1/reports/daily/{date}/generate`：按指定日期生成或覆盖日报。
+
+前端页面为 `/daily`，消息卡片复用消息流组件，仍可进入原消息详情。
+
+## 明确不做
+
+V1 不包含 AI 日报总结、事件摘要或趋势分析、个性化推荐、推送、周报、新评分体系或新的后台任务基础设施。
+
+后续版本可以在不改变本 V1 精选规则的前提下增加定时生成、事件视图或摘要能力。

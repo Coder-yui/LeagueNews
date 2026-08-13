@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.event_families import STRONG_ANCHOR_KEYS
+from app.domain.event_identity import event_identity_key, project_event_identity
 from app.models.event import Event
 from app.models.normalized_item import NormalizedItem
 
@@ -116,7 +117,7 @@ def recall_event_candidates(
     )
     message_tokens = _tokens(f"{item.normalized_title} {item.summary}")
     product_set = set(item.products)
-    ranked_by_family: dict[str, list[tuple[int, Event, list[str]]]] = {
+    ranked_by_family: dict[str, list[tuple[int, Event, list[str], str | None]]] = {
         family: [] for family in family_hints
     }
     for event in events:
@@ -125,7 +126,16 @@ def recall_event_candidates(
         event_product_set = set(event.products)
         if _products_conflict(product_set, event_product_set):
             continue
-        anchor_points, reasons, conflict = _anchor_score(anchors, event.canonical_anchors)
+        message_anchors = project_event_identity(
+            event.event_family,
+            anchors,
+            evidence_text=f"{item.normalized_title}\n{item.summary}\n{item.normalized_text}",
+            observed_on=observed_at,
+        )
+        event_anchors = project_event_identity(
+            event.event_family, event.canonical_anchors
+        )
+        anchor_points, reasons, conflict = _anchor_score(message_anchors, event_anchors)
         if conflict:
             continue
         score = 20 + anchor_points
@@ -151,9 +161,11 @@ def recall_event_candidates(
         ):
             score += 40
             reasons.append("aggregation_key")
-        ranked_by_family[event.event_family].append((score, event, reasons))
+        ranked_by_family[event.event_family].append(
+            (score, event, reasons, event_identity_key(event.event_family, event_anchors))
+        )
 
-    selected: list[tuple[int, Event, list[str]]] = []
+    selected: list[tuple[int, Event, list[str], str | None]] = []
     for family in family_hints:
         ranked = sorted(ranked_by_family[family], key=lambda row: (-row[0], row[1].id))
         selected.extend(ranked[:per_family_limit])
@@ -171,6 +183,7 @@ def recall_event_candidates(
             "lifecycle_status": event.lifecycle_status,
             "match_score": score,
             "match_reasons": reasons,
+            "identity_key": identity_key,
         }
-        for score, event, reasons in selected
+        for score, event, reasons, identity_key in selected
     ]

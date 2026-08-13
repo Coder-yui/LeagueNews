@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import re
 import time
 from datetime import datetime
 from collections.abc import Callable
@@ -34,13 +35,26 @@ from app.domain.message_taxonomy import (
 )
 from app.domain.message_entities import EntityType
 from app.domain.event_families import (
+    anchors_from_entities,
     canonicalize_event_anchors,
     determine_mythic_shop_market,
     has_complete_mythic_shop_identity,
     is_mythic_shop_event,
     mythic_shop_rotation_period_from_date,
 )
-from app.domain.event_importance import is_importance_profile_compatible
+from app.domain.event_identity import (
+    event_identity_contract,
+    event_identity_matches,
+    identity_is_supported_by_message,
+    identity_anchors_with_hints,
+    project_event_identity,
+    resolve_esports_match_anchors,
+    select_identity_evidence,
+)
+from app.domain.event_importance import (
+    EVENT_FAMILY_IMPORTANCE_PROFILES,
+    is_importance_profile_compatible,
+)
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
@@ -50,7 +64,7 @@ from app.prompts.registry import (
     RELEVANCE_OPERATION,
     TRANSLATION_OPERATION,
 )
-from app.schemas.event_aggregation import EventAggregationResult
+from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
 
 
 class LLMConfigurationError(RuntimeError):
@@ -394,9 +408,35 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
         def validate_event_decisions(result: EventAggregationResult) -> str | None:
             guidance = message.get("editorial_granularity_guidance") or []
             daily_match_roundup = "daily_esports_match_roundup" in guidance
+            source = message.get("source")
+            observed_at: datetime | None = None
+            if isinstance(source, dict):
+                observed_raw = source.get("published_at") or source.get("ingested_at")
+                if isinstance(observed_raw, str) and observed_raw.strip():
+                    try:
+                        observed_at = datetime.fromisoformat(
+                            observed_raw.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        observed_at = None
+            identity_evidence = "\n".join(
+                str(message.get(key) or "")
+                for key in ("title", "summary", "content")
+            )
+            message_anchors = anchors_from_entities(
+                message.get("entities") if isinstance(message.get("entities"), list) else []
+            )
             for mention in result.mentions:
+                mention_identity_evidence = select_identity_evidence(
+                    mention.event_family,
+                    message_text=identity_evidence,
+                    mention_excerpt=mention.evidence_excerpt,
+                )
                 if daily_match_roundup and mention.action != "ignore" and mention.event_family != "esports_match":
-                    return "daily match reminders/results may only create or update concrete esports_match events"
+                    return (
+                        f"mention[{mention.mention_index}]：每日比赛汇总只能写入具体的 "
+                        "esports_match；请保留其他合法 mentions，并将该片段改为 ignore"
+                    )
                 if (
                     mention.action in {"create", "update"}
                     and mention.materiality == "material_update"
@@ -407,12 +447,36 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                 ):
                     return (
                         "material mention 的 importance.profile 必须与 event_family 兼容："
-                        f"{mention.event_family} + {mention.importance.profile}"
+                        f"{mention.event_family} + {mention.importance.profile}；允许值="
+                        f"{sorted(EVENT_FAMILY_IMPORTANCE_PROFILES[mention.event_family])}"
                     )
+                if mention.action in {"create", "update"} and mention.materiality == "material_update":
+                    display_values = {
+                        "event_title": mention.event_title,
+                        "proposed_summary": mention.proposed_summary,
+                        "latest_development": mention.latest_development,
+                    }
+                    english_only = [
+                        key
+                        for key, value in display_values.items()
+                        if value and not re.search(r"[\u4e00-\u9fff]", value)
+                    ]
+                    if english_only:
+                        return "Event 展示字段必须使用简体中文：" + ", ".join(english_only)
                 if mention.action == "create":
                     normalized_anchors = canonicalize_event_anchors(
                         mention.event_family, mention.canonical_anchors
                     )
+                    normalized_anchors = identity_anchors_with_hints(
+                        mention.event_family, normalized_anchors, message_anchors
+                    )
+                    if mention.event_family == "esports_match":
+                        normalized_anchors = resolve_esports_match_anchors(
+                            normalized_anchors,
+                            message_text=identity_evidence,
+                            mention_excerpt=mention.evidence_excerpt,
+                            observed_on=observed_at,
+                        )
                     if (
                         mention.event_family == "commercial_offer"
                         and normalized_anchors.get("shop") == "mythic_shop"
@@ -439,6 +503,48 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                         )
                     ):
                         return "mythic shop identity requires shop, market, and rotation_period anchors"
+                    incoming_identity = project_event_identity(
+                        mention.event_family,
+                        normalized_anchors,
+                        evidence_text=mention_identity_evidence,
+                        observed_on=observed_at,
+                    )
+                    if not incoming_identity:
+                        return (
+                            f"mention[{mention.mention_index}] {mention.event_family} create "
+                            "缺少完整 Event identity；请保留其他合法 mentions，并仅在当前消息有完整"
+                            "身份依据时补齐，否则将该片段改为 ignore"
+                        )
+                    if not identity_is_supported_by_message(
+                        mention.event_family,
+                        normalized_anchors,
+                        message_text=identity_evidence,
+                        mention_excerpt=mention.evidence_excerpt,
+                        message_anchors=message_anchors,
+                        observed_on=observed_at,
+                    ):
+                        return (
+                            f"mention[{mention.mention_index}] {mention.event_family} identity "
+                            "没有被当前消息证据支持；候选 Event 不能作为证据，请修正为消息明确表达的"
+                            " identity，或将该片段改为 ignore"
+                        )
+                    matching_candidates = [
+                        int(candidate["event_id"])
+                        for candidate in candidates
+                        if candidate.get("event_family") == mention.event_family
+                        and event_identity_matches(
+                            mention.event_family,
+                            candidate.get("canonical_anchors") or {},
+                            normalized_anchors,
+                            evidence_text=mention_identity_evidence,
+                            observed_on=observed_at,
+                        )
+                    ]
+                    if matching_candidates:
+                        return (
+                            "同一 Event identity 已存在，必须 update 而不是 create："
+                            f"{sorted(matching_candidates)}"
+                        )
                 if admission_decision == "update_existing_only" and mention.action == "create":
                     return "update_existing_only 不允许 create"
                 if mention.action == "update":
@@ -468,23 +574,93 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                                     f"候选={normalized_candidate.get('market')}/"
                                     f"{normalized_candidate.get('rotation_period')}，"
                                     f"当前消息={expected_market}/{expected_period}。"
-                                    "请改为 create 当前正确 identity 的新 Event；"
-                                    "若 admission 为 update_existing_only，则 ignore，不能 create"
                                 )
-                if mention.action == "create":
-                    strong_ids = {
-                        int(candidate["event_id"])
-                        for candidate in candidates
-                        if candidate.get("event_family") == mention.event_family
-                        and int(candidate.get("match_score") or 0) >= 60
-                    }
-                    rejected_ids = {value.event_id for value in mention.candidate_rejections}
-                    if not strong_ids <= rejected_ids:
-                        return (
-                            "create 必须逐一解释同 family 强候选："
-                            f"missing={sorted(strong_ids - rejected_ids)}"
+                    incoming_anchors = canonicalize_event_anchors(
+                        mention.event_family,
+                        mention.canonical_anchors,
+                    )
+                    incoming_anchors = identity_anchors_with_hints(
+                        mention.event_family, incoming_anchors, message_anchors
+                    )
+                    if mention.event_family == "esports_match":
+                        incoming_anchors = resolve_esports_match_anchors(
+                            incoming_anchors,
+                            message_text=identity_evidence,
+                            mention_excerpt=mention.evidence_excerpt,
+                            observed_on=observed_at,
                         )
+                    if not identity_is_supported_by_message(
+                        mention.event_family,
+                        incoming_anchors,
+                        message_text=identity_evidence,
+                        mention_excerpt=mention.evidence_excerpt,
+                        message_anchors=message_anchors,
+                        observed_on=observed_at,
+                    ):
+                        return (
+                            f"mention[{mention.mention_index}] {mention.event_family} update "
+                            "缺少当前消息中的 identity 证据；候选 Event 不能补充证据，请保留其他合法"
+                            " mentions，并将该片段改为 ignore"
+                        )
+                    if not event_identity_matches(
+                        mention.event_family,
+                        canonicalize_event_anchors(
+                            mention.event_family, candidate_anchors
+                        ),
+                        incoming_anchors,
+                        evidence_text=mention_identity_evidence,
+                        observed_on=observed_at,
+                    ):
+                        return (
+                            f"mention[{mention.mention_index}] update 的 canonical_anchors 与候选 "
+                            "Event identity 不兼容；请 create 正确 identity，若 admission 不允许 create "
+                            "则 ignore"
+                        )
+                if mention.action == "create" and mention.candidate_rejections:
+                    candidate_ids = {int(candidate["event_id"]) for candidate in candidates}
+                    rejected_ids = {value.event_id for value in mention.candidate_rejections}
+                    unknown_rejections = rejected_ids - candidate_ids
+                    if unknown_rejections:
+                        return f"candidate_rejections 引用了不存在的候选：{sorted(unknown_rejections)}"
             return None
+
+        def salvage_event_decisions(decoded: dict[str, object]) -> EventAggregationResult | None:
+            raw_mentions = decoded.get("mentions")
+            if not isinstance(raw_mentions, list):
+                return None
+            ignored = [
+                str(value)
+                for value in decoded.get("ignored_fragments", [])
+                if isinstance(value, str)
+            ][:12]
+            accepted: list[EventMentionDecision] = []
+            for raw_index, raw_mention in enumerate(raw_mentions[:12]):
+                try:
+                    mention = EventMentionDecision.model_validate(raw_mention)
+                    mention = mention.model_copy(
+                        update={"mention_index": len(accepted)}
+                    )
+                    proposed = EventAggregationResult(
+                        mentions=[*accepted, mention],
+                        ignored_fragments=ignored,
+                    )
+                    business_error = validate_event_decisions(proposed)
+                    if business_error:
+                        raise ValueError(business_error)
+                except (ValidationError, ValueError) as exc:
+                    if len(ignored) < 12:
+                        ignored.append(
+                            f"模型 mention[{raw_index}] 未通过确定性校验："
+                            f"{_compact_validation_error(exc)}"
+                        )
+                    continue
+                accepted.append(mention)
+            if not accepted:
+                return None
+            return EventAggregationResult(
+                mentions=accepted,
+                ignored_fragments=ignored,
+            )
 
         prompt = """你是 LeagueNews 的事件编辑器。输入是一条已经完成翻译、摘要、产品、消息类型、
 主题、实体和消息重要性处理的标准化消息，以及程序确定性召回的候选事件。一次响应必须处理整条
@@ -500,8 +676,8 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 因为实体或 topic 数量拆分事件。
 
 规则：
-1. action=create 仅在存在稳定身份锚点且没有同一真实候选时使用；逐一填写同 family 强候选的
-   candidate_rejections。action=update 必须引用提供的 candidate_event_id。admission_decision 为
+1. action=create 仅在存在稳定身份锚点且没有同一真实候选时使用；candidate match_score 仅用于候选
+   排序，绝不代表可以 update。逐一填写同 family 强候选的 candidate_rejections。action=update 必须引用提供的 candidate_event_id。admission_decision 为
    update_existing_only 时只能 update 或 ignore；没有足够可靠的候选时必须 ignore，不能因为
    hashtags、实体提及或背景旁支而创建事件。
 2. relation 使用 reports/supports/confirms/denies/corrects/mentions。responsible_official 仅用于当前
@@ -509,6 +685,7 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
 3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
    进展和关键事实。普通佐证用 corroboration_only，重复用 duplicate，上下文用
    context_only，后三者不得改写事件投影。
+   面向展示的 event_title、proposed_summary、latest_development 和 key facts 必须使用简体中文。
 4. 每个 material mention 的 importance 必须针对该独立 Event 本体及其 event_family 选择兼容的受控
    profile；综合公告或赛事汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier
    features；非 material mention 不填写 importance。不要输出分数。
@@ -521,7 +698,9 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
    ignore，绝不能为了完成 update 而去错误绑定其他市场/周的候选。
 6. 普通电竞比赛按每场真实比赛一个 esports_match Event。每日赛前预告、赛后结果汇总只能分别
    mention/update 对应比赛；不要创建 Daily Preview、Daily Schedule、Daily Summary 或 Results Summary
-   Event。只有正式公布未知赛程、延期、提前、重赛、场地/对阵/赛制变化才是 esports_schedule。
+   Event。每个 create/update 必须给出明确对阵双方、比赛日期和联赛，不能用自由生成的 match ID，
+   也不能只凭联赛或日期绑定。只有正式公布
+   未知赛程、延期、提前、重赛、场地/对阵/赛制变化才是 esports_schedule。
 7. 活动、通行证、活动商店和奖励体系中的皮肤、臻彩、图标、边框、表情、代币和战利品默认是主活动
    Event 的 key_facts/components；只有明确拥有独立发布日期和后续生命周期的新对象才可单独拆出。
 8. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
@@ -535,6 +714,13 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             payload={
                 "admission_decision": admission_decision,
                 "family_hints": family_hints,
+                "identity_contracts": {
+                    family: event_identity_contract(family) for family in family_hints
+                },
+                "importance_profiles_by_family": {
+                    family: sorted(EVENT_FAMILY_IMPORTANCE_PROFILES[family])
+                    for family in family_hints
+                },
                 "message": message,
                 "candidate_events": candidates,
             },
@@ -542,6 +728,7 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             schema=EventAggregationResult,
             operation=EVENT_AGGREGATION_OPERATION,
             business_validator=validate_event_decisions,
+            final_fallback=salvage_event_decisions,
         )
 
     async def translate(
@@ -805,6 +992,7 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
         schema: type[SchemaT],
         operation: str,
         business_validator: Callable[[SchemaT], str | None] | None = None,
+        final_fallback: Callable[[dict[str, object]], SchemaT | None] | None = None,
     ) -> SchemaT:
         if not self.client:
             raise LLMConfigurationError(
@@ -836,6 +1024,9 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             },
         ]
         last_error = "模型返回空内容"
+        last_decoded: dict[str, object] | None = None
+        last_raw_content = ""
+        last_finish_reason: str | None = None
         started = time.perf_counter()
         input_hash = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
@@ -862,6 +1053,9 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                 decoded = json.loads(raw_content)
                 if not isinstance(decoded, dict):
                     raise ValueError("JSON 顶层必须是对象")
+                last_decoded = decoded
+                last_raw_content = raw_content
+                last_finish_reason = finish_reason
                 result = schema.model_validate(decoded)
                 business_error = business_validator(result) if business_validator else None
                 if business_error:
@@ -911,14 +1105,45 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                         {
                             "role": "user",
                             "content": (
-                                f"上一次输出未通过校验：{last_error}。"
-                                "请逐项对照系统消息中的 JSON Schema，补齐所有 required 字段，"
-                                "修正常量和枚举值，然后重新输出完整 JSON。"
+                                f"上一次输出未通过结构或业务校验：{last_error}。"
+                                "保留未被错误点名的合法 mentions，只修正对应片段。"
+                                "相同 identity 的 create 必须合并；create 必须是 material_update；"
+                                "缺少当前消息证据或完整 identity 的附属片段必须 ignore。"
+                                "同时逐项对照 JSON Schema，补齐 required 字段并修正常量和枚举值，"
+                                "然后重新输出完整 JSON。"
                                 "不要输出解释或 Markdown。"
                             ),
                         },
                     ]
                 )
+        fallback_result = final_fallback(last_decoded) if final_fallback and last_decoded else None
+        if fallback_result is not None:
+            object.__setattr__(
+                fallback_result,
+                "_llm_execution_metadata",
+                {
+                    "workflow_version": "reviewed-pipeline-v1",
+                    "prompt_name": prompt_spec.name,
+                    "prompt_version": prompt_spec.version,
+                    "prompt_hash": f"sha256:{prompt_hash}",
+                    "model": settings.model_name,
+                    "provider": urlsplit(settings.openai_base_url).hostname,
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens,
+                    "input_hash": input_hash,
+                    "json_schema_version": prompt_spec.schema_version,
+                    "raw_response": last_raw_content[:16000],
+                    "usage": {},
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "retry_count": 1,
+                    "finish_reason": last_finish_reason,
+                    "error_type": "partial_acceptance",
+                    "commit_sha": (
+                        os.getenv("GITHUB_SHA") or os.getenv("CODE_COMMIT_SHA") or None
+                    ),
+                },
+            )
+            return fallback_result
         raise LLMAnalysisError(
             f"{operation}失败：模型连续两次未通过结构或业务校验：{last_error}。"
             "原始资讯和既有正式数据均未改变，可修正后重试。"

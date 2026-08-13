@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
-from app.core.database import Base, engine
+from app.core.database import engine
 from app.models.ocr_lab import OCRProfile
 from app.models.source import Source
 
@@ -302,26 +302,42 @@ def ensure_migration_table() -> None:
         )
 
 
+def record_initial_baseline_for_existing_database() -> None:
+    """Record the newly versioned v1 baseline for databases already past it."""
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO schema_migrations(version) "
+                "VALUES ('001_initial_schema') ON CONFLICT DO NOTHING"
+            )
+        )
+
+
 def seed_default_sources(session: Session) -> None:
     session.add_all(Source(**source) for source in DEFAULT_SOURCES)
 
 
-def seed_fresh_database(files: list[Path]) -> None:
-    Base.metadata.create_all(engine)
-    ensure_migration_table()
+def ensure_default_sources(session: Session) -> None:
+    for values in DEFAULT_SOURCES:
+        external_key = values.get("external_key")
+        if external_key is not None:
+            source = session.scalar(
+                select(Source).where(
+                    Source.connector_type == values["connector_type"],
+                    Source.external_key == external_key,
+                )
+            )
+        else:
+            source = session.scalar(
+                select(Source).where(Source.name == values["name"])
+            )
+        if source is None:
+            session.add(Source(**values))
 
+
+def seed_current_defaults() -> None:
     with Session(engine) as session:
-        seed_default_sources(session)
-        session.execute(
-            text(
-                """
-                INSERT INTO schema_migrations(version)
-                VALUES (:version)
-                ON CONFLICT (version) DO NOTHING
-                """
-            ),
-            [{"version": file.stem} for file in files],
-        )
+        ensure_default_sources(session)
         if session.query(OCRProfile).filter(OCRProfile.is_active.is_(True)).first() is None:
             session.add(
                 OCRProfile(
@@ -331,8 +347,6 @@ def seed_fresh_database(files: list[Path]) -> None:
                 )
             )
         session.commit()
-
-    print(f"Initialized a fresh database at the current schema ({len(files)} versions).")
 
 
 def apply_pending_migrations(files: list[Path]) -> None:
@@ -365,9 +379,14 @@ def main() -> None:
     files = migration_files()
     existing_tables = set(inspect(engine).get_table_names())
     if "sources" not in existing_tables and "raw_items" not in existing_tables:
-        seed_fresh_database(files)
+        apply_pending_migrations(files)
+        seed_current_defaults()
+        print(f"Initialized a fresh database through {len(files)} migrations.")
         return
+    ensure_migration_table()
+    record_initial_baseline_for_existing_database()
     apply_pending_migrations(files)
+    seed_current_defaults()
 
 
 if __name__ == "__main__":

@@ -10,41 +10,9 @@ from app.models.media_asset import MediaAsset
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
-from app.domain.importance import score_importance_profile
 from app.schemas.event import EventDetailRead, EventPageRead
 from app.services.event_metrics import refresh_event_metrics
-from app.services.events import add_event_mention as _add_event_mention
-from app.services.events import create_event as _create_event
-
-
-_DOMAIN_RESULT = score_importance_profile(
-    "gameplay_announcement",
-    {
-        "scale": "standard",
-        "competition_region": "none",
-        "prominence": "normal",
-        "skin_tier": "none",
-        "is_bulk_update": False,
-    },
-)
-DOMAIN_IMPORTANCE = {
-    "policy_version": "importance-v11-repost-weekly-rotation",
-    "profile": "gameplay_announcement",
-    "score": _DOMAIN_RESULT.score,
-    "features": dict(_DOMAIN_RESULT.features),
-    "modifiers": list(_DOMAIN_RESULT.modifiers),
-}
-
-
-def create_event(*args: object, **kwargs: object):
-    kwargs.setdefault("domain_importance_snapshot", DOMAIN_IMPORTANCE)
-    return _create_event(*args, **kwargs)
-
-
-def add_event_mention(*args: object, **kwargs: object):
-    if kwargs.get("materiality") == "material_update":
-        kwargs.setdefault("domain_importance_snapshot", DOMAIN_IMPORTANCE)
-    return _add_event_mention(*args, **kwargs)
+from app.services.events import add_event_mention, create_event
 
 
 def _item(
@@ -76,6 +44,7 @@ def _item(
         topics=["balance_gameplay"],
         content_form=content_form,
         importance_score=0.5,
+        importance_calculation={"importance_profile": "gameplay_announcement"},
         translated_title=title,
         translated_text=title,
         translated_content_blocks=[{"type": "paragraph", "text": title}],
@@ -134,7 +103,6 @@ def test_event_list_and_detail_present_current_projection_and_material_timeline(
             event_family="gameplay_balance",
             products=["lol_pc"],
             canonical_anchors={"patch_version": "patch:26.17"},
-            aggregation_key="api-event",
             title="26.17 平衡调整",
             current_summary="爆料称将进行平衡调整。",
             source_role="known_leaker",
@@ -225,7 +193,6 @@ def test_event_api_category_filter_is_server_side_and_counts_distinct_messages()
             event_family="gameplay_release",
             products=["lol_pc"],
             canonical_anchors={"release_name": "pc:event"},
-            aggregation_key="pc-filter-event",
             title="PC event",
             current_summary="PC event",
         )
@@ -236,7 +203,6 @@ def test_event_api_category_filter_is_server_side_and_counts_distinct_messages()
             event_family="esports_match",
             products=["lol_esports"],
             canonical_anchors={"match": "match:event"},
-            aggregation_key="esports-filter-event",
             title="Esports event",
             current_summary="Esports event",
         )

@@ -1,5 +1,4 @@
 import asyncio
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -19,12 +18,9 @@ from app.services.ingestion import ingest_connector_items
 class PassThroughMediaStorage:
     async def materialize_blocks(
         self, blocks: list[dict[str, object]], *, namespace: str
-    ) -> tuple[list[dict[str, object]], list[Path]]:
+    ) -> list[dict[str, object]]:
         assert namespace == "test_web"
-        return [dict(block) for block in blocks], []
-
-    def remove_files(self, paths: list[Path]) -> None:
-        assert paths == []
+        return [dict(block) for block in blocks]
 
 
 class RepairingMediaStorage:
@@ -33,7 +29,7 @@ class RepairingMediaStorage:
 
     async def materialize_blocks(
         self, blocks: list[dict[str, object]], *, namespace: str
-    ) -> tuple[list[dict[str, object]], list[Path]]:
+    ) -> list[dict[str, object]]:
         assert namespace == "test_web"
         self.calls += 1
         digest = "a" * 64
@@ -44,10 +40,7 @@ class RepairingMediaStorage:
                 "mime_type": "image/jpeg",
             }
             for block in blocks
-        ], []
-
-    def remove_files(self, paths: list[Path]) -> None:
-        assert paths == []
+        ]
 
 
 def test_all_connectors_share_idempotent_ingestion() -> None:

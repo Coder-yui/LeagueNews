@@ -1,8 +1,7 @@
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import distinct, func, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.domain.event_heat import heat_level
 from app.domain.event_importance import importance_level
@@ -10,39 +9,9 @@ from app.domain.event_categories import event_category
 from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
-from app.services.event_metrics import refresh_event_metrics
 
 
-def refresh_stale_event_metrics(
-    db: Session,
-    events: list[Event],
-    *,
-    as_of: datetime | None = None,
-    ttl: timedelta = timedelta(minutes=5),
-) -> None:
-    reference = as_of or datetime.now(UTC)
-    stale_ids = {
-        event.id
-        for event in events
-        if event.heat_calculated_at is None
-        or reference
-        - (
-            event.heat_calculated_at.replace(tzinfo=UTC)
-            if event.heat_calculated_at.tzinfo is None
-            else event.heat_calculated_at.astimezone(UTC)
-        )
-        >= ttl
-    }
-    if stale_ids:
-        refresh_event_metrics(db, stale_ids, as_of=reference)
-        db.commit()
-        for event in events:
-            if event.id in stale_ids:
-                db.refresh(event)
-
-
-def _source_payload(db: Session, message_id: int | None) -> dict[str, Any] | None:
-    item = db.get(NormalizedItem, message_id) if message_id is not None else None
+def _source_payload(item: NormalizedItem | None) -> dict[str, Any] | None:
     if item is None:
         return None
     raw = item.raw_item
@@ -55,12 +24,36 @@ def _source_payload(db: Session, message_id: int | None) -> dict[str, Any] | Non
     }
 
 
-def _best_media_url(db: Session, message_id: int | None) -> str | None:
-    item = db.get(NormalizedItem, message_id) if message_id is not None else None
+def _best_media_url(item: NormalizedItem | None) -> str | None:
     if item is None:
         return None
     assets = sorted(item.raw_item.media_assets, key=lambda value: (value.block_index, value.id))
     return next((asset.public_path for asset in assets if asset.public_path), None)
+
+
+def event_reference_items(
+    db: Session, events: list[Event]
+) -> dict[int, NormalizedItem]:
+    message_ids = {
+        message_id
+        for event in events
+        for message_id in (
+            event.primary_source_message_id,
+            event.best_media_message_id,
+        )
+        if message_id is not None
+    }
+    if not message_ids:
+        return {}
+    items = db.scalars(
+        select(NormalizedItem)
+        .where(NormalizedItem.id.in_(message_ids))
+        .options(
+            selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
+            selectinload(NormalizedItem.raw_item).selectinload(RawItem.media_assets),
+        )
+    )
+    return {item.id: item for item in items}
 
 
 def _event_message_counts(db: Session, event_id: int) -> tuple[int, int]:
@@ -81,8 +74,53 @@ def _event_message_counts(db: Session, event_id: int) -> tuple[int, int]:
     return len(message_ids), len(source_ids)
 
 
-def event_card_payload(db: Session, event: Event) -> dict[str, Any]:
-    message_count, source_count = _event_message_counts(db, event.id)
+def event_message_counts(
+    db: Session, event_ids: list[int]
+) -> dict[int, tuple[int, int]]:
+    if not event_ids:
+        return {}
+    rows = db.execute(
+        select(
+            EventMention.event_id,
+            func.count(distinct(EventMention.normalized_item_id)),
+            func.count(distinct(RawItem.source_id)),
+        )
+        .join(EventMention.normalized_item)
+        .join(RawItem, RawItem.id == NormalizedItem.raw_item_id)
+        .where(
+            EventMention.event_id.in_(event_ids),
+            NormalizedItem.publication_status == "published",
+        )
+        .group_by(EventMention.event_id)
+    )
+    return {
+        event_id: (message_count, source_count)
+        for event_id, message_count, source_count in rows
+    }
+
+
+def event_card_payload(
+    db: Session,
+    event: Event,
+    *,
+    counts: tuple[int, int] | None = None,
+    reference_items: dict[int, NormalizedItem] | None = None,
+) -> dict[str, Any]:
+    message_count, source_count = counts or _event_message_counts(db, event.id)
+    references = reference_items or {}
+    primary_item = references.get(event.primary_source_message_id or 0)
+    media_item = references.get(event.best_media_message_id or 0)
+    if reference_items is None:
+        primary_item = (
+            db.get(NormalizedItem, event.primary_source_message_id)
+            if event.primary_source_message_id is not None
+            else None
+        )
+        media_item = (
+            db.get(NormalizedItem, event.best_media_message_id)
+            if event.best_media_message_id is not None
+            else None
+        )
     return {
         "id": event.id,
         "title": event.title,
@@ -106,8 +144,8 @@ def event_card_payload(db: Session, event: Event) -> dict[str, Any]:
         "message_count_24h": event.message_count_24h,
         "unique_sources_24h": event.unique_sources_24h,
         "last_material_update_at": event.last_material_update_at,
-        "primary_source": _source_payload(db, event.primary_source_message_id),
-        "best_media_url": _best_media_url(db, event.best_media_message_id),
+        "primary_source": _source_payload(primary_item),
+        "best_media_url": _best_media_url(media_item),
     }
 
 
@@ -116,6 +154,11 @@ def event_detail_payload(db: Session, event: Event) -> dict[str, Any]:
         db.scalars(
             select(EventMention)
             .join(EventMention.normalized_item)
+            .options(
+                selectinload(EventMention.normalized_item)
+                .selectinload(NormalizedItem.raw_item)
+                .selectinload(RawItem.source)
+            )
             .where(
                 EventMention.event_id == event.id,
                 NormalizedItem.publication_status == "published",

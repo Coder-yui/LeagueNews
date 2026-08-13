@@ -1,5 +1,4 @@
 import asyncio
-from pathlib import Path
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -19,12 +18,9 @@ class PassThroughStorage:
         blocks: list[dict[str, object]],
         *,
         namespace: str,
-    ) -> tuple[list[dict[str, object]], list[Path]]:
+    ) -> list[dict[str, object]]:
         assert namespace == "test_web"
-        return [dict(block) for block in blocks], []
-
-    def remove_files(self, paths: list[Path]) -> None:
-        assert paths == []
+        return [dict(block) for block in blocks]
 
 
 def _candidate(text: str) -> RawItemCandidate:

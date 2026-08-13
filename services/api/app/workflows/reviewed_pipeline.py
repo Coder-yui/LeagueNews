@@ -1368,7 +1368,6 @@ def _source_context(raw_item: RawItem) -> dict[str, object]:
         "connector_type": raw_item.source.connector_type,
         "external_key": raw_item.source.external_key,
         "authority": _source_authority(raw_item),
-        "is_official_source": raw_item.source.is_official,
         "published_at": raw_item.published_at.isoformat() if raw_item.published_at else None,
         "is_repost": has_repost_evidence(raw_item.content_blocks),
     }

@@ -14,16 +14,12 @@ from app.services.media_storage import MediaStorage
 class MediaStorageProtocol(Protocol):
     async def materialize_blocks(
         self, blocks: list[dict[str, object]], *, namespace: str
-    ) -> tuple[list[dict[str, object]], list[Path]]: ...
-
-    def remove_files(self, paths: list[Path]) -> None: ...
-
+    ) -> list[dict[str, object]]: ...
 
 @dataclass(slots=True)
 class MediaRepairResult:
     repaired_assets: list[MediaAsset] = field(default_factory=list)
     failed_asset_ids: list[int] = field(default_factory=list)
-    created_files: list[Path] = field(default_factory=list)
 
 
 async def repair_raw_item_media(
@@ -72,11 +68,10 @@ async def repair_raw_item_media(
     if not targets:
         return result
 
-    materialized, created_files = await storage.materialize_blocks(
+    materialized = await storage.materialize_blocks(
         download_blocks,
         namespace=namespace,
     )
-    result.created_files.extend(created_files)
     for asset, block in zip(targets, materialized, strict=True):
         storage_path = block.get("storage_path")
         if not isinstance(storage_path, str) or not storage_path:
@@ -96,7 +91,7 @@ async def repair_raw_item_media(
         and raw_item.normalized_item.publication_status == "published"
     ):
         db.flush()
-        result.created_files.extend(publish_raw_item_media(raw_item))
+        publish_raw_item_media(raw_item)
     return result
 
 

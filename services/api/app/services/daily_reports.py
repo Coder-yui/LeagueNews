@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.daily_report import DailyReport, DailyReportItem
@@ -83,6 +83,11 @@ def select_daily_sections(
 
 def generate_daily_report(db: Session, report_date: date) -> DailyReport:
     """Generate or replace one persisted report for a Shanghai calendar day."""
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:identity, 0))"),
+            {"identity": f"daily-report:{report_date.isoformat()}"},
+        )
     window_start, window_end = daily_report_window(report_date)
     statement = (
         select(NormalizedItem)

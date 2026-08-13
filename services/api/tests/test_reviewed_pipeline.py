@@ -159,10 +159,11 @@ def test_importance_correction_respects_upstream_products_and_source() -> None:
             status="awaiting_review",
             current_stage="importance",
             context={
-                "approved_message_analysis_proposal": {
-                    "products": ["lol_pc"],
-                    "content_form": "original",
-                }
+                    "approved_message_analysis_proposal": {
+                        "products": ["lol_pc"],
+                        "content_form": "original",
+                        "classification_source": {"source_kind": "unofficial"},
+                    }
             },
         )
         db.add(run)

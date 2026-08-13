@@ -5,6 +5,11 @@ export const apiUrl =
   process.env.NEXT_PUBLIC_API_URL ??
   "http://localhost:8000/api/v1";
 
+async function requireJson<T>(response: Response): Promise<T> {
+  if (!response.ok) throw new Error(`API returned ${response.status}`);
+  return (await response.json()) as T;
+}
+
 export async function adminApi<T>(path: string, options?: RequestInit): Promise<T> {
   const baseUrl = typeof window === "undefined" ? apiUrl : "/api/v1";
   const response = await fetch(`${baseUrl}${path}`, {
@@ -24,26 +29,15 @@ export async function getPublishedItemsPage(
   offset: number,
   featured = false,
 ): Promise<PublishedItemPage> {
-  try {
-    const params = new URLSearchParams({
-      limit: String(limit),
-      offset: String(offset),
-    });
-    if (featured) params.set("featured", "true");
-    const response = await fetch(`${apiUrl}/normalized-items/published-page?${params}`, {
-      next: { revalidate: 30 },
-    });
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as PublishedItemPage;
-  } catch {
-    return {
-      items: [],
-      total: 0,
-      product_options: [],
-      message_type_options: [],
-      topic_options: [],
-    };
-  }
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (featured) params.set("featured", "true");
+  const response = await fetch(`${apiUrl}/normalized-items/published-page?${params}`, {
+    next: { revalidate: 30 },
+  });
+  return requireJson<PublishedItemPage>(response);
 }
 
 export async function getAllPublishedItems(featured = false): Promise<PublishedItemPage> {
@@ -63,62 +57,34 @@ export async function getAllPublishedItems(featured = false): Promise<PublishedI
 }
 
 export async function getPublishedItem(id: number): Promise<PublishedItem | null> {
-  try {
-    const response = await fetch(`${apiUrl}/normalized-items/${id}/published`, {
-      next: { revalidate: 30 },
-    });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as PublishedItem;
-  } catch {
-    return null;
-  }
+  const response = await fetch(`${apiUrl}/normalized-items/${id}/published`, {
+    next: { revalidate: 30 },
+  });
+  if (response.status === 404) return null;
+  return requireJson<PublishedItem>(response);
 }
 
 export async function getDailyReport(reportDate: string): Promise<DailyReport | null> {
-  try {
-    const response = await fetch(`${apiUrl}/reports/daily/${reportDate}`, {
-      next: { revalidate: 30 },
-    });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as DailyReport;
-  } catch {
-    return null;
-  }
+  const response = await fetch(`${apiUrl}/reports/daily/${reportDate}`, {
+    next: { revalidate: 30 },
+  });
+  if (response.status === 404) return null;
+  return requireJson<DailyReport>(response);
 }
 
 export async function getEventsPage(category?: string): Promise<EventPage> {
-  try {
-    const params = new URLSearchParams({ limit: "100" });
-    if (category && category !== "all") params.set("category", category);
-    const response = await fetch(`${apiUrl}/events?${params}`, {
-      next: { revalidate: 30 },
-    });
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as EventPage;
-  } catch {
-    return {
-      items: [],
-      total: 0,
-      product_options: [],
-      event_family_options: [],
-      lifecycle_options: [],
-      credibility_options: [],
-      category_options: [],
-    };
-  }
+  const params = new URLSearchParams({ limit: "100" });
+  if (category && category !== "all") params.set("category", category);
+  const response = await fetch(`${apiUrl}/events?${params}`, {
+    next: { revalidate: 30 },
+  });
+  return requireJson<EventPage>(response);
 }
 
 export async function getEvent(id: number): Promise<EventDetail | null> {
-  try {
-    const response = await fetch(`${apiUrl}/events/${id}`, {
-      next: { revalidate: 30 },
-    });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    return (await response.json()) as EventDetail;
-  } catch {
-    return null;
-  }
+  const response = await fetch(`${apiUrl}/events/${id}`, {
+    next: { revalidate: 30 },
+  });
+  if (response.status === 404) return null;
+  return requireJson<EventDetail>(response);
 }

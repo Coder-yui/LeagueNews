@@ -1,7 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.domain.event_credibility import CredibilityEvidence, calculate_event_credibility
 from app.domain.event_heat import HeatEvidence, calculate_event_heat
@@ -13,6 +13,7 @@ from app.domain.event_types import (
 )
 from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
+from app.models.raw_item import RawItem
 
 
 _SOURCE_ROLE_RANK = {
@@ -44,22 +45,14 @@ def _has_public_media(mention: EventMention) -> bool:
 def refresh_event_importance(event: Event, mentions: list[EventMention]) -> None:
     evidence = []
     for mention in mentions:
-        snapshot = mention.domain_importance_snapshot
         calculation = mention.normalized_item.importance_calculation
         evidence.append(
             EventImportanceEvidence(
                 normalized_item_id=mention.normalized_item_id,
                 normalized_item_revision=mention.normalized_item_revision,
                 mention_index=mention.mention_index,
-                profile=(
-                    snapshot.get("profile")
-                    or calculation.get("importance_profile")
-                ),
-                domain_score=(
-                    snapshot.get("score")
-                    if snapshot
-                    else mention.normalized_item.importance_score
-                ),
+                profile=calculation.get("importance_profile"),
+                domain_score=mention.normalized_item.importance_score,
                 materiality=mention.materiality,
             )
         )
@@ -122,6 +115,14 @@ def refresh_event_metrics(
             db.scalars(
                 select(EventMention)
                 .join(EventMention.normalized_item)
+                .options(
+                    selectinload(EventMention.normalized_item)
+                    .selectinload(NormalizedItem.raw_item)
+                    .selectinload(RawItem.source),
+                    selectinload(EventMention.normalized_item)
+                    .selectinload(NormalizedItem.raw_item)
+                    .selectinload(RawItem.media_assets),
+                )
                 .where(
                     EventMention.event_id == event_id,
                     NormalizedItem.publication_status == "published",
@@ -182,3 +183,27 @@ def refresh_event_metrics(
         event.message_count_24h = int(heat_breakdown["message_count_24h"])
         event.unique_sources_24h = int(heat_breakdown["unique_sources_24h"])
         _refresh_references(event, mentions)
+
+
+def refresh_stale_event_metrics(
+    db: Session,
+    *,
+    as_of: datetime | None = None,
+    ttl: timedelta = timedelta(minutes=5),
+    limit: int = 100,
+) -> int:
+    """Refresh a bounded batch outside request handling."""
+    reference = as_of or datetime.now(UTC)
+    event_ids = list(
+        db.scalars(
+            select(Event.id)
+            .where(
+                (Event.heat_calculated_at.is_(None))
+                | (Event.heat_calculated_at <= reference - ttl)
+            )
+            .order_by(Event.heat_calculated_at.asc().nullsfirst(), Event.id)
+            .limit(limit)
+        )
+    )
+    refresh_event_metrics(db, set(event_ids), as_of=reference)
+    return len(event_ids)

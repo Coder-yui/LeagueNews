@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.connectors.base import BaseConnector, ConnectorRequest, RawItemCandidate
+from app.connectors.base import BaseConnector, ConnectorRequest, FetchBatch, RawItemCandidate
 
 
 class ManualConnector(BaseConnector[dict[str, object]]):
@@ -19,8 +19,8 @@ class ManualConnector(BaseConnector[dict[str, object]]):
         }
     )
 
-    async def fetch(self, request: ConnectorRequest) -> list[dict[str, object]]:
-        return [request.options]
+    async def fetch(self, request: ConnectorRequest) -> FetchBatch[dict[str, object]]:
+        return FetchBatch(records=[request.options])
 
     def map_record(self, record: dict[str, object]) -> RawItemCandidate:
         kwargs = record

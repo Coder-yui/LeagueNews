@@ -26,9 +26,8 @@ class MediaStorage:
 
     async def materialize_blocks(
         self, blocks: list[dict[str, object]], *, namespace: str
-    ) -> tuple[list[dict[str, object]], list[Path]]:
+    ) -> list[dict[str, object]]:
         safe_namespace = re.sub(r"[^a-zA-Z0-9_-]+", "-", namespace).strip("-") or "unknown"
-        created_files: list[Path] = []
         try:
             async with httpx.AsyncClient(
                 follow_redirects=False,
@@ -47,14 +46,12 @@ class MediaStorage:
                     ):
                         try:
                             async with semaphore:
-                                public_path, created, mime_type = await self._download_image(
+                                public_path, mime_type = await self._download_image(
                                     client, str(copied["source_url"]), safe_namespace
                                 )
                             copied["storage_path"] = public_path
                             if not copied.get("mime_type"):
                                 copied["mime_type"] = mime_type
-                            if created:
-                                created_files.append(created)
                         except MediaStorageError as exc:
                             # Keep the source URL and article position. A single
                             # unavailable image must not discard the whole batch.
@@ -68,14 +65,16 @@ class MediaStorage:
                 materialized = await asyncio.gather(
                     *(materialize(block) for block in blocks)
                 )
-            return materialized, created_files
+            return materialized
         except BaseException:
-            self.remove_files(created_files)
+            # Digest-addressed files may already be referenced by another
+            # concurrent transaction. Leave partial-batch orphans for a
+            # reference-aware garbage collector instead of deleting eagerly.
             raise
 
     async def _download_image(
         self, client: httpx.AsyncClient, url: str, namespace: str
-    ) -> tuple[str, Path | None, str]:
+    ) -> tuple[str, str]:
         await self._validate_public_url(url)
         try:
             payload, mime_type = await self._fetch_image(client, url)
@@ -94,17 +93,9 @@ class MediaStorage:
             raise MediaStorageError("invalid media destination")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
-            return (
-                f"/api/v1/media-assets/files/{namespace}/{relative.name}",
-                None,
-                mime_type,
-            )
+            return f"/api/v1/media-assets/files/{namespace}/{relative.name}", mime_type
         destination.write_bytes(payload)
-        return (
-            f"/api/v1/media-assets/files/{namespace}/{relative.name}",
-            destination,
-            mime_type,
-        )
+        return f"/api/v1/media-assets/files/{namespace}/{relative.name}", mime_type
 
     async def _fetch_image(
         self, client: httpx.AsyncClient, url: str
@@ -158,15 +149,6 @@ class MediaStorage:
             addresses = {address}
         if any(not address.is_global for address in addresses):
             raise MediaStorageError("private or local media URLs are not allowed")
-
-    @staticmethod
-    def remove_files(paths: list[Path]) -> None:
-        for path in paths:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
 
 async def _resolve_host_addresses(
     hostname: str, port: int

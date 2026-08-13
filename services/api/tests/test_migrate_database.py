@@ -71,8 +71,8 @@ def test_fresh_database_sources_match_current_connector_baseline() -> None:
 def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> None:
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
-    assert files[0].name.startswith("002_")
-    assert files[-1].name == "066_add_daily_reports.sql"
+    assert files[0].name == "001_initial_schema.sql"
+    assert files[-1].name == "067_remove_runtime_compatibility_and_enforce_state.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -149,3 +149,21 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     assert "report_date date NOT NULL UNIQUE" in daily_reports
     assert "CREATE TABLE daily_report_items" in daily_reports
     assert "uq_daily_report_item_position" in daily_reports
+
+    compatibility_cleanup = (
+        MIGRATIONS / "067_remove_runtime_compatibility_and_enforce_state.sql"
+    ).read_text()
+    for column in (
+        "aggregation_key",
+        "impact_snapshot",
+        "product_scope",
+        "primary_topic",
+        "secondary_topics",
+        "subtopic",
+        "source_kind",
+        "information_stage",
+        "ontology_version",
+    ):
+        assert f"DROP COLUMN IF EXISTS {column}" in compatibility_cleanup
+    for table in ("claims", "digests", "digest_revisions"):
+        assert f"DROP TABLE IF EXISTS {table}" in compatibility_cleanup

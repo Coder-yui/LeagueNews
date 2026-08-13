@@ -218,9 +218,8 @@ Pipeline 状态计数、最老 queued 时间和 stale lease 回收数。外部�
 `MediaAsset.visibility` 校验后返回文件。消息撤回时事务内撤销公开状态，磁盘副本留待安全的
 异步垃圾回收，因此即使文件仍存在也不能继续公开读取；private 原始证据始终用于审核和重放。
 
-历史 `/media/...` URL 标记为 `legacy_public` 并继续可用，避免破坏已发布页面。它们是上线前
-遗留兼容边界；后续只有在完成数据库到文件逐项核对和 URL 重写迁移后，才能收紧历史目录，
-不得直接移动或删除。
+迁移 067 已把既有公开媒体统一为 `published` 状态；运行时只保留 `private` 和 `published` 两种
+可见性，不再维护单独的历史公开分支。
 
 远程媒体下载会拒绝 loopback、private、link-local、multicast、reserved 和云元数据地址，
 请求前解析并检查域名返回的全部 IPv4/IPv6，关闭自动 redirect，并在每一跳重新解析验证。

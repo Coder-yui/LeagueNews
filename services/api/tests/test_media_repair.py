@@ -22,7 +22,7 @@ class FileCreatingMediaStorage:
 
     async def materialize_blocks(
         self, blocks: list[dict[str, object]], *, namespace: str
-    ) -> tuple[list[dict[str, object]], list[Path]]:
+    ) -> list[dict[str, object]]:
         digest = "b" * 64
         path = self.root / "private" / namespace / f"{digest}.jpg"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,11 +34,7 @@ class FileCreatingMediaStorage:
                 "mime_type": "image/jpeg",
             }
             for block in blocks
-        ], [path]
-
-    def remove_files(self, paths: list[Path]) -> None:
-        for path in paths:
-            path.unlink(missing_ok=True)
+        ]
 
 
 def test_repair_publishes_media_without_mutating_raw_blocks(

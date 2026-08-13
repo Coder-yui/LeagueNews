@@ -256,13 +256,9 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
     ) -> MessageClassificationImportanceResult:
         source_kind_value = source_context.get("classification_source_kind")
         if source_kind_value not in {"official", "unofficial", "unknown"}:
-            legacy_official = source_context.get("is_official_source")
-            source_kind_value = (
-                "official"
-                if legacy_official is True
-                else "unofficial"
-                if legacy_official is False
-                else "unknown"
+            raise ValueError(
+                "source_context.classification_source_kind must be official, "
+                "unofficial, or unknown"
             )
         source_kind = cast(SourceKind, source_kind_value)
 

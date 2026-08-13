@@ -26,13 +26,12 @@ event_importance_score = max(valid material mention normalized-item scores)
 - 0.80 后出现 0.55 的普通补充，Event 保持 0.80；之后出现 0.86 的重大观察，Event 升至 0.86。
 - Breakdown 记录 dominant item/profile、贡献数量、最多 10 条 evidence 以及被忽略原因。
 
-`EventMention.impact_snapshot.domain_importance` 是已有的历史审计格式。服务层仍能读取和校验显式
-snapshot，以兼容人工写入和已保存证据；自动 V2 membership 路径不再生成 snapshot。当历史
-snapshot 存在时优先使用它，否则读取该 mention 关联的 NormalizedItem importance 结果。
+EventMention 不复制消息重要性快照。事件投影始终读取关联 NormalizedItem 的当前发布结果；消息
+自身的历史由 `normalized_item_revisions` 保存，避免同一事实同时维护两套 importance 合同。
 
 ## 实现位置
 
 - `domain/importance.py`：消息重要性 profile 和 scorer。
 - `domain/event_importance.py`：Event evidence 聚合。
 - `services/event_metrics.py`：membership 完成后的 Event Importance 刷新。
-- `services/events.py`：EventMention 持久化及可选历史 snapshot 校验。
+- `services/events.py`：EventMention 持久化和 membership 业务校验。

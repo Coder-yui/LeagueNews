@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.connectors.base import RawItemCandidate
@@ -43,8 +42,6 @@ async def ingest_connector_items(
     """Persist canonical connector items through one source-independent path."""
     storage = media_storage or MediaStorage()
     result = IngestionResult()
-    created_files: list[Path] = []
-
     try:
         for item in items:
             if source.connector_type != "manual" and not item.external_id:
@@ -55,6 +52,12 @@ async def ingest_connector_items(
             if not blocks:
                 raise ValueError("connector item has no content blocks")
             content_hash = hash_content_blocks(blocks)
+            _lock_ingestion_identity(
+                db,
+                source_id=source.id,
+                external_id=item.external_id,
+                content_hash=content_hash,
+            )
 
             existing, latest_revision = _find_existing(
                 db,
@@ -63,22 +66,20 @@ async def ingest_connector_items(
                 content_hash=content_hash,
             )
             if existing:
-                repair = await repair_raw_item_media(
+                await repair_raw_item_media(
                     db,
                     raw_item=existing,
                     namespace=source.connector_type,
                     candidate_blocks=blocks,
                     media_storage=storage,
                 )
-                created_files.extend(repair.created_files)
                 result.skipped.append(existing)
                 continue
 
-            stored_blocks, new_files = await storage.materialize_blocks(
+            stored_blocks = await storage.materialize_blocks(
                 blocks, namespace=source.connector_type
             )
             stored_blocks = normalize_content_blocks(stored_blocks)
-            created_files.extend(new_files)
             raw_item = RawItem(
                 source_id=source.id,
                 external_id=item.external_id,
@@ -132,12 +133,28 @@ async def ingest_connector_items(
         db.commit()
     except BaseException:
         db.rollback()
-        storage.remove_files(created_files)
         raise
 
     for raw_item in result.created:
         db.refresh(raw_item)
     return result
+
+
+def _lock_ingestion_identity(
+    db: Session,
+    *,
+    source_id: int,
+    external_id: str | None,
+    content_hash: str,
+) -> None:
+    """Serialize revision allocation for one source identity on PostgreSQL."""
+    if db.bind is None or db.bind.dialect.name != "postgresql":
+        return
+    identity = external_id or f"content:{content_hash}"
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:identity, 0))"),
+        {"identity": f"raw-item:{source_id}:{identity}"},
+    )
 
 
 def _find_existing(

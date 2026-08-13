@@ -205,8 +205,9 @@ async def execute_claimed_schedule(
         else None
     )
 
+    lease_lost = asyncio.Event()
     heartbeat = asyncio.create_task(
-        _heartbeat_schedule(schedule_id, lease_token)
+        _heartbeat_schedule(schedule_id, lease_token, lease_lost)
     )
     succeeded = False
     error_message = None
@@ -229,8 +230,22 @@ async def execute_claimed_schedule(
         await asyncio.gather(heartbeat, return_exceptions=True)
 
     now = datetime.now(UTC)
-    schedule = db.get(SourceCollectionSchedule, schedule_id)
-    if schedule is None or schedule.lease_token != lease_token:
+    if lease_lost.is_set():
+        db.rollback()
+        return
+    schedule = db.scalar(
+        select(SourceCollectionSchedule)
+        .where(
+            SourceCollectionSchedule.id == schedule_id,
+            SourceCollectionSchedule.last_status == "running",
+            SourceCollectionSchedule.lease_token == lease_token,
+            SourceCollectionSchedule.lease_expires_at > now,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if schedule is None:
+        db.rollback()
         return
     schedule.last_connector_run_id = run.id if run is not None else None
     schedule.last_finished_at = now
@@ -276,10 +291,15 @@ def _renew_schedule_lease(schedule_id: int, lease_token: str) -> bool:
         return bool(result.rowcount)
 
 
-async def _heartbeat_schedule(schedule_id: int, lease_token: str) -> None:
+async def _heartbeat_schedule(
+    schedule_id: int,
+    lease_token: str,
+    lease_lost: asyncio.Event,
+) -> None:
     while True:
         await asyncio.sleep(settings.collection_scheduler_heartbeat_seconds)
         if not _renew_schedule_lease(schedule_id, lease_token):
+            lease_lost.set()
             return
 
 

@@ -30,9 +30,6 @@ class Event(Base):
     __tablename__ = "events"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    aggregation_key: Mapped[str | None] = mapped_column(
-        String(255), nullable=True, unique=True, index=True
-    )
     title: Mapped[str] = mapped_column(String(500))
     current_summary: Mapped[str] = mapped_column("summary", Text)
     event_family: Mapped[str] = mapped_column(
@@ -186,7 +183,6 @@ class EventMention(Base):
     materiality: Mapped[str] = mapped_column(String(30), default="material_update")
     evidence_excerpt: Mapped[str] = mapped_column(Text, default="")
     structured_fact_changes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    impact_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     source_reliability_snapshot: Mapped[float] = mapped_column(Float, default=0.5)
@@ -199,11 +195,6 @@ class EventMention(Base):
     normalized_item: Mapped["NormalizedItem"] = relationship(  # noqa: F821
         back_populates="event_mentions"
     )
-
-    @property
-    def domain_importance_snapshot(self) -> dict[str, Any]:
-        value = self.impact_snapshot.get("domain_importance")
-        return value if isinstance(value, dict) else {}
 
     __table_args__ = (
         UniqueConstraint(
@@ -237,6 +228,11 @@ class EventMention(Base):
         CheckConstraint(
             "source_reliability_snapshot >= 0 AND source_reliability_snapshot <= 1",
             name="ck_event_mentions_source_reliability",
+        ),
+        Index(
+            "ix_event_mentions_independence_group",
+            "event_id",
+            "independence_group",
         ),
     )
 
@@ -273,7 +269,7 @@ class EventAggregationRun(Base):
     normalized_item_revision: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
     outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    current_stage: Mapped[str] = mapped_column(String(40), default="admission")
+    current_stage: Mapped[str] = mapped_column(String(40), default="minimal_filter")
     admission_decision: Mapped[str | None] = mapped_column(String(30), nullable=True)
     aggregation_policy_version: Mapped[str] = mapped_column(
         String(80), default=AGGREGATION_POLICY_VERSION
@@ -294,11 +290,28 @@ class EventAggregationRun(Base):
     __table_args__ = (
         CheckConstraint("normalized_item_revision >= 1", name="ck_event_runs_item_revision"),
         CheckConstraint("model_call_count >= 0", name="ck_event_runs_model_call_count"),
+        CheckConstraint(
+            "status IN ('running', 'completed', 'failed')",
+            name="ck_event_runs_status",
+        ),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ('skipped_by_minimal_filter', 'applied', "
+            "'ignored', 'model_error', 'apply_error')",
+            name="ck_event_runs_outcome",
+        ),
+        CheckConstraint(
+            "current_stage IN ('minimal_filter', 'model_decision', 'apply_membership')",
+            name="ck_event_runs_stage",
+        ),
+        CheckConstraint(
+            "admission_decision IS NULL OR admission_decision IN ('process', 'skip')",
+            name="ck_event_runs_admission",
+        ),
         Index(
             "uq_event_aggregation_runs_active_item",
             "normalized_item_id",
             unique=True,
-            postgresql_where=text("status IN ('running', 'awaiting_review')"),
-            sqlite_where=text("status IN ('running', 'awaiting_review')"),
+            postgresql_where=text("status = 'running'"),
+            sqlite_where=text("status = 'running'"),
         ),
     )

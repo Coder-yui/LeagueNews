@@ -1,4 +1,5 @@
 import asyncio
+import time
 import os
 import secrets
 import socket
@@ -20,6 +21,7 @@ from app.services.pipeline_execution import (
     PipelineLeaseLost,
     assert_execution_owned,
 )
+from app.services.event_metrics import refresh_stale_event_metrics
 from app.services.raw_item_versions import (
     is_latest_raw_item,
     latest_raw_item_condition,
@@ -359,7 +361,14 @@ async def process_next_job() -> bool:
 
 
 async def worker_loop() -> None:
+    next_event_refresh_at = 0.0
     while True:
+        now = time.monotonic()
+        if settings.event_aggregation_enabled and now >= next_event_refresh_at:
+            with SessionLocal() as db:
+                refresh_stale_event_metrics(db)
+                db.commit()
+            next_event_refresh_at = now + settings.event_metrics_refresh_seconds
         processed = await process_next_job()
         if not processed:
             await asyncio.sleep(settings.pipeline_worker_poll_seconds)

@@ -9,40 +9,8 @@ from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
-from app.domain.importance import score_importance_profile
-from app.services.events import add_event_mention as _add_event_mention
-from app.services.events import create_event as _create_event
+from app.services.events import add_event_mention, create_event
 from app.services.event_metrics import refresh_event_metrics
-
-
-def _snapshot(profile: str = "gameplay_announcement", **overrides: object) -> dict[str, object]:
-    features = {
-        "scale": "standard",
-        "competition_region": "none",
-        "prominence": "normal",
-        "skin_tier": "none",
-        "is_bulk_update": False,
-        **overrides,
-    }
-    result = score_importance_profile(profile, features)
-    return {
-        "policy_version": "importance-v11-repost-weekly-rotation",
-        "profile": profile,
-        "score": result.score,
-        "features": dict(result.features),
-        "modifiers": list(result.modifiers),
-    }
-
-
-def create_event(*args: object, **kwargs: object):
-    kwargs.setdefault("domain_importance_snapshot", _snapshot())
-    return _create_event(*args, **kwargs)
-
-
-def add_event_mention(*args: object, **kwargs: object):
-    if kwargs.get("materiality") == "material_update":
-        kwargs.setdefault("domain_importance_snapshot", _snapshot())
-    return _add_event_mention(*args, **kwargs)
 
 
 def _add_item(
@@ -133,7 +101,6 @@ def test_events_and_messages_are_many_to_many_and_mentions_are_idempotent() -> N
             event_family="gameplay_balance",
             products=["lol_pc"],
             canonical_anchors={"patch_version": "26.17"},
-            aggregation_key="patch:lol_pc:26.17:balance",
             title="26.17 版本平衡调整",
             current_summary="版本平衡调整已公布。",
             evidence_excerpt="平衡调整",
@@ -145,7 +112,6 @@ def test_events_and_messages_are_many_to_many_and_mentions_are_idempotent() -> N
             event_family="player_activity",
             products=["lol_pc"],
             canonical_anchors={"activity_name": "星界活动"},
-            aggregation_key="activity:lol_pc:star-event",
             title="星界活动",
             current_summary="星界活动已公布。",
             evidence_excerpt="活动内容",
@@ -315,23 +281,18 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
             canonical_anchors={"patch_version": "26.17"},
             title="26.17 版本平衡调整",
             current_summary="首次发布。",
-            domain_importance_snapshot=_snapshot(
-                "worlds_key",
-                scale="major",
-                competition_region="lpl",
-                prominence="star",
-            ),
         )
         assert created is True
         assert item.importance_score == 0.78
         refresh_event_metrics(db, {event.id})
-        assert event.importance_score == 0.86
+        assert event.importance_score == 0.78
 
         item.current_revision = 2
         item.importance_calculation = {
             "importance_profile": "esports_regular",
             "profile_score": 0.6,
         }
+        item.importance_score = 0.6
         db.commit()
         event, added = add_event_mention(
             db,
@@ -341,9 +302,6 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
             relation="corrects",
             source_role="independent_media",
             materiality="material_update",
-            domain_importance_snapshot=_snapshot(
-                "esports_regular", competition_region="lck"
-            ),
             current_summary="第二修订更正了数值。",
             latest_development="消息第二修订",
         )
@@ -351,7 +309,7 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
         refresh_event_metrics(db, {event.id})
         assert event.current_revision == 2
         assert event.message_count_total == 1
-        assert event.importance_score == 0.86
+        assert event.importance_score == 0.6
 
         repeated, repeated_added = add_event_mention(
             db,
@@ -369,6 +327,3 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
             select(EventMention).order_by(EventMention.normalized_item_revision)
         ).all()
         assert [mention.normalized_item_revision for mention in mentions] == [1, 2]
-        assert [
-            mention.domain_importance_snapshot["score"] for mention in mentions
-        ] == [0.86, 0.6]

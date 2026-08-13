@@ -37,7 +37,7 @@ class MediaAsset(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "visibility IN ('private', 'published', 'legacy_public')",
+            "visibility IN ('private', 'published')",
             name="ck_media_assets_visibility",
         ),
     )

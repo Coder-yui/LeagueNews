@@ -60,16 +60,8 @@ def _corrected_review_proposal(
             raise ValueError("importance 修正缺少已批准的消息内容分析")
         classification_source = dict(analysis.get("classification_source") or {})
         source_kind = str(classification_source.get("source_kind") or "")
-        if not source_kind:
-            source_kind = (
-                "unknown"
-                if str(analysis.get("content_form") or "") == "repost"
-                else "official"
-                if review.processing_run.raw_item.source.is_official
-                else "unofficial"
-            )
         if source_kind not in {"official", "unofficial", "unknown"}:
-            source_kind = "unknown"
+            raise ValueError("importance 修正缺少有效的 classification_source.source_kind")
         error = classification_error(
             products=list(analysis.get("products") or []),
             content_form=str(analysis.get("content_form") or ""),

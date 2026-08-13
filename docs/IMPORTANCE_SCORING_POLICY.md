@@ -269,9 +269,9 @@ LLM 不输出分数，只提取：
 
 所有修正后的结果都必须限制在当前档案的下限和上限之间。
 
-这些判断由 `score_importance_profile()` 集中实现。Message 先通过 `derive_importance_profile()` 从
-整条消息派生 profile；EventMention 使用事件聚合已有调用输出的受控 event-specific profile。两者不
-各自维护赛事、外观、活动、商城等另一套领域权重。
+这些判断由 `score_importance_profile()` 集中实现。Message 通过 `derive_importance_profile()` 从
+整条消息派生 profile；Event Importance 只投影关联 NormalizedItem 的当前分数和 profile，不维护
+另一套赛事、外观、活动或商城权重。
 
 档案区间限制完成后，若 `content_form` 为 `repost`，消息重要性再扣 8 分，并限制在 0-100。
 这是消息载体修正，不属于 Domain Importance，也不得进入 Event Importance。

@@ -7,16 +7,10 @@ from app.core.config import settings
 from app.models.raw_item import RawItem
 
 
-def publish_raw_item_media(raw_item: RawItem) -> list[Path]:
+def publish_raw_item_media(raw_item: RawItem) -> None:
     root = settings.resolved_media_root.resolve()
-    created_files: list[Path] = []
     for asset in raw_item.media_assets:
         if not asset.storage_path:
-            continue
-        if asset.storage_path.startswith("/media/"):
-            asset.public_path = asset.storage_path
-            asset.visibility = "legacy_public"
-            asset.published_at = asset.published_at or datetime.now(UTC)
             continue
         parts = Path(urlparse(asset.storage_path).path).parts
         if len(parts) < 2:
@@ -31,11 +25,9 @@ def publish_raw_item_media(raw_item: RawItem) -> list[Path]:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.exists():
             shutil.copy2(source, destination)
-            created_files.append(destination)
         asset.public_path = f"/media/published/{namespace}/{filename}"
         asset.visibility = "published"
         asset.published_at = datetime.now(UTC)
-    return created_files
 
 
 def withdraw_raw_item_media(raw_item: RawItem) -> None:

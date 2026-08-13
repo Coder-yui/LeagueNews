@@ -77,6 +77,10 @@ class NormalizedItem(Base):
 
     __table_args__ = (
         CheckConstraint(
+            "importance_score >= 0 AND importance_score <= 1",
+            name="ck_normalized_items_importance_score",
+        ),
+        CheckConstraint(
             "priority_score >= 0 AND priority_score <= 1",
             name="ck_normalized_items_priority_score",
         ),

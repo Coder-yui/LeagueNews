@@ -156,7 +156,6 @@ def test_daily_report_generation_is_replaceable_for_the_same_date() -> None:
             )
         )
         event = Event(
-            aggregation_key="daily-report-event",
             title="日报事件",
             current_summary="摘要",
             event_family="gameplay_release",

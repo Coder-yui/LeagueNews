@@ -29,7 +29,10 @@ def test_missing_api_key_raises_configuration_error(monkeypatch: pytest.MonkeyPa
                 extracted_facts={"title": "测试"},
                 products=["lol_pc"],
                 content_form="original",
-                source_context={"source_name": "测试来源", "is_official_source": True},
+                source_context={
+                    "source_name": "测试来源",
+                    "classification_source_kind": "official",
+                },
             )
         )
 
@@ -52,7 +55,7 @@ def test_message_content_analysis_only_receives_first_stage_catalog() -> None:
             title="WBG 打野传闻",
             content="WBG正在考虑新的打野，最后以官宣为准。",
             evidence_structure={"content_block_types": ["paragraph"]},
-            source_context={"source_name": "_尧阿尧y_", "is_official_source": False},
+            source_context={"source_name": "_尧阿尧y_", "authority": 0},
         )
     )
 
@@ -535,7 +538,10 @@ def test_importance_prompt_uses_editorial_policy_contract() -> None:
             extracted_facts={"title": "限时活动"},
             products=["lol_pc"],
             content_form="original",
-            source_context={"source_name": "英雄联盟", "is_official_source": True},
+            source_context={
+                "source_name": "英雄联盟",
+                "classification_source_kind": "official",
+            },
         )
     )
 

@@ -40,6 +40,7 @@ def _published_statement():
         .join(NormalizedItem.raw_item)
         .options(
             selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
+            selectinload(NormalizedItem.raw_item).selectinload(RawItem.media_assets),
             selectinload(NormalizedItem.media_links)
             .selectinload(NormalizedItemMediaExtraction.media_extraction)
             .selectinload(MediaExtraction.media_asset),

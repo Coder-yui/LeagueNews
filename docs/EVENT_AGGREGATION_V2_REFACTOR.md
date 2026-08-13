@@ -115,8 +115,8 @@ The V2 result centers on membership:
 
 `ignore` is represented explicitly when the model needs to account for a fragment, but it produces
 no membership row. `canonical_anchors` may remain as optional descriptive metadata on creation;
-they are never required and never checked for semantic identity. `aggregation_key` remains nullable
-and the automatic aggregation path does not generate one.
+they are never required and never checked for semantic identity. `event_id` is the only persisted
+Event identity.
 
 ## Candidate recall
 

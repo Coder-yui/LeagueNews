@@ -54,6 +54,26 @@ class ProcessingRun(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'awaiting_review', 'completed', 'rejected', "
+            "'failed', 'superseded')",
+            name="ck_processing_runs_status",
+        ),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ('approved', 'irrelevant', "
+            "'review_rejected', 'system_error', 'correction_requested', "
+            "'raw_item_superseded')",
+            name="ck_processing_runs_outcome",
+        ),
+        CheckConstraint(
+            "current_stage IN ('relevance', 'image_ocr', 'translation', "
+            "'message_analysis', 'importance')",
+            name="ck_processing_runs_stage",
+        ),
+        CheckConstraint(
+            "execution_mode IN ('manual', 'automatic')",
+            name="ck_processing_runs_execution_mode",
+        ),
         Index(
             "uq_processing_runs_active_raw_item",
             "raw_item_id",
@@ -87,6 +107,19 @@ class ReviewTask(Base):
     processing_run: Mapped[ProcessingRun] = relationship(back_populates="reviews")
 
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'superseded')",
+            name="ck_review_tasks_status",
+        ),
+        CheckConstraint(
+            "stage IN ('relevance', 'image_ocr', 'translation', "
+            "'message_analysis', 'importance')",
+            name="ck_review_tasks_stage",
+        ),
+        CheckConstraint(
+            "decision_source IN ('manual', 'automatic')",
+            name="ck_review_tasks_decision_source",
+        ),
         Index(
             "uq_review_tasks_pending_run",
             "processing_run_id",

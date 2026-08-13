@@ -357,13 +357,11 @@ def test_create_persists_membership_then_refreshes_projections() -> None:
 
         assert run.outcome == "applied"
         assert event is not None and mention is not None
-        assert event.aggregation_key is None
         assert event.importance_score == 0.81
         assert event.importance_breakdown["dominant_normalized_item_id"] == item.id
         assert event.heat_score > 0
         assert event.message_count_total == 1
         assert mention.evidence_excerpt == "26.17 版本平衡调整"
-        assert mention.impact_snapshot == {}
         assert db.scalar(select(func.count(EventRevision.id))) == 1
         assert client.payloads[0].keys() == {
             "message",
@@ -680,7 +678,7 @@ def test_repost_cannot_create_event() -> None:
         assert db.scalar(select(func.count(Event.id))) == 0
 
 
-def test_cosmetic_leak_creates_are_collapsed_into_one_batch_event() -> None:
+def test_membership_application_preserves_model_event_boundaries() -> None:
     engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
         source = Source(name="leak batch")
@@ -725,13 +723,9 @@ def test_cosmetic_leak_creates_are_collapsed_into_one_batch_event() -> None:
         ]
 
         run = _aggregate(db, item, client)
-        event = db.scalar(select(Event))
-
         assert run.outcome == "applied"
-        assert db.scalar(select(func.count(Event.id))) == 1
-        assert db.scalar(select(func.count(EventMention.id))) == 1
-        assert event is not None
-        assert len(event.key_facts) == 2
+        assert db.scalar(select(func.count(Event.id))) == 2
+        assert db.scalar(select(func.count(EventMention.id))) == 2
 
 
 def test_candidate_recall_is_generic_high_recall_and_bounded() -> None:

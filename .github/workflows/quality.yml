@@ -64,7 +64,7 @@ jobs:
 
       - name: Backend quality
         env:
-          EVENT_TEST_DATABASE_URL: postgresql+psycopg://lol:test-password@localhost:5432/league_fresh
+          PIPELINE_TEST_DATABASE_URL: postgresql+psycopg://lol:test-password@localhost:5432/league_fresh
         run: |
           services/api/.venv/bin/python -m ruff check services/api/app services/api/scripts services/api/tests
           services/api/.venv/bin/python -m pytest services/api/tests -q
@@ -88,3 +88,6 @@ jobs:
             "SELECT collection_cursor, overlap_minutes FROM source_collection_schedules LIMIT 0"
           psql -h localhost -U lol -d league_upgrade -v ON_ERROR_STOP=1 -c \
             "SELECT worker_id, lease_expires_at, recovery_count FROM pipeline_jobs LIMIT 0"
+          services/api/.venv/bin/python services/api/scripts/compare_database_schemas.py \
+            postgresql+psycopg://lol:test-password@localhost:5432/league_fresh \
+            postgresql+psycopg://lol:test-password@localhost:5432/league_upgrade

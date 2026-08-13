@@ -15,6 +15,8 @@ Source 周期调度或手工触发
   -> products、content_form、message_type、topics、摘要和实体
   -> 重要性计算
   -> NormalizedItem 发布
+  -> Event 准入、候选召回与语义 membership
+  -> Event 投影与日报
 ```
 
 - 已接入 Riot 官网、腾讯 LOL 官网、X、微博、百度贴吧和手工导入。
@@ -22,7 +24,8 @@ Source 周期调度或手工触发
 - 已发布消息可以按阶段撤回，并选择人工审核或自动模式重跑。
 - 管理台提供审核、采集计划、采集日志、管线日志、失败恢复、撤回、知识与 OCR Lab。
 - 已有单机 Docker Compose 生产部署、Caddy 边界认证、GHCR 镜像发布、备份与恢复脚本。
-- 事件聚合等待重新设计；日报、embedding/向量召回和应用内多用户权限尚未实现。
+- 已实现 Event V2 语义聚合、事件列表/详情和按上海自然日生成的日报。
+- embedding/向量召回和应用内多用户权限尚未实现；当前数据规模不依赖它们。
 
 ## 架构边界
 
@@ -30,7 +33,7 @@ Source 周期调度或手工触发
 - Connector 只映射统一 `RawItemCandidate`；共享 ingestion 负责校验、去重、媒体落盘和入库。
 - `raw_items.content_blocks` 是不可变原文事实来源，后续处理不得回写。
 - `normalized_items` 是单条消息当前投影，历史版本保存在 `normalized_item_revisions`。
-- 当前消息处理在发布 `NormalizedItem` 后结束，不生成 Claim 或事件。
+- 消息处理在发布 `NormalizedItem` 后结束；独立 Event 层只消费发布投影，不回写 RawItem。
 - 自动与人工流程使用相同结构化草稿；区别记录在决定来源和运行模式中。
 
 ## 目录

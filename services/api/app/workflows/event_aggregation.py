@@ -313,116 +313,16 @@ def _validate_repost_actions(item: NormalizedItem, result: EventAggregationResul
         raise ValueError("repost messages cannot create events")
 
 
-def _merge_anchor_values(left: object, right: object) -> object:
-    left_values = left if isinstance(left, list) else [left]
-    right_values = right if isinstance(right, list) else [right]
-    merged: list[object] = []
-    for value in [*left_values, *right_values]:
-        if value not in merged:
-            merged.append(value)
-    return merged[0] if len(merged) == 1 else merged
-
-
-def _coalesce_cosmetic_batch_creates(
-    item: NormalizedItem, result: EventAggregationResult
-) -> EventAggregationResult:
-    """Collapse same-product cosmetic leak creates from one message into one batch."""
-
-    if item.message_type != "game_leak":
-        return result
-    groups: dict[tuple[str, str], list[EventMentionDecision]] = {}
-    for mention in result.mentions:
-        if mention.action != "create" or mention.event_family != "cosmetic_release":
-            continue
-        product = (
-            str(mention.product)
-            if mention.product is not None
-            else _resolve_mention_product(mention, item_products=item.products)
-        )
-        groups.setdefault((product, str(mention.event_family)), []).append(mention)
-    if not any(len(group) > 1 for group in groups.values()):
-        return result
-
-    first_by_group = {key: values[0] for key, values in groups.items()}
-    consumed: set[int] = set()
-    collapsed: list[EventMentionDecision] = []
-    for mention in result.mentions:
-        if mention.action != "create" or mention.event_family != "cosmetic_release":
-            collapsed.append(mention)
-            continue
-        product = (
-            str(mention.product)
-            if mention.product is not None
-            else _resolve_mention_product(mention, item_products=item.products)
-        )
-        key = (product, str(mention.event_family))
-        first = first_by_group[key]
-        if first.mention_index in consumed:
-            continue
-        consumed.add(first.mention_index)
-        members = groups[key]
-        seed = first.new_event
-        if seed is None:
-            raise ValueError("cosmetic create mention is missing new_event")
-        if len(members) > 1:
-            titles = [value.new_event.title for value in members if value.new_event]
-            summaries = [value.new_event.summary for value in members if value.new_event]
-            latest = [
-                value.new_event.latest_development
-                for value in members
-                if value.new_event and value.new_event.latest_development
-            ]
-            facts: list[dict[str, Any]] = []
-            anchors: dict[str, Any] = {}
-            excerpts: list[str] = []
-            for value in members:
-                if value.new_event:
-                    for fact in value.new_event.key_facts:
-                        if fact not in facts:
-                            facts.append(fact)
-                    for anchor_key, anchor_value in value.new_event.canonical_anchors.items():
-                        if anchor_key in anchors:
-                            anchors[anchor_key] = _merge_anchor_values(
-                                anchors[anchor_key], anchor_value
-                            )
-                        else:
-                            anchors[anchor_key] = anchor_value
-                if value.evidence_excerpt and value.evidence_excerpt not in excerpts:
-                    excerpts.append(value.evidence_excerpt)
-            seed = seed.model_copy(
-                update={
-                    "title": titles[0] if titles else seed.title,
-                    "summary": "；".join(dict.fromkeys(summaries)) or seed.summary,
-                    "latest_development": "；".join(dict.fromkeys(latest)),
-                    "key_facts": facts[:20],
-                    "canonical_anchors": anchors,
-                }
-            )
-            first = first.model_copy(
-                update={
-                    "product": product,
-                    "evidence_excerpt": "；".join(excerpts)[:2000],
-                    "new_event": seed,
-                }
-            )
-        collapsed.append(first)
-
-    normalized = [mention.model_copy(update={"mention_index": index}) for index, mention in enumerate(collapsed)]
-    return EventAggregationResult(mentions=normalized)
-
-
 def apply_membership_transaction(
     db: Session,
     *,
     item: NormalizedItem,
     result: EventAggregationResult,
     candidates: list[dict[str, Any]],
-    event_space: EventSpace | None = None,
 ) -> tuple[int, set[int]]:
     """Apply already-decided membership. The caller owns the surrounding transaction."""
 
     _validate_repost_actions(item, result)
-    result = _coalesce_cosmetic_batch_creates(item, result)
     resolved_products = _validate_candidate_references(
         result, candidates, item_products=item.products
     )
@@ -455,7 +355,6 @@ def apply_membership_transaction(
                 event_family=decision.event_family,
                 products=[resolved_products[decision.mention_index]],
                 canonical_anchors=seed.canonical_anchors,
-                aggregation_key=None,
                 title=seed.title,
                 current_summary=seed.summary,
                 relation=decision.relation,
@@ -572,9 +471,6 @@ async def aggregate_normalized_item(
             possible_event_families=list(admission.event_space.possible_families),
             candidates=candidates,
         )
-        # Normalize the semantic result before persisting the audit draft so
-        # the recorded decision matches the membership transaction exactly.
-        result = _coalesce_cosmetic_batch_creates(item, result)
         result, suppressed_mentions = _suppress_out_of_space_mentions(
             result, admission.event_space
         )
@@ -609,7 +505,6 @@ async def aggregate_normalized_item(
             item=item,
             result=result,
             candidates=candidates,
-            event_space=admission.event_space,
         )
         run.status = "completed"
         run.outcome = "applied" if applied_count else "ignored"

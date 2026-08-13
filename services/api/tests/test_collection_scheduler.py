@@ -236,6 +236,57 @@ async def test_failed_run_records_error_and_uses_retry_delay(
     assert next_run >= before + timedelta(minutes=7, seconds=50)
 
 
+@pytest.mark.anyio
+async def test_lost_lease_does_not_overwrite_new_owner(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(db)
+    schedule = upsert_collection_schedule(
+        db,
+        source=source,
+        payload=CollectionScheduleUpdate(enabled=True),
+    )
+    claim = claim_due_schedule(db)
+    assert claim is not None
+
+    async def fake_run_connector(
+        session: Session,
+        **_: object,
+    ) -> ConnectorRun:
+        run = ConnectorRun(
+            source_id=source.id,
+            connector_type=source.connector_type,
+            status="completed",
+            finished_at=datetime.now(UTC),
+        )
+        session.add(run)
+        session.commit()
+        session.execute(
+            scheduler_service.update(SourceCollectionSchedule)
+            .where(SourceCollectionSchedule.id == schedule.id)
+            .values(
+                lease_token="new-owner-token",
+                lease_expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            )
+        )
+        session.commit()
+        return run
+
+    monkeypatch.setattr(scheduler_service, "run_connector", fake_run_connector)
+    await execute_claimed_schedule(
+        db,
+        schedule_id=claim[0],
+        lease_token=claim[1],
+    )
+
+    db.expire_all()
+    current = db.get(SourceCollectionSchedule, schedule.id)
+    assert current is not None
+    assert current.lease_token == "new-owner-token"
+    assert current.last_status == "running"
+
+
 def test_collection_schedule_api_lists_configures_and_requests_run() -> None:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",

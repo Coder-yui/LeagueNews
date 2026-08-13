@@ -23,9 +23,11 @@ published NormalizedItem
   -> refresh_event_metrics()
 ```
 
-`event_id` is Event identity. `canonical_anchors` are optional descriptive/recall metadata.
-`aggregation_key` remains nullable for externally deterministic operational keys but the automatic
-semantic membership path does not generate or match it.
+写入 membership 时同步刷新投影；时间相关的热度衰减由 Pipeline Worker 周期刷新。公开 GET API
+只读取投影，不提交数据库事务。
+
+`event_id` is the only Event identity. `canonical_anchors` are optional descriptive and recall
+metadata; they are not a parallel identity mechanism.
 
 ## Invariants
 

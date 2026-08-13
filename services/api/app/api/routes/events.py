@@ -1,7 +1,5 @@
-from datetime import UTC, datetime
-
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import Text, and_, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -17,18 +15,46 @@ from app.schemas.event import EventDetailRead, EventPageRead
 from app.services.event_presentation import (
     event_card_payload,
     event_detail_payload,
-    refresh_stale_event_metrics,
+    event_message_counts,
+    event_reference_items,
 )
 
 
 router = APIRouter()
 
 
-def _time_key(value: datetime | None) -> float:
-    if value is None:
-        return 0
-    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-    return normalized.timestamp()
+_ESPORTS_FAMILIES = ("esports_match", "esports_schedule", "roster_change", "esports_rules")
+_ECOSYSTEM_FAMILIES = ("corporate_change", "platform_service", "universe_release", "media_release")
+
+
+def _contains_product(product: str):
+    return cast(Event.products, Text).like(f'%"{product}"%')
+
+
+def _category_condition(category: str):
+    if category == "esports":
+        return or_(Event.event_family.in_(_ESPORTS_FAMILIES), _contains_product("lol_esports"))
+    if category == "ecosystem":
+        return or_(
+            Event.event_family.in_(_ECOSYSTEM_FAMILIES),
+            _contains_product("riot_ecosystem"),
+            _contains_product("lol_universe"),
+        )
+    excluded = and_(
+        Event.event_family.not_in((*_ESPORTS_FAMILIES, *_ECOSYSTEM_FAMILIES)),
+        ~_contains_product("lol_esports"),
+        ~_contains_product("riot_ecosystem"),
+        ~_contains_product("lol_universe"),
+    )
+    if category == "lol_pc":
+        return and_(excluded, _contains_product("lol_pc"))
+    if category == "tft":
+        return and_(excluded, ~_contains_product("lol_pc"), _contains_product("tft"))
+    return and_(
+        excluded,
+        ~_contains_product("lol_pc"),
+        ~_contains_product("tft"),
+    )
 
 
 @router.get("", response_model=EventPageRead)
@@ -53,49 +79,72 @@ def list_events(
         conditions.append(Event.lifecycle_status == lifecycle)
     if credibility_level:
         conditions.append(Event.credibility_level == credibility_level)
-    events = list(db.scalars(select(Event).where(*conditions)))
-    refresh_stale_event_metrics(db, events)
-    payloads = [event_card_payload(db, event) for event in events]
     if product:
-        payloads = [payload for payload in payloads if product in payload["products"]]
+        conditions.append(_contains_product(product))
     if category:
         if category not in EVENT_CATEGORIES:
             raise HTTPException(status_code=400, detail="unsupported event category")
-        payloads = [payload for payload in payloads if payload["category"] == category]
+        conditions.append(_category_condition(category))
     if importance_level:
-        payloads = [
-            payload for payload in payloads if payload["importance_level"] == importance_level
-        ]
+        ranges = {
+            "low": Event.importance_score < 0.30,
+            "medium": and_(Event.importance_score >= 0.30, Event.importance_score < 0.55),
+            "high": and_(Event.importance_score >= 0.55, Event.importance_score < 0.80),
+            "critical": Event.importance_score >= 0.80,
+        }
+        if importance_level not in ranges:
+            raise HTTPException(status_code=400, detail="unsupported importance level")
+        conditions.append(ranges[importance_level])
     if heat_level:
-        payloads = [payload for payload in payloads if payload["heat_level"] == heat_level]
+        ranges = {
+            "cold": Event.heat_score < 0.15,
+            "emerging": and_(Event.heat_score >= 0.15, Event.heat_score < 0.35),
+            "active": and_(Event.heat_score >= 0.35, Event.heat_score < 0.60),
+            "hot": and_(Event.heat_score >= 0.60, Event.heat_score < 0.80),
+            "surging": Event.heat_score >= 0.80,
+        }
+        if heat_level not in ranges:
+            raise HTTPException(status_code=400, detail="unsupported heat level")
+        conditions.append(ranges[heat_level])
     if search:
         needle = search.strip().casefold()
-        payloads = [
-            payload
-            for payload in payloads
-            if needle in str(payload["title"]).casefold()
-            or needle in str(payload["current_summary"]).casefold()
-        ]
-    sort_key = {
-        "latest": lambda payload: (
-            _time_key(payload["last_material_update_at"]),
-            int(payload["id"]),
+        if needle:
+            pattern = f"%{needle}%"
+            conditions.append(
+                or_(Event.title.ilike(pattern), Event.current_summary.ilike(pattern))
+            )
+    total = db.scalar(select(func.count(Event.id)).where(*conditions)) or 0
+    ordering = {
+        "latest": (Event.last_material_update_at.desc().nullslast(), Event.id.desc()),
+        "importance": (
+            Event.importance_score.desc(),
+            Event.last_material_update_at.desc().nullslast(),
+            Event.id.desc(),
         ),
-        "importance": lambda payload: (
-            float(payload["importance_score"]),
-            _time_key(payload["last_material_update_at"]),
-            int(payload["id"]),
-        ),
-        "heat": lambda payload: (
-            float(payload["heat_score"]),
-            _time_key(payload["last_material_update_at"]),
-            int(payload["id"]),
+        "heat": (
+            Event.heat_score.desc(),
+            Event.last_material_update_at.desc().nullslast(),
+            Event.id.desc(),
         ),
     }[sort_by]
-    payloads.sort(key=sort_key, reverse=True)
-    total = len(payloads)
+    events = list(
+        db.scalars(
+            select(Event).where(*conditions).order_by(*ordering).offset(offset).limit(limit)
+        )
+    )
+    counts = event_message_counts(db, [event.id for event in events])
+    reference_items = event_reference_items(db, events)
+    payloads = [
+        event_card_payload(
+            db,
+            event,
+            counts=counts.get(event.id, (0, 0)),
+            reference_items=reference_items,
+        )
+        for event in events
+    ]
     return {
-        "items": payloads[offset : offset + limit],
+        "items": payloads,
         "total": total,
         "product_options": list(PRODUCTS),
         "event_family_options": sorted(EVENT_FAMILIES),
@@ -110,5 +159,4 @@ def get_event(event_id: int, db: Session = Depends(get_db)) -> dict[str, object]
     event = db.get(Event, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
-    refresh_stale_event_metrics(db, [event])
     return event_detail_payload(db, event)

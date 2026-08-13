@@ -140,16 +140,9 @@ class BaseConnector(ABC, Generic[PlatformRecordT]):
                 f"unsupported {self.connector_type} run options: {sorted(unsupported)}"
             )
         fetched = await self.fetch(request)
-        if isinstance(fetched, FetchBatch):
-            records = fetched.records
-            truncated = fetched.truncated
-            skipped_ids = fetched.skipped_ids
-        else:
-            records = fetched
-            # Legacy connectors cannot prove truncation from list length alone.
-            # Reliability-sensitive connectors return FetchBatch explicitly.
-            truncated = False
-            skipped_ids = ()
+        records = fetched.records
+        truncated = fetched.truncated
+        skipped_ids = fetched.skipped_ids
         items = [self.map_record(record) for record in records]
         cursor_used = dict(request.cursor or {})
         return CandidateBatch(
@@ -167,7 +160,7 @@ class BaseConnector(ABC, Generic[PlatformRecordT]):
     @abstractmethod
     async def fetch(
         self, request: ConnectorRequest
-    ) -> list[PlatformRecordT] | FetchBatch[PlatformRecordT]:
+    ) -> FetchBatch[PlatformRecordT]:
         """Fetch platform-shaped records without producing RawItems."""
 
     @abstractmethod

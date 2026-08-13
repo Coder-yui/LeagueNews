@@ -3,7 +3,12 @@
 本目录根层只放当前实现仍在使用的架构、规则和运维文档。已经退出运行时的方案、阶段性
 设计和一次性审计产物统一放在 [`history/`](history/README.md)，不得作为当前实现依据。
 
-当前稳定节点记录：[`MESSAGE_PROCESSING_V1_MILESTONE.md`](MESSAGE_PROCESSING_V1_MILESTONE.md)。
+阅读规则：先看本文和 [`ARCHITECTURE.md`](ARCHITECTURE.md)，再进入对应模块的专题文档；代码、
+追加式 SQL migration 和当前配置是最终事实来源，文档不能覆盖它们。`history/` 只用于追溯决策，
+`design/` 用于未来产品与视觉设计，不是运行时规则或部署手册。
+
+消息处理当前流程见 [`REVIEWED_AI_WORKFLOW.md`](REVIEWED_AI_WORKFLOW.md)，系统总边界见
+[`ARCHITECTURE.md`](ARCHITECTURE.md)。历史里程碑快照统一见 [`history/`](history/README.md)。
 
 ## 架构与数据
 
@@ -23,6 +28,7 @@
 ## 事件聚合
 
 - [`EVENT_AGGREGATION.md`](EVENT_AGGREGATION.md)：当前 Event V2 membership 流程和不变量。
+- [`EVENT_AGGREGATION_V2.md`](EVENT_AGGREGATION_V2.md)：当前 Event membership contract、验证边界和评测边界。
 - [`EVENT_ADMISSION_AND_GRANULARITY.md`](EVENT_ADMISSION_AND_GRANULARITY.md)：零调用准入、事件粒度、候选召回和单次结构化调用。
 - [`EVENT_IMPORTANCE.md`](EVENT_IMPORTANCE.md)：事件自身影响的确定性评分。
 - [`EVENT_CREDIBILITY.md`](EVENT_CREDIBILITY.md)：来源角色、独立证据和确认/否认规则。
@@ -37,3 +43,15 @@
 
 - [`LOCAL_RUNBOOK.md`](LOCAL_RUNBOOK.md)：本地启动、停止、验证与排障。
 - [`PRODUCTION_DEPLOYMENT.md`](PRODUCTION_DEPLOYMENT.md)：当前生产部署、更新、备份与恢复。
+
+## 设计资料
+
+- [`design/leaguenews-visual-redesign-plan.md`](design/leaguenews-visual-redesign-plan.md)：后续视觉改版计划，
+  不代表已经实现的页面行为。
+- [`design/universe-visual-study.md`](design/universe-visual-study.md)：视觉研究记录，不能作为产品或运行时契约。
+
+## 历史资料
+
+已退出当前运行时的旧方案、交接快照和一次性评测统一见
+[`history/README.md`](history/README.md)。历史文档中的表名、字段、命令和页面可能已经失效，
+不得直接复制到当前环境执行。

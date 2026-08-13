@@ -1,5 +1,8 @@
 # 消息处理架构
 
+> 历史设计：本文是消息管线重构阶段的过渡方案。当前消息处理流程见
+> [`../REVIEWED_AI_WORKFLOW.md`](../REVIEWED_AI_WORKFLOW.md)，当前总体边界见 [`../ARCHITECTURE.md`](../ARCHITECTURE.md)。
+
 当前消息管线只有五个受控阶段：
 
 ```text

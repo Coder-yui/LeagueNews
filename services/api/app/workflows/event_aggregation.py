@@ -16,6 +16,7 @@ from app.models.event import Event, EventAggregationRun
 from app.models.normalized_item import NormalizedItem
 from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
 from app.services.event_candidates import recall_event_candidates
+from app.services.event_semantics import semantic_projection
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import add_event_mention, create_event
 from app.services.llm import (
@@ -105,7 +106,7 @@ def _block_text(block: dict[str, Any]) -> str:
 def _select_content(
     item: NormalizedItem, *, limit: int = 24_000
 ) -> tuple[str, dict[str, object]]:
-    content = item.translated_text or item.normalized_text
+    _, content = semantic_projection(item)
     if len(content) <= limit:
         return content, {
             "content_truncated": False,
@@ -153,11 +154,12 @@ def _select_content(
 
 
 def _message_payload(item: NormalizedItem) -> tuple[dict[str, object], dict[str, object]]:
+    title, _ = semantic_projection(item)
     content, truncation = _select_content(item)
     return {
         "normalized_item_id": item.id,
         "normalized_item_revision": item.current_revision,
-        "title": item.translated_title or item.normalized_title,
+        "title": title,
         "summary": item.summary,
         "content": content,
         "products": item.products,
@@ -178,7 +180,9 @@ def _message_payload(item: NormalizedItem) -> tuple[dict[str, object], dict[str,
 
 def _record_for_item(db: Session, item: NormalizedItem) -> EventAggregationRun | None:
     return db.scalar(
-        select(EventAggregationRun).where(EventAggregationRun.idempotency_key == _run_key(item))
+        select(EventAggregationRun)
+        .where(EventAggregationRun.idempotency_key == _run_key(item))
+        .with_for_update()
     )
 
 
@@ -412,6 +416,8 @@ async def aggregate_normalized_item(
     run = _record_for_item(db, item)
     if run is not None and run.status == "completed":
         return run
+    if run is not None and run.status == "running":
+        return run
     previous_model_call_count = run.model_call_count if run is not None else 0
     if run is None:
         run = EventAggregationRun(
@@ -433,7 +439,7 @@ async def aggregate_normalized_item(
     except IntegrityError:
         db.rollback()
         concurrent = _record_for_item(db, item)
-        if concurrent is not None and concurrent.status == "completed":
+        if concurrent is not None and concurrent.status in {"completed", "running"}:
             return concurrent
         raise RuntimeError("event aggregation is already running for this item") from None
     db.refresh(run)

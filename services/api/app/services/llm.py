@@ -360,7 +360,10 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
             if message.get("content_form") == "repost" and any(
                 mention.action == "create" for mention in result.mentions
             ):
-                return "repost 消息不能 create Event，只能 attach 或 ignore"
+                return (
+                    "content_form=repost 不能 create Event；转载只能 attach 到候选 "
+                    "Event 或 ignore"
+                )
             for mention in result.mentions:
                 if mention.action != "attach":
                     continue
@@ -398,21 +401,39 @@ Event 是用户认知中的同一件现实世界事情，Event 的最终身份�
 possible_event_families 是由上游 products + topics 推导的 taxonomy 路由范围。create/attach 的
 event_family 必须从这个范围中选择；不要重新猜测主题或消息类型。每个 create/attach mention
 必须输出 product：单产品消息填该产品；跨产品消息必须逐个 mention 选择所属产品，不能把整条消息
-的 products 原样复制到每个 Event。只有同一现实发展确实跨产品共享生命周期时，才把它判断为跨产品事件；
-不同产品的外观、活动、玩法或资源应拆成各自的 mention。ignore 不需要 product。
+的 products 原样复制到每个 Event。不同产品且生命周期独立的外观、活动、玩法或资源应拆成各自的 mention；
+产品不同本身不能拆开一个共享生命周期的批次，此时选择公告的主要产品，其他产品条目保留在 key_facts。
+ignore 不需要 product。
 
 事件粒度原则：
-1. 持续更新同一核心主体、同一现实发展且共享生命周期的消息属于同一 Event。
-2. 商品、奖励、组件、子内容和附件默认属于主 Event；不要仅因实体或 topic 数量拆分。
-3. 只有拥有明显独立生命周期和后续更新路径的现实发展才拆成多个 Event。
-4. 一条综合消息可以 attach 多个候选、create 其他 Event，并 ignore 非事件片段。
-5. 候选召回追求高 recall，可能包含无关 Event；不要因为候选存在或分数较高就强行 attach。
-6. preview、正式公告、后续更新、确认、否认和更正是否共享生命周期，由当前消息证据和候选上下文
+1. 先识别当前消息实际推动或发布的主要发展，再按“独立生命周期”归组；每组至多输出一个 create/attach
+   mention。共享同一发布批次、版本/系列、上线窗口、状态变化和后续更新路径的内容属于同一组。
+2. 每组列出的商品、奖励、组件、修复、平衡项、皮肤或其他子内容都进入该 Event 的 key_facts；不要仅因
+   条目、实体、topic、event_family 或产品数量拆分。同一批次发布的多款皮肤尤其不能逐皮肤建 Event。
+3. 只有拥有独立名称、独立发布状态和独立后续更新路径的现实发展才拆成另一组。新英雄、新模式等可与
+   版本的修复/平衡批次分开，但“影响对象不同”或“改动规模较大”本身不构成独立生命周期。
+4. create 用于当前消息正在带来的新发展，不用于回填正文提及的所有历史事件。历史回顾、前序批次、引用
+   材料和背景说明即使描述了过去真实发生的变化，只要本消息没有更新其状态，就不得据此 create Event，
+   也不得按其中的日期、产品或条目拆分；可作为主要 Event 的 key_facts 或上下文。例如“本次发布 + 前次
+   发布回顾”只处理本次发布；若输出前次发布片段，action 必须是 ignore，不能 create/attach。
+5. 一条综合消息可以 attach 多个候选、create 其他 Event，并 ignore 非事件片段。
+6. 候选召回追求高 recall，可能包含无关 Event；不要因为候选存在或分数较高就强行 attach。
+7. preview、正式公告、后续更新、确认、否认和更正是否共享生命周期，由当前消息证据和候选上下文
    判断，不要依赖固定字段形状。
-7. repost 消息不能 create Event；只能 attach 到已有事件或 ignore。转载本身不是新事件。
-8. 对 game_leak/测试服版本物料消息，同一产品、同一 cosmetic_release 批次中的多个外观默认合并为一个
-   create/attach mention，把各个外观放进 key_facts；不要因为列出多个皮肤就创建多个 Event。只有证据显示
-   它们拥有独立生命周期、不同版本或不同发布活动时才拆分。
+8. repost 消息只能 attach 到已有事件或 ignore；程序会拒绝 repost 的 create 结果。转载本身不是新事件。
+9. 判断依据是现实生命周期，不是消息形态。补丁说明、更新公告、测试服爆料或综合报道都使用同一套归组规则；
+   不得根据 message_type、固定数量上限或标题关键词机械决定 Event 数量。
+10. attach 必须有当前消息与候选属于同一现实发展的正向证据，例如明确共享同一命名发布、版本/批次、
+    具体故障、核心主体或连续状态。仅仅 event_family、产品、笼统的“更新/修复”语义相同，或候选列表中只有
+    一个同 family Event，都不是 attach 依据。候选的核心主体、发布批次、日期或环境（如正式服与测试服）
+    不同时应 create/ignore；不得用 projection 把候选改名成另一件事来代替 create。
+
+典型边界（用于解释统一规则，不是关键词匹配）：
+- 当前不停机更新公告末尾附带“昨天/前次更新”的修复记录：只为当前更新 create/attach；前次记录即使跨产品
+  也只是回顾上下文，必须 ignore，不能回填 Event，更不能逐 BUG 建 Event。
+- 大版本公告同时包含一批英雄/装备平衡、新英雄、新模式和同批系列皮肤：平衡条目归入一个版本调整 Event；
+  新英雄和新模式若各有独立发布生命周期可分别成为 Event；同批系列皮肤只形成一个 cosmetic_release Event，
+  每款皮肤进入 key_facts，不能逐皮肤建 Event。
 
 event_family 语义边界：
 - gameplay_balance 是既有玩法/数值的调整；gameplay_release 是新英雄、模式、机制或玩法内容上线。
@@ -437,7 +458,9 @@ event_family 语义边界：
   canonical_anchors 仅是可选描述/召回特征，不需要完整，也不得虚构。
 - ignore 不引用 Event。
 - create/attach 的 evidence_excerpt 必须来自当前消息。
-- relation、source_role、materiality 描述当前 mention；非 material attach 不得提交 projection。
+- relation、source_role、materiality 描述当前 mention。只有 materiality=material_update 的 attach 才能
+  提交 projection；materiality=corroboration_only、duplicate 或 context_only 时 projection 必须为 null
+  或省略，不能同时输出任何标题、摘要、最新进展或 key facts 更新。
 - attach 的 projection 可选，只用于当前 Event 的展示标题、摘要、最新进展或 key facts；它不能改变
   membership 决定。create 的初始展示字段放在 new_event。
 - 展示字段使用简体中文。
@@ -830,10 +853,9 @@ event_family 语义边界：
                             "role": "user",
                             "content": (
                                 f"上一次输出未通过结构或业务校验：{last_error}。"
-                                "保留未被错误点名的合法 mentions，只修正对应片段。"
-                                "相同 identity 的 create 必须合并；create 必须是 material_update；"
-                                "缺少当前消息证据或完整 identity 的附属片段必须 ignore。"
-                                "同时逐项对照 JSON Schema，补齐 required 字段并修正常量和枚举值，"
+                                "保留未被错误点名的合法字段和内容，只修正对应片段。"
+                                "如果是业务校验失败，只修正该错误涉及的字段，不改变其他合法内容。"
+                                "同时逐项对照 JSON Schema，修复 JSON 结构、补齐 required 字段并修正常量和枚举值，"
                                 "然后重新输出完整 JSON。"
                                 "不要输出解释或 Markdown。"
                             ),

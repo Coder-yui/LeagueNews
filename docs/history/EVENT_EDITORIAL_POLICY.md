@@ -1,5 +1,9 @@
 # 事件编辑规则 v3
 
+> 历史政策：本文描述的是已退出运行时的确定性路由与稳定键方案。当前事件聚合规则见
+> [`../EVENT_AGGREGATION.md`](../EVENT_AGGREGATION.md)、[`../EVENT_AGGREGATION_V2.md`](../EVENT_AGGREGATION_V2.md)
+> 和 [`../EVENT_ADMISSION_AND_GRANULARITY.md`](../EVENT_ADMISSION_AND_GRANULARITY.md)。
+
 事件是一个可以被证据验证的现实状态变化，不是相似消息的文件夹。事件准入、重要性和
 可信度相互独立：低重要性的普通 LPL 常规赛结果仍可形成事件；低可信度的单源转会爆料
 也可立即形成未确认事件。

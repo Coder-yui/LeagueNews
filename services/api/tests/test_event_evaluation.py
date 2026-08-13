@@ -19,8 +19,8 @@ def test_real_data_fixture_is_well_formed_and_covers_required_error_types() -> N
     risks = {risk for case in fixture["cases"] for risk in case["risks"]}
 
     assert fixture["version"] == "event-aggregation-eval-v2"
-    assert len(fixture["cases"]) == 13
-    assert len(items) == len(set(item_ids)) == 26
+    assert len(fixture["cases"]) == 14
+    assert len(items) == len(set(item_ids)) == 27
     assert {
         "false_merge",
         "false_split",

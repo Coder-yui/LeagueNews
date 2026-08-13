@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.domain.event_families import product_supports_family
 from app.models.event import Event
 from app.models.normalized_item import NormalizedItem
+from app.services.event_semantics import semantic_projection
 
 
 RECALL_WINDOW_DAYS: Final = 365
@@ -63,12 +64,9 @@ def recall_event_candidates(
             .limit(500)
         )
     )
+    semantic_title, semantic_text = semantic_projection(item)
     message_tokens = _tokens(
-        " ".join(
-            value
-            for value in (item.normalized_title, item.summary, item.normalized_text[:4000])
-            if value
-        )
+        " ".join(value for value in (semantic_title, item.summary, semantic_text[:4000]) if value)
     )
     message_entities = _text_values(entity_hints or {})
     hinted_families = set(possible_families)

@@ -2,13 +2,15 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v4-semantic-membership`
+> Policy version: `event-aggregation-v6-lifecycle-cohesion`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
 
-The current architecture, migration rationale, schema, validation boundary, candidate recall and
-test/evaluation split are documented in [EVENT_AGGREGATION_V2_REFACTOR.md](EVENT_AGGREGATION_V2_REFACTOR.md).
+The current membership contract and validation boundary are documented in
+[EVENT_AGGREGATION_V2.md](EVENT_AGGREGATION_V2.md); filter and recall details are in
+[EVENT_ADMISSION_AND_GRANULARITY.md](EVENT_ADMISSION_AND_GRANULARITY.md). Refactor notes and
+real-data evaluation results are historical records under [`history/`](history/README.md).
 
 ## Runtime flow
 
@@ -41,6 +43,8 @@ metadata; they are not a parallel identity mechanism.
   or attach a family outside that routed space.
 - Create requires a minimal title and summary but no deterministic identity shape.
 - All membership writes for one model result commit atomically or roll back together.
+- `repost` cannot create an Event. This is a deterministic application invariant enforced by
+  `_validate_repost_actions()`; the model prompt repeats it as guidance, but is not the authority.
 - Source evidence, relation, source role, materiality and source reliability are preserved on
   `EventMention`.
 - Importance, credibility, heat, references and presentation are projections refreshed after

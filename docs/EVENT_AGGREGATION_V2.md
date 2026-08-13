@@ -24,6 +24,11 @@ evidence and optional presentation updates, but it does not output product/topic
 classification, deterministic event identities, market/week keys, match keys or numeric identity
 signatures.
 
+Before that decision, the model groups the whole message by independent real-world lifecycle. A
+shared release batch, version or series, launch window, status and follow-up path forms one group;
+its enumerated subitems remain `key_facts`. A separately named release with its own status and
+follow-up path may form another group. This same semantic rule applies to every message type.
+
 ## Cross-product messages
 
 `NormalizedItem.products` describes the products materially covered by the whole message. It is not
@@ -55,15 +60,17 @@ membership.
 
 Python verifies schema, contiguous mention indexes, candidate membership, routed family
 compatibility, evidence presence, idempotency, model-call audit, transaction atomicity and
-projection refresh. It does not verify event identity, patch/match/market/week signatures, or
-semantic equivalence of two messages.
+projection refresh. It does not impose message-type or event-family mention limits and does not
+verify event identity, patch/match/market/week signatures, or semantic equivalence of two messages.
 
 ## Removed duplicate NLP
 
-The event-layer identity and granularity modules were deleted. Their regexes and deterministic
+The retired event-identity parsers were deleted. Their regexes and deterministic
 parsers for weekly rotations, mythic-shop market/week, esports team pairs, relative dates, patch
 signatures and strong-anchor identity are not part of Event Aggregation. Remaining regexes belong
-to upstream Message Processing/OCR or generic token overlap and are not event identity rules.
+to upstream Message Processing/OCR or generic token overlap and are not event identity rules. The
+aggregation path does not use upstream hotfix signals or message-type branches to determine Event
+count or identity.
 
 ## Evaluation boundary
 

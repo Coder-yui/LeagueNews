@@ -44,7 +44,7 @@ class PromptRegistry:
         ),
         EVENT_AGGREGATION_OPERATION: (
             "event-aggregation",
-            "v1-multi-mention-single-call",
+            "v3-lifecycle-cohesion",
         ),
         "图片结构化": ("media-structure", "v1"),
     }

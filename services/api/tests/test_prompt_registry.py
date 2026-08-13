@@ -39,7 +39,7 @@ def test_production_prompt_registry_contract() -> None:
         schema_version="EventAggregationResult:v1",
     )
     assert events.name == "event-aggregation"
-    assert events.version == "v1-multi-mention-single-call"
+    assert events.version == "v3-lifecycle-cohesion"
 
 
 def test_unregistered_operations_require_explicit_experimental_opt_in() -> None:

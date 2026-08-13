@@ -1,6 +1,8 @@
 # LoL Daily Intel 开发 Handoff
 
 > 历史快照：本文包含已退出运行时的事件聚合、情报分发和旧环境说明，仅供追溯，不能作为当前操作指南。
+>
+> 当前入口：[`../../README.md`](../../README.md)。本文中的事件路由、稳定键、页面和迁移编号均可能已过时。
 
 更新时间：2026-08-07
 
@@ -60,11 +62,11 @@ Source 周期调度或手工触发
   并新增 revision。
 - 所有已经提交的 SQL 迁移都是历史账本，只能追加新迁移，不能改名、重写或删除。
 
-专题文档：
+历史版本专题文档：
 
-- [`CONNECTOR_ARCHITECTURE.md`](CONNECTOR_ARCHITECTURE.md)
-- [`RAW_ITEM_CONTENT_MODEL.md`](RAW_ITEM_CONTENT_MODEL.md)
-- [`REVIEWED_AI_WORKFLOW.md`](REVIEWED_AI_WORKFLOW.md)
+- [`../CONNECTOR_ARCHITECTURE.md`](../CONNECTOR_ARCHITECTURE.md)
+- [`../RAW_ITEM_CONTENT_MODEL.md`](../RAW_ITEM_CONTENT_MODEL.md)
+- [`../REVIEWED_AI_WORKFLOW.md`](../REVIEWED_AI_WORKFLOW.md)
 - [`EVENT_EDITORIAL_POLICY.md`](EVENT_EDITORIAL_POLICY.md)
 
 ## 3. 自动管线与人工兜底
@@ -141,7 +143,7 @@ Published NormalizedItem
 - 外部平台接口都可能因限流、风控或页面变化失效；不要绕过验证码或自动切换代理池。
 
 操作和排障见
-[`CONNECTOR_OPERATIONS_GUIDE.md`](CONNECTOR_OPERATIONS_GUIDE.md)。
+[`../CONNECTOR_OPERATIONS_GUIDE.md`](../CONNECTOR_OPERATIONS_GUIDE.md)。
 
 ## 6. 数据表职责
 
@@ -247,10 +249,10 @@ Basic Auth。仓库文档不记录真实主机 IP、项目标识、账号、Cook
 - Collection Scheduler
 - Caddy
 
-部署、备份、恢复和域名切换见：
+历史版本的部署、备份、恢复和域名切换记录见：
 
 - [`GOOGLE_CLOUD_FIRST_DEPLOY.md`](GOOGLE_CLOUD_FIRST_DEPLOY.md)
-- [`PRODUCTION_DEPLOYMENT.md`](PRODUCTION_DEPLOYMENT.md)
+- [`../PRODUCTION_DEPLOYMENT.md`](../PRODUCTION_DEPLOYMENT.md)
 
 ## 10. 当前生产风险与后续事项
 
@@ -284,7 +286,7 @@ pnpm lint:web
 pnpm build:web
 ```
 
-本地运行见 [`LOCAL_RUNBOOK.md`](LOCAL_RUNBOOK.md)。
+本地运行的当前手册见 [`../LOCAL_RUNBOOK.md`](../LOCAL_RUNBOOK.md)。
 
 完成开发后至少检查：
 

@@ -112,9 +112,9 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 | `event_aggregation_runs` | 准入、候选、调用次数、结构化决定和应用结果审计 |
 | `daily_reports` / `daily_report_items` | 日报当前投影与消息排序 |
 
-最新迁移为 `067_remove_runtime_compatibility_and_enforce_state.sql`。SQL migration 是生产数据库的
+最新迁移为 `068_add_event_products_index.sql`。SQL migration 是生产数据库的
 唯一结构来源：新数据库和历史数据库都执行同一条有序 migration 链，不再使用 ORM `create_all()`
-初始化生产结构。不得绕过追加迁移直接修改。全新 001→067 初始化与旧 031→067 顺序升级已在
+初始化生产结构。不得绕过追加迁移直接修改。全新 001→068 初始化与旧 031→068 顺序升级已在
 可销毁 PostgreSQL 17 上验证。
 
 ## 验证

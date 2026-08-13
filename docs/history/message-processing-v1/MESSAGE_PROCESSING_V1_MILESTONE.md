@@ -1,5 +1,8 @@
 # 消息处理 v1 里程碑
 
+> 历史里程碑：本文记录 2026-08-11 的阶段状态、Prompt 版本和验收快照，不是当前运行时契约。
+> 当前入口见 [`../../REVIEWED_AI_WORKFLOW.md`](../../REVIEWED_AI_WORKFLOW.md) 和 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)。
+
 - 状态：消息处理子层的稳定基线；整体当前架构见 `ARCHITECTURE.md`
 - 日期：2026-08-11
 - 分支：`codex/architecture-remediation-exploration`
@@ -37,7 +40,7 @@ RawItem 及其原始证据保持不可变。本里程碑建立时运行时不生
 | 翻译 Prompt | `translation / v4-optional-source-title` |
 | 内容分析 Schema | `MessageContentAnalysisResult:v2` |
 | 翻译 Schema | `TranslationResult:v2` |
-| 本里程碑数据库迁移头 | `062_update_message_taxonomy_v3` |
+| 本里程碑相关迁移头 | `062_update_message_taxonomy_v3`（当前数据库迁移链已继续至 068） |
 
 ## 已确认的处理边界
 
@@ -80,5 +83,5 @@ Local public feed and message detail visual QA: passed
 
 ## 后续演进规则
 
-此文档只记录消息处理 v1 子层，不替代当前架构或事件专项文档。分类、消息重要性或 Prompt 改动仍
-须同步代码、测试、迁移和对应专项文档；事件规则以 `EVENT_AGGREGATION.md` 及其子文档为准。
+此文档只记录消息处理 v1 子层的历史快照，不替代当前架构或事件专项文档。分类、消息重要性或
+Prompt 改动应以当前代码、测试和根目录专项文档为准；事件规则以根目录 Event 文档为准。

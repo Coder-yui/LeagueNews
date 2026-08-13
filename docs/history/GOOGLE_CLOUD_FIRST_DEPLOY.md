@@ -1,5 +1,8 @@
 # Google Cloud 第一次部署：无域名安全预发布
 
+> 历史部署记录：仅用于理解旧的无域名预发布方案。当前部署和迁移步骤以
+> [`../PRODUCTION_DEPLOYMENT.md`](../PRODUCTION_DEPLOYMENT.md) 与 [`../LOCAL_RUNBOOK.md`](../LOCAL_RUNBOOK.md) 为准。
+
 这份说明适用于当前配置：
 
 - Google Cloud Compute Engine

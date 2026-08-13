@@ -159,6 +159,20 @@
       ],
       "risks": ["false_merge", "missed_event"],
       "notes": "Balance and bugfix batches can have independent follow-up lifecycles even when announced together."
+    },
+    {
+      "case_id": "same-release-batch-multiple-skins",
+      "category": "cohesion",
+      "items": [
+        {
+          "normalized_item_id": 1901,
+          "expected": [
+            {"action": "create", "event_key": "riftbound-reckoning-legend-skin-batch", "event_family": "cosmetic_release"}
+          ]
+        }
+      ],
+      "risks": ["false_split", "unnecessary_create"],
+      "notes": "All named and unrevealed skins belong to one coordinated release batch; skin names are key facts, not one Event each."
     }
   ]
 }

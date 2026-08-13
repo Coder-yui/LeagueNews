@@ -30,6 +30,8 @@ def derive_event_space(item: NormalizedItem) -> EventSpace:
 
 
 def _has_semantic_text(item: NormalizedItem) -> bool:
+    if item.content_form in {"media_only", "link_only"}:
+        return False
     return any(
         isinstance(value, str) and bool(value.strip())
         for value in (

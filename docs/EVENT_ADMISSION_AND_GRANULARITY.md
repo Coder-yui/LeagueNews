@@ -1,6 +1,6 @@
 # Event Filtering, Recall, and Granularity
 
-> Policy version: `event-aggregation-v4-semantic-membership`
+> Policy version: `event-aggregation-v6-lifecycle-cohesion`
 
 ## Minimal filter
 
@@ -25,6 +25,13 @@ The model applies these principles:
 - an independently updating development with its own lifecycle may become a separate Event;
 - a roundup can emit multiple mentions without creating a generic roundup Event;
 - recall candidates may be wrong, so attach is never forced.
+
+Granularity is one semantic rule, independent of message type: first group the message by real-world
+lifecycle, then emit at most one mention per group. Items that share a release batch, version or
+series, launch window, status and follow-up path remain `key_facts` of one Event. This covers fixes,
+routine balance changes and a same-batch skin lineup without encoding those examples as Python
+policy. A separately named release with its own status and follow-up path may become another Event.
+Python validates structure and routing, not semantic identity or a message-type-specific count.
 
 Family-specific examples are evaluation data, not Python policy. See
 `services/api/evals/event_aggregation_v2_cases.json`.

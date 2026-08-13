@@ -383,6 +383,11 @@ def test_event_aggregation_contract_is_membership_centered() -> None:
     assert "attach、create 或 ignore" in prompt
     assert "Event 的最终身份是 event_id" in prompt
     assert "不需要完整" in prompt
+    assert "再按“独立生命周期”归组" in prompt
+    assert "同一批次发布的多款皮肤尤其不能逐皮肤建 Event" in prompt
+    assert "不得根据 message_type、固定数量上限" in prompt
+    assert "仅仅 event_family、产品" in prompt
+    assert "不得用 projection 把候选改名成另一件事" in prompt
     payload = json.loads(messages[1]["content"])
     assert set(payload) == {"possible_event_families", "message", "candidate_events"}
     assert "identity_contracts" not in payload
@@ -452,6 +457,35 @@ def test_event_aggregation_accepts_attach_create_and_ignore_together() -> None:
         "create",
         "ignore",
     ]
+
+
+def test_event_llm_client_retries_repost_create_before_workflow() -> None:
+    ignored = json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "action": "ignore",
+                    "relation": "mentions",
+                    "materiality": "context_only",
+                    "evidence_excerpt": "转发内容",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    client, completions = _client_with_responses([_membership_response(), ignored])
+
+    result = asyncio.run(
+        client.aggregate_events(
+            message={"title": "转发的消息", "content": "转发内容", "content_form": "repost"},
+            possible_event_families=["gameplay_balance"],
+            candidates=[],
+        )
+    )
+
+    assert len(completions.calls) == 2
+    assert result.mentions[0].action == "ignore"
 
 
 def test_event_aggregation_retries_invalid_structural_schema() -> None:
@@ -703,6 +737,9 @@ def test_translation_retries_when_structured_target_keeps_english_name() -> None
     )
     retry_messages = completions.calls[1]["messages"]
     assert "target 未翻译" in retry_messages[-1]["content"]
+    assert "identity" not in retry_messages[-1]["content"]
+    assert "create 必须合并" not in retry_messages[-1]["content"]
+    assert "必须 ignore" not in retry_messages[-1]["content"]
 
 
 def test_translation_allows_structured_change_lines_to_split() -> None:

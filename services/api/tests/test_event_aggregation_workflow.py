@@ -177,6 +177,41 @@ def test_minimal_filter_only_skips_unpublished_or_semantically_empty_items() -> 
         assert minimal_event_filter(leak).decision == "process"
 
 
+@pytest.mark.parametrize("content_form", ["media_only", "link_only"])
+def test_nonsemantic_content_forms_are_audited_without_event_model_call(
+    content_form: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name=f"{content_form}-filter")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id=content_form,
+            title="仅媒体消息" if content_form == "media_only" else "仅链接消息",
+            content_form=content_form,
+        )
+        db.commit()
+        client = StaticClient(_result())
+        monkeypatch.setattr(
+            "app.workflows.event_aggregation.recall_event_candidates",
+            lambda *args, **kwargs: pytest.fail("nonsemantic content entered candidate recall"),
+        )
+
+        run = _aggregate(db, item, client)
+
+        assert run.status == "completed"
+        assert run.outcome == "skipped_by_minimal_filter"
+        assert run.admission_decision == "skip"
+        assert run.model_call_count == 0
+        assert run.candidate_snapshot == []
+        assert client.calls == 0
+        assert db.scalar(select(func.count(Event.id))) == 0
+
+
 def test_event_space_routes_real_products_and_topics() -> None:
     engine = _engine()
     with Session(engine) as db:
@@ -589,6 +624,34 @@ def test_manual_retry_accumulates_model_call_audit() -> None:
         assert db.scalar(select(func.count(Event.id))) == 1
 
 
+def test_running_event_aggregation_run_cannot_be_reused_for_another_model_call() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="running")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="running", title="正在聚合的消息")
+        existing_run = EventAggregationRun(
+            normalized_item_id=item.id,
+            normalized_item_revision=item.current_revision,
+            status="running",
+            current_stage="model_decision",
+            idempotency_key=f"{item.id}:{item.current_revision}:event-aggregation-v6-lifecycle-cohesion",
+        )
+        db.add(existing_run)
+        db.commit()
+        client = StaticClient(_result(_create_decision()))
+
+        returned = _aggregate(db, item, client)
+
+        assert client.calls == 0
+        assert returned.id == existing_run.id
+        run = db.scalar(select(EventAggregationRun))
+        assert run is not None
+        assert run.status == "running"
+        assert db.scalar(select(func.count(Event.id))) == 0
+
+
 def test_cross_product_mentions_isolate_event_products() -> None:
     engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
@@ -782,3 +845,43 @@ def test_candidate_recall_is_generic_high_recall_and_bounded() -> None:
         assert all(candidate["event_family"] == "gameplay_balance" for candidate in candidates)
         assert all("identity_key" not in candidate for candidate in candidates)
         assert all("recall_reasons" in candidate for candidate in candidates)
+
+
+def test_candidate_recall_uses_translated_semantic_projection() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="translated-recall")
+        db.add(source)
+        db.flush()
+        now = datetime(2026, 8, 12, 8, tzinfo=UTC)
+        event = Event(
+            title="26.17 版本平衡调整",
+            current_summary="官方公布了 26.17 版本的平衡调整。",
+            event_family="gameplay_balance",
+            products=["lol_pc"],
+            canonical_anchors={},
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+        db.add(event)
+        item = _item(
+            db,
+            source=source,
+            external_id="translated-recall",
+            title="26.17 balance changes",
+            text="The 26.17 balance changes are now available.",
+            published_at=now,
+        )
+        item.translated_title = "26.17 版本平衡调整"
+        item.translated_text = "26.17 版本平衡调整已经公布。"
+        item.summary = ""
+        db.commit()
+
+        candidates = recall_event_candidates(
+            db,
+            item=item,
+            possible_families=["gameplay_balance"],
+        )
+
+        assert [candidate["event_id"] for candidate in candidates] == [event.id]
+        assert "text_overlap" in candidates[0]["recall_reasons"]

@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -14,6 +14,7 @@ from app.domain.event_families import EventSpace, product_supports_family
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun
 from app.models.normalized_item import NormalizedItem
+from app.repositories.events import event_ids_for_normalized_item
 from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
 from app.services.event_candidates import recall_event_candidates
 from app.services.event_semantics import semantic_projection
@@ -26,6 +27,9 @@ from app.services.llm import (
     execution_metadata,
 )
 from app.services.raw_item_versions import is_latest_raw_item
+
+
+STALE_RUNNING_RUN_AFTER = timedelta(seconds=settings.pipeline_worker_lease_seconds)
 
 
 def _run_key(item: NormalizedItem) -> str:
@@ -186,6 +190,52 @@ def _record_for_item(db: Session, item: NormalizedItem) -> EventAggregationRun |
     )
 
 
+def _is_stale_running_run(
+    run: EventAggregationRun, *, as_of: datetime | None = None
+) -> bool:
+    last_activity = run.updated_at or run.created_at
+    if last_activity is None:
+        return False
+    normalized = (
+        last_activity.replace(tzinfo=UTC)
+        if last_activity.tzinfo is None
+        else last_activity.astimezone(UTC)
+    )
+    reference = as_of or datetime.now(UTC)
+    return reference - normalized >= STALE_RUNNING_RUN_AFTER
+
+
+def _reclaim_stale_run(run: EventAggregationRun) -> None:
+    recovered_at = datetime.now(UTC)
+    draft = dict(run.decision_draft or {})
+    draft["recovery"] = {
+        "type": "stale_running_run_reclaimed",
+        "recovered_at": recovered_at.isoformat(),
+        "previous_stage": run.current_stage,
+        "previous_updated_at": (
+            run.updated_at.isoformat() if run.updated_at is not None else None
+        ),
+    }
+    run.decision_draft = draft
+    run.status = "running"
+    run.outcome = None
+    run.error_message = None
+    run.completed_at = None
+    run.applied_at = None
+
+
+def _decision_from_draft(run: EventAggregationRun) -> EventAggregationResult | None:
+    if run.current_stage != "apply_membership":
+        return None
+    draft = run.decision_draft or {}
+    if "mentions" not in draft:
+        return None
+    try:
+        return EventAggregationResult.model_validate({"mentions": draft["mentions"]})
+    except ValueError:
+        return None
+
+
 def _complete_without_call(
     db: Session,
     run: EventAggregationRun,
@@ -323,6 +373,7 @@ def apply_membership_transaction(
     item: NormalizedItem,
     result: EventAggregationResult,
     candidates: list[dict[str, Any]],
+    additional_event_ids: set[int] | None = None,
 ) -> tuple[int, set[int]]:
     """Apply already-decided membership. The caller owns the surrounding transaction."""
 
@@ -400,7 +451,7 @@ def apply_membership_transaction(
         affected_event_ids.add(event.id)
         applied_count += 1
 
-    refresh_event_metrics(db, affected_event_ids)
+    refresh_event_metrics(db, affected_event_ids | (additional_event_ids or set()))
     return applied_count, affected_event_ids
 
 
@@ -417,8 +468,12 @@ async def aggregate_normalized_item(
     if run is not None and run.status == "completed":
         return run
     if run is not None and run.status == "running":
-        return run
+        if not _is_stale_running_run(run):
+            return run
+        _reclaim_stale_run(run)
+    reuse_draft = _decision_from_draft(run) if run is not None else None
     previous_model_call_count = run.model_call_count if run is not None else 0
+    historical_event_ids = event_ids_for_normalized_item(db, item.id)
     if run is None:
         run = EventAggregationRun(
             normalized_item_id=item.id,
@@ -435,6 +490,7 @@ async def aggregate_normalized_item(
         run.error_message = None
         run.completed_at = None
     try:
+        refresh_event_metrics(db, historical_event_ids)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -456,54 +512,61 @@ async def aggregate_normalized_item(
         item=item,
         possible_families=admission.event_space.possible_families,
         entity_hints=admission.entity_hints,
-    )
+    ) if reuse_draft is None else list(run.candidate_snapshot or [])
     run.candidate_snapshot = candidates
     message, truncation = _message_payload(item)
-    run.current_stage = "model_decision"
-    run.input_fingerprint = _fingerprint(
-        {
-            "message": message,
-            "products": admission.event_space.products,
-            "possible_event_families": admission.event_space.possible_families,
-            "candidates": candidates,
-        }
-    )
-    db.commit()
 
-    client = llm_client or LLMClient()
-    try:
-        result = await client.aggregate_events(
-            message=message,
-            possible_event_families=list(admission.event_space.possible_families),
-            candidates=candidates,
+    result = reuse_draft
+    if result is None:
+        run.current_stage = "model_decision"
+        run.input_fingerprint = _fingerprint(
+            {
+                "message": message,
+                "products": admission.event_space.products,
+                "possible_event_families": admission.event_space.possible_families,
+                "candidates": candidates,
+            }
         )
-        result, suppressed_mentions = _suppress_out_of_space_mentions(
-            result, admission.event_space
-        )
-        metadata = execution_metadata(result)
-        run.model_call_count = previous_model_call_count + int(metadata.get("retry_count") or 0) + 1
-        run.decision_draft = {
-            **result.model_dump(mode="json"),
-            "suppressed_mentions": suppressed_mentions,
-            "input_truncation": truncation,
-            "execution_metadata": metadata,
-        }
-        run.current_stage = "apply_membership"
         db.commit()
-    except (LLMConfigurationError, LLMAnalysisError) as exc:
-        db.rollback()
-        failed = db.get(EventAggregationRun, run.id)
-        if failed is None:
+
+        client = llm_client or LLMClient()
+        try:
+            result = await client.aggregate_events(
+                message=message,
+                possible_event_families=list(admission.event_space.possible_families),
+                candidates=candidates,
+            )
+            result, suppressed_mentions = _suppress_out_of_space_mentions(
+                result, admission.event_space
+            )
+            metadata = execution_metadata(result)
+            run.model_call_count = previous_model_call_count + int(metadata.get("retry_count") or 0) + 1
+            recovery = (run.decision_draft or {}).get("recovery")
+            run.decision_draft = {
+                **result.model_dump(mode="json"),
+                "suppressed_mentions": suppressed_mentions,
+                "input_truncation": truncation,
+                "execution_metadata": metadata,
+                **({"recovery": recovery} if recovery else {}),
+            }
+            run.current_stage = "apply_membership"
+            db.commit()
+        except (LLMConfigurationError, LLMAnalysisError) as exc:
+            db.rollback()
+            failed = db.get(EventAggregationRun, run.id)
+            if failed is None:
+                raise
+            failed.status = "failed"
+            failed.outcome = "model_error"
+            failed.model_call_count = previous_model_call_count + (
+                0 if isinstance(exc, LLMConfigurationError) else settings.llm_max_retries + 1
+            )
+            failed.error_message = str(exc)
+            failed.completed_at = datetime.now(UTC)
+            db.commit()
             raise
-        failed.status = "failed"
-        failed.outcome = "model_error"
-        failed.model_call_count = previous_model_call_count + (
-            0 if isinstance(exc, LLMConfigurationError) else settings.llm_max_retries + 1
-        )
-        failed.error_message = str(exc)
-        failed.completed_at = datetime.now(UTC)
-        db.commit()
-        raise
+    else:
+        run.current_stage = "apply_membership"
 
     try:
         applied_count, _affected_event_ids = apply_membership_transaction(
@@ -511,6 +574,7 @@ async def aggregate_normalized_item(
             item=item,
             result=result,
             candidates=candidates,
+            additional_event_ids=historical_event_ids,
         )
         run.status = "completed"
         run.outcome = "applied" if applied_count else "ignored"

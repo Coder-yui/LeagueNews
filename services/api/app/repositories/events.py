@@ -38,11 +38,32 @@ def find_mention(
     )
 
 
+def current_event_mention_conditions():
+    """Return the SQL predicates for the current public Event projection."""
+    return (
+        NormalizedItem.publication_status == "published",
+        EventMention.normalized_item_revision == NormalizedItem.current_revision,
+    )
+
+
+def event_ids_for_normalized_item(db: Session, normalized_item_id: int) -> set[int]:
+    return set(
+        db.scalars(
+            select(EventMention.event_id).where(
+                EventMention.normalized_item_id == normalized_item_id
+            )
+        )
+    )
+
+
 def count_active_messages(db: Session, event_id: int) -> int:
     return int(
         db.scalar(
-            select(func.count(func.distinct(EventMention.normalized_item_id))).where(
+            select(func.count(func.distinct(EventMention.normalized_item_id)))
+            .join(EventMention.normalized_item)
+            .where(
                 EventMention.event_id == event_id,
+                *current_event_mention_conditions(),
             )
         )
         or 0

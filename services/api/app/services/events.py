@@ -54,6 +54,38 @@ def _earlier(left: datetime | None, right: datetime) -> datetime:
     return min(normalized, right)
 
 
+def _projection_snapshot(event: Event) -> dict[str, Any]:
+    """Keep enough material-update state to restore a projection after revision invalidation."""
+    return {
+        "title": event.title,
+        "current_summary": event.current_summary,
+        "latest_development": event.latest_development,
+        "key_facts": list(event.key_facts or []),
+        "lifecycle_status": event.lifecycle_status,
+        "canonical_anchors": dict(event.canonical_anchors or {}),
+    }
+
+
+def _revision_evidence_snapshot(
+    event: Event,
+    *,
+    item: NormalizedItem,
+    mention_index: int,
+    relation: str,
+    materiality: str,
+    aggregation_policy_version: str,
+) -> dict[str, Any]:
+    return {
+        "normalized_item_id": item.id,
+        "normalized_item_revision": item.current_revision,
+        "mention_index": mention_index,
+        "relation": relation,
+        "materiality": materiality,
+        "aggregation_policy_version": aggregation_policy_version,
+        "projection_snapshot": _projection_snapshot(event),
+    }
+
+
 def _validate_mention_values(
     *,
     mention_index: int,
@@ -214,12 +246,14 @@ def create_event(
                     title=event.title,
                     summary=event.current_summary,
                     change_note="创建事件",
-                    evidence_snapshot={
-                        "normalized_item_id": item.id,
-                        "mention_index": mention_index,
-                        "relation": relation,
-                        "materiality": materiality,
-                    },
+                    evidence_snapshot=_revision_evidence_snapshot(
+                        event,
+                        item=item,
+                        mention_index=mention_index,
+                        relation=relation,
+                        materiality=materiality,
+                        aggregation_policy_version=aggregation_policy_version,
+                    ),
                 )
             )
         if commit:
@@ -351,12 +385,14 @@ def add_event_mention(
                     title=event.title,
                     summary=event.current_summary,
                     change_note=latest_development or "事件实质更新",
-                    evidence_snapshot={
-                        "normalized_item_id": item.id,
-                        "mention_index": mention_index,
-                        "relation": relation,
-                        "materiality": materiality,
-                    },
+                    evidence_snapshot=_revision_evidence_snapshot(
+                        event,
+                        item=item,
+                        mention_index=mention_index,
+                        relation=relation,
+                        materiality=materiality,
+                        aggregation_policy_version=aggregation_policy_version,
+                    ),
                 )
             )
         if commit:

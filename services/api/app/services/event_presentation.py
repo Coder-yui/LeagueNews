@@ -9,6 +9,7 @@ from app.domain.event_categories import event_category
 from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
+from app.repositories.events import current_event_mention_conditions
 
 
 def _source_payload(item: NormalizedItem | None) -> dict[str, Any] | None:
@@ -47,7 +48,12 @@ def event_reference_items(
         return {}
     items = db.scalars(
         select(NormalizedItem)
-        .where(NormalizedItem.id.in_(message_ids))
+        .join(EventMention, EventMention.normalized_item_id == NormalizedItem.id)
+        .where(
+            EventMention.event_id.in_([event.id for event in events]),
+            NormalizedItem.id.in_(message_ids),
+            *current_event_mention_conditions(),
+        )
         .options(
             selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
             selectinload(NormalizedItem.raw_item).selectinload(RawItem.media_assets),
@@ -63,7 +69,7 @@ def _event_message_counts(db: Session, event_id: int) -> tuple[int, int]:
         .join(RawItem, RawItem.id == NormalizedItem.raw_item_id)
         .where(
             EventMention.event_id == event_id,
-            NormalizedItem.publication_status == "published",
+            *current_event_mention_conditions(),
         )
     )
     message_ids: set[int] = set()
@@ -89,7 +95,7 @@ def event_message_counts(
         .join(RawItem, RawItem.id == NormalizedItem.raw_item_id)
         .where(
             EventMention.event_id.in_(event_ids),
-            NormalizedItem.publication_status == "published",
+            *current_event_mention_conditions(),
         )
         .group_by(EventMention.event_id)
     )
@@ -111,16 +117,9 @@ def event_card_payload(
     primary_item = references.get(event.primary_source_message_id or 0)
     media_item = references.get(event.best_media_message_id or 0)
     if reference_items is None:
-        primary_item = (
-            db.get(NormalizedItem, event.primary_source_message_id)
-            if event.primary_source_message_id is not None
-            else None
-        )
-        media_item = (
-            db.get(NormalizedItem, event.best_media_message_id)
-            if event.best_media_message_id is not None
-            else None
-        )
+        references = event_reference_items(db, [event])
+        primary_item = references.get(event.primary_source_message_id or 0)
+        media_item = references.get(event.best_media_message_id or 0)
     return {
         "id": event.id,
         "title": event.title,
@@ -161,7 +160,7 @@ def event_detail_payload(db: Session, event: Event) -> dict[str, Any]:
             )
             .where(
                 EventMention.event_id == event.id,
-                NormalizedItem.publication_status == "published",
+                *current_event_mention_conditions(),
             )
             .order_by(EventMention.source_published_at, EventMention.added_at, EventMention.id)
         )

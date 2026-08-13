@@ -162,6 +162,16 @@ export type DailyReport = {
   updated_at: string;
 };
 
+export type DailyReportSummary = {
+  id: number;
+  report_date: string;
+  status: "published" | "withdrawn";
+  item_count: number;
+  section_counts: Record<"lolpc" | "esports" | "tft" | "other", number>;
+  created_at: string;
+  updated_at: string;
+};
+
 export type EventSource = {
   message_id: number;
   source_id: number;

@@ -63,6 +63,8 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 - 自动与人工路径共享提案、Schema/业务校验和 checkpoint。
 - SQL 迁移是追加式历史，不能修改已有编号文件。
 - Event 列表和详情 GET 只读取已持久化投影；过滤、排序、分页和聚合计数在 SQL 中完成。
+- EventMention 的当前投影必须同时满足已发布且 revision 等于 NormalizedItem.current_revision；旧
+  revision 只保留为审计证据，不进入当前事件指标、引用、详情或日报去重。
 - Event 热度衰减由 Pipeline Worker 定期刷新，HTTP 请求不承担后台状态更新。
 
 ## 页面与 API
@@ -72,7 +74,7 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 /messages/{id}            消息详情
 /events                   事件列表
 /events/{id}              事件详情
-/reports/{date}           日报
+/daily?date=YYYY-MM-DD    日报
 /admin                    管理台
 /admin/messages           消息列表
 /admin/messages/{id}      消息详情与原文

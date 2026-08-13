@@ -59,3 +59,12 @@ def test_invalid_collection_lease_configuration_fails_at_startup() -> None:
 def test_invalid_event_metrics_refresh_configuration_fails_at_startup() -> None:
     with pytest.raises(ValidationError):
         Settings(event_metrics_refresh_seconds=0)
+
+
+def test_invalid_daily_report_scheduler_configuration_fails_at_startup() -> None:
+    for hour, poll_seconds in ((-1, 30), (24, 30), (12, 0)):
+        with pytest.raises(ValidationError):
+            Settings(
+                daily_report_generation_hour=hour,
+                daily_report_scheduler_poll_seconds=poll_seconds,
+            )

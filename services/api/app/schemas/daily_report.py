@@ -15,3 +15,13 @@ class DailyReportRead(BaseModel):
     sections: dict[DailyReportSection, list[PublishedItemRead]]
     created_at: datetime
     updated_at: datetime
+
+
+class DailyReportSummaryRead(BaseModel):
+    id: int
+    report_date: date
+    status: str
+    item_count: int
+    section_counts: dict[DailyReportSection, int]
+    created_at: datetime
+    updated_at: datetime

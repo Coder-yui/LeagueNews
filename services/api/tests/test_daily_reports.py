@@ -1,10 +1,17 @@
 from datetime import UTC, date, datetime
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
-from app.api.routes.daily_reports import get_daily_report
+from app.api.routes.daily_reports import (
+    create_daily_report,
+    get_daily_report,
+    list_daily_reports,
+    withdraw_daily_report,
+)
 from app.core.database import Base
 from app.models.daily_report import DailyReport, DailyReportItem
 from app.models.event import Event, EventMention
@@ -188,3 +195,55 @@ def test_daily_report_generation_is_replaceable_for_the_same_date() -> None:
         assert len(first_items) == 1
         assert [message["id"] for message in payload["sections"]["lolpc"]] == [item.id]
         assert db.scalar(select(DailyReportItem).where(DailyReportItem.report_id == first_id)).normalized_item_id == item.id
+
+
+def test_daily_report_can_be_withdrawn_and_manually_regenerated() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Withdrawable report source")
+        db.add(source)
+        db.flush()
+        raw = RawItem(
+            source_id=source.id,
+            external_id="withdrawable-report",
+            native_title="可退回日报消息",
+            content_blocks=[{"type": "paragraph", "text": "可退回日报消息"}],
+            published_at=datetime(2026, 8, 13, 1, 0, tzinfo=UTC),
+        )
+        db.add(raw)
+        db.flush()
+        db.add(
+            NormalizedItem(
+                raw_item_id=raw.id,
+                normalized_title="可退回日报消息",
+                normalized_text="可退回日报消息",
+                summary="摘要",
+                products=["lol_pc"],
+                message_type="game_announcement",
+                topics=["gameplay"],
+                content_form="original",
+                importance_score=0.8,
+                analysis_model="test",
+                translation_status="not_required",
+            )
+        )
+        db.commit()
+
+        created = create_daily_report(date(2026, 8, 13), db)
+        withdrawn = withdraw_daily_report(date(2026, 8, 13), db)
+
+        assert created["status"] == "published"
+        assert withdrawn["status"] == "withdrawn"
+        with pytest.raises(HTTPException) as error:
+            get_daily_report(date(2026, 8, 13), db)
+        assert error.value.status_code == 404
+        summaries = list_daily_reports(db)
+        assert summaries[0]["item_count"] == 1
+        assert summaries[0]["section_counts"]["lolpc"] == 1
+
+        regenerated = create_daily_report(date(2026, 8, 13), db)
+
+        assert regenerated["id"] == created["id"]
+        assert regenerated["status"] == "published"
+        assert get_daily_report(date(2026, 8, 13), db)["status"] == "published"

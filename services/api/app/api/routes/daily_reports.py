@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,7 +9,7 @@ from app.api.routes.normalized_items import _published_payload, _published_state
 from app.core.database import get_db
 from app.models.daily_report import DailyReport
 from app.models.normalized_item import NormalizedItem
-from app.schemas.daily_report import DailyReportRead
+from app.schemas.daily_report import DailyReportRead, DailyReportSummaryRead
 from app.services.raw_item_versions import latest_normalized_item_condition
 from app.services.daily_reports import generate_daily_report
 
@@ -57,9 +57,38 @@ def _load_report(db: Session, report_date: date) -> DailyReport:
     return report
 
 
+def _daily_report_summary(report: DailyReport) -> dict[str, Any]:
+    section_counts = {"lolpc": 0, "esports": 0, "tft": 0, "other": 0}
+    for item in report.items:
+        section_counts[item.section] += 1
+    return {
+        "id": report.id,
+        "report_date": report.report_date,
+        "status": report.status,
+        "item_count": len(report.items),
+        "section_counts": section_counts,
+        "created_at": report.created_at,
+        "updated_at": report.updated_at,
+    }
+
+
+@router.get("/daily", response_model=list[DailyReportSummaryRead])
+def list_daily_reports(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    reports = db.scalars(
+        select(DailyReport)
+        .options(selectinload(DailyReport.items))
+        .order_by(DailyReport.report_date.desc())
+        .limit(90)
+    )
+    return [_daily_report_summary(report) for report in reports]
+
+
 @router.get("/daily/{report_date}", response_model=DailyReportRead)
 def get_daily_report(report_date: date, db: Session = Depends(get_db)) -> dict[str, Any]:
-    return _daily_report_payload(db, _load_report(db, report_date))
+    report = _load_report(db, report_date)
+    if report.status != "published":
+        raise HTTPException(status_code=404, detail="daily report not published")
+    return _daily_report_payload(db, report)
 
 
 @router.post("/daily/{report_date}/generate", response_model=DailyReportRead)
@@ -67,3 +96,16 @@ def create_daily_report(report_date: date, db: Session = Depends(get_db)) -> dic
     generate_daily_report(db, report_date)
     db.commit()
     return _daily_report_payload(db, _load_report(db, report_date))
+
+
+@router.post("/daily/{report_date}/withdraw", response_model=DailyReportSummaryRead)
+def withdraw_daily_report(
+    report_date: date,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    report = _load_report(db, report_date)
+    report.status = "withdrawn"
+    report.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(report)
+    return _daily_report_summary(report)

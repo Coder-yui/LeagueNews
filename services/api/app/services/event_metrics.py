@@ -11,9 +11,10 @@ from app.domain.event_types import (
     HEAT_POLICY_VERSION,
     IMPORTANCE_POLICY_VERSION,
 )
-from app.models.event import Event, EventMention
+from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
+from app.repositories.events import current_event_mention_conditions
 
 
 _SOURCE_ROLE_RANK = {
@@ -60,7 +61,85 @@ def refresh_event_importance(event: Event, mentions: list[EventMention]) -> None
     event.importance_policy_version = IMPORTANCE_POLICY_VERSION
 
 
+def _restore_event_projection(
+    db: Session, event: Event, mentions: list[EventMention]
+) -> None:
+    """Restore material-update fields from the newest still-valid revision snapshot."""
+    material_mentions = [
+        mention for mention in mentions if mention.materiality == "material_update"
+    ]
+    snapshots: list[tuple[int, dict[str, object]]] = []
+    if material_mentions:
+        valid_keys = {
+            (
+                mention.normalized_item_id,
+                mention.normalized_item_revision,
+                mention.mention_index,
+                mention.aggregation_policy_version,
+            )
+            for mention in material_mentions
+        }
+        revisions = db.scalars(
+            select(EventRevision)
+            .where(EventRevision.event_id == event.id)
+            .order_by(EventRevision.revision)
+        )
+        for revision in revisions:
+            evidence = revision.evidence_snapshot or {}
+            key = (
+                evidence.get("normalized_item_id"),
+                evidence.get("normalized_item_revision"),
+                evidence.get("mention_index"),
+                evidence.get("aggregation_policy_version"),
+            )
+            snapshot = evidence.get("projection_snapshot")
+            if key in valid_keys and isinstance(snapshot, dict):
+                snapshots.append((revision.revision, snapshot))
+
+    if snapshots:
+        _revision, snapshot = max(snapshots, key=lambda value: value[0])
+        event.title = str(snapshot.get("title") or event.title)
+        event.current_summary = str(
+            snapshot.get("current_summary") or event.current_summary
+        )
+        event.latest_development = str(
+            snapshot.get("latest_development") or ""
+        )
+        key_facts = snapshot.get("key_facts")
+        if isinstance(key_facts, list):
+            event.key_facts = key_facts
+        canonical_anchors = snapshot.get("canonical_anchors")
+        if isinstance(canonical_anchors, dict):
+            event.canonical_anchors = canonical_anchors
+        lifecycle_status = snapshot.get("lifecycle_status")
+        event.lifecycle_status = (
+            str(lifecycle_status) if lifecycle_status else "developing"
+        )
+    else:
+        # Legacy revisions do not have a projection snapshot. Keep their stable
+        # label, but never let an old lifecycle status survive evidence removal.
+        event.lifecycle_status = "developing" if material_mentions else "stale"
+
+
+def _refresh_event_times(event: Event, mentions: list[EventMention]) -> None:
+    if not mentions:
+        event.first_seen_at = None
+        event.last_seen_at = None
+        event.last_material_update_at = None
+        return
+    event.first_seen_at = min(_mention_time(mention) for mention in mentions)
+    event.last_seen_at = max(_mention_time(mention) for mention in mentions)
+    material = [mention for mention in mentions if mention.materiality == "material_update"]
+    event.last_material_update_at = (
+        max(_mention_time(mention) for mention in material) if material else None
+    )
+
+
 def _refresh_references(event: Event, mentions: list[EventMention]) -> None:
+    event.origin_message_id = None
+    event.latest_update_message_id = None
+    event.primary_source_message_id = None
+    event.best_media_message_id = None
     material = [value for value in mentions if value.materiality == "material_update"]
     if material:
         event.origin_message_id = min(
@@ -125,10 +204,12 @@ def refresh_event_metrics(
                 )
                 .where(
                     EventMention.event_id == event_id,
-                    NormalizedItem.publication_status == "published",
+                    *current_event_mention_conditions(),
                 )
             )
         )
+        _restore_event_projection(db, event, mentions)
+        _refresh_event_times(event, mentions)
         refresh_event_importance(event, mentions)
         credibility_evidence = [
             CredibilityEvidence(
@@ -159,6 +240,8 @@ def refresh_event_metrics(
             event.lifecycle_status = "denied"
         elif level == "disputed":
             event.lifecycle_status = "disputed"
+        elif event.lifecycle_status in {"confirmed", "denied", "disputed"}:
+            event.lifecycle_status = "developing"
 
         heat_evidence = [
             HeatEvidence(

@@ -18,7 +18,10 @@ from app.services.event_candidates import recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import create_event
 from app.services.llm import LLMAnalysisError
-from app.workflows.event_aggregation import aggregate_normalized_item
+from app.workflows.event_aggregation import (
+    STALE_RUNNING_RUN_AFTER,
+    aggregate_normalized_item,
+)
 
 
 def _engine():
@@ -650,6 +653,57 @@ def test_running_event_aggregation_run_cannot_be_reused_for_another_model_call()
         assert run is not None
         assert run.status == "running"
         assert db.scalar(select(func.count(Event.id))) == 0
+
+
+def test_stale_running_run_reuses_persisted_decision_without_duplicate_membership() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="stale recovery")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="stale", title="可恢复的公告")
+        db.commit()
+        existing, created = create_event(
+            db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="gameplay_balance",
+            products=["lol_pc"],
+            canonical_anchors={"patch_version": "26.17"},
+            title="可恢复的公告",
+            current_summary="已经存在的事件。",
+        )
+        assert created is True
+        db.commit()
+        run = EventAggregationRun(
+            normalized_item_id=item.id,
+            normalized_item_revision=item.current_revision,
+            status="running",
+            current_stage="apply_membership",
+            aggregation_policy_version="event-aggregation-v6-lifecycle-cohesion",
+            idempotency_key=(
+                f"{item.id}:{item.current_revision}:event-aggregation-v6-lifecycle-cohesion"
+            ),
+            model_call_count=1,
+            candidate_snapshot=[],
+            decision_draft={"mentions": [_create_decision()]},
+            updated_at=datetime.now(UTC) - STALE_RUNNING_RUN_AFTER - timedelta(minutes=1),
+        )
+        db.add(run)
+        db.commit()
+        client = StaticClient(_result(_create_decision()))
+
+        recovered = _aggregate(db, item, client)
+
+        assert recovered.status == "completed"
+        assert recovered.outcome == "applied"
+        assert recovered.model_call_count == 1
+        assert client.calls == 0
+        assert recovered.decision_draft["recovery"]["type"] == (
+            "stale_running_run_reclaimed"
+        )
+        assert db.scalar(select(func.count(Event.id))) == 1
+        assert db.scalar(select(func.count(EventMention.id))) == 1
 
 
 def test_cross_product_mentions_isolate_event_products() -> None:

@@ -176,6 +176,83 @@ def test_event_list_and_detail_present_current_projection_and_material_timeline(
         assert {evidence.message_revision for evidence in detail.evidence} == {1}
 
 
+def test_superseded_normalized_item_revision_is_removed_from_current_event_projection() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Revision projection source", reliability_score=0.8)
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="revision-projection", title="版本一")
+        db.commit()
+
+        old_event, _ = create_event(
+            db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="gameplay_balance",
+            products=["lol_pc"],
+            canonical_anchors={"patch_version": "26.17"},
+            title="事件 A",
+            current_summary="事件 A 的旧摘要。",
+            evidence_excerpt="版本一",
+        )
+        item.current_revision = 2
+        item.normalized_title = "版本二"
+        item.summary = "版本二摘要"
+        item.translated_title = "版本二"
+        db.commit()
+        new_event, _ = create_event(
+            db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="gameplay_balance",
+            products=["lol_pc"],
+            canonical_anchors={"patch_version": "26.17"},
+            title="事件 B",
+            current_summary="事件 B 的当前摘要。",
+            evidence_excerpt="版本二",
+        )
+        refresh_event_metrics(db, {old_event.id, new_event.id})
+        db.commit()
+
+        page = EventPageRead.model_validate(
+            list_events(
+                product="lol_pc",
+                event_family=None,
+                lifecycle=None,
+                credibility_level=None,
+                importance_level=None,
+                heat_level=None,
+                search=None,
+                sort_by="latest",
+                sort="desc",
+                limit=25,
+                offset=0,
+                db=db,
+            )
+        )
+        old_detail = EventDetailRead.model_validate(get_event(old_event.id, db))
+        new_detail = EventDetailRead.model_validate(get_event(new_event.id, db))
+
+        assert page.total == 1
+        assert [event.id for event in page.items] == [new_event.id]
+        assert old_detail.lifecycle_status == "stale"
+        assert old_detail.message_count == 0
+        assert old_detail.evidence == []
+        assert old_detail.timeline == []
+        assert old_detail.references == {
+            "origin_message_id": None,
+            "primary_source_message_id": None,
+            "latest_update_message_id": None,
+            "best_media_message_id": None,
+        }
+        assert new_detail.title == "事件 B"
+        assert new_detail.message_count == 1
+        assert len(new_detail.evidence) == 1
+        assert new_detail.evidence[0].message_revision == 2
+
+
 def test_event_api_category_filter_is_server_side_and_counts_distinct_messages() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

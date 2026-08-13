@@ -59,7 +59,7 @@ export async function getPublishedItem(id: number): Promise<PublishedItem | null
 
 export async function getDailyReport(reportDate: string): Promise<DailyReport | null> {
   const response = await fetch(`${apiUrl}/reports/daily/${reportDate}`, {
-    next: { revalidate: 30 },
+    cache: "no-store",
   });
   if (response.status === 404) return null;
   return requireJson<DailyReport>(response);

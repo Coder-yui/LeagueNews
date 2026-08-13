@@ -327,3 +327,64 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
             select(EventMention).order_by(EventMention.normalized_item_revision)
         ).all()
         assert [mention.normalized_item_revision for mention in mentions] == [1, 2]
+
+
+def test_revision_correction_recalculates_lifecycle_from_current_evidence() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Correction official", is_official=True, reliability_score=1)
+        db.add(source)
+        db.flush()
+        item = _add_item(
+            db,
+            source=source,
+            external_id="correction",
+            published_at=datetime(2026, 8, 11, 8, tzinfo=UTC),
+            title="官方确认",
+        )
+        db.commit()
+
+        event, _ = create_event(
+            db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="gameplay_release",
+            products=["lol_pc"],
+            canonical_anchors={"release": "new-feature"},
+            title="新功能发布",
+            current_summary="官方确认新功能发布。",
+            relation="confirms",
+            source_role="responsible_official",
+            independence_group=f"source:{source.id}",
+        )
+        refresh_event_metrics(db, {event.id})
+        assert event.lifecycle_status == "confirmed"
+
+        item.current_revision = 2
+        item.summary = "修订后不再确认。"
+        item.translated_title = "修订后不再确认"
+        db.commit()
+        corrected, added = add_event_mention(
+            db,
+            event_id=event.id,
+            normalized_item_id=item.id,
+            mention_index=0,
+            relation="mentions",
+            source_role="responsible_official",
+            materiality="material_update",
+            current_summary="修订后不再确认。",
+            latest_development="更正此前表述",
+        )
+        assert added is True
+        refresh_event_metrics(db, {event.id})
+
+        assert corrected.lifecycle_status == "developing"
+        assert corrected.credibility_level == "unverified"
+        assert corrected.official_source_count == 0
+        assert corrected.message_count_total == 1
+        assert corrected.primary_source_message_id is None
+        mentions = db.scalars(
+            select(EventMention).where(EventMention.event_id == event.id)
+        ).all()
+        assert {mention.normalized_item_revision for mention in mentions} == {1, 2}

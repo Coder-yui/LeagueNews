@@ -5,11 +5,13 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select, text
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.models.daily_report import DailyReport, DailyReportItem
+from app.models.event import EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
+from app.repositories.events import current_event_mention_conditions
 from app.services.raw_item_versions import latest_normalized_item_condition
 
 DAILY_REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -92,7 +94,6 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
     statement = (
         select(NormalizedItem)
         .join(NormalizedItem.raw_item)
-        .options(selectinload(NormalizedItem.event_mentions))
         .where(
             latest_normalized_item_condition(),
             NormalizedItem.publication_status == "published",
@@ -101,6 +102,19 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
         )
     )
     items = list(db.scalars(statement))
+    item_ids = [item.id for item in items]
+    event_ids_by_item: dict[int, set[int]] = {item_id: set() for item_id in item_ids}
+    if item_ids:
+        rows = db.execute(
+            select(EventMention.normalized_item_id, EventMention.event_id)
+            .join(EventMention.normalized_item)
+            .where(
+                EventMention.normalized_item_id.in_(item_ids),
+                *current_event_mention_conditions(),
+            )
+        )
+        for normalized_item_id, event_id in rows:
+            event_ids_by_item[normalized_item_id].add(event_id)
     candidates = [
         DailyReportCandidate(
             message_id=item.id,
@@ -108,7 +122,7 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
             published_at=item.raw_item.published_at,
             content_form=item.content_form,
             products=tuple(item.products or ()),
-            event_ids=tuple(sorted({mention.event_id for mention in item.event_mentions})),
+            event_ids=tuple(sorted(event_ids_by_item[item.id])),
         )
         for item in items
         if item.raw_item.published_at is not None
@@ -122,6 +136,7 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
         db.flush()
     else:
         db.execute(delete(DailyReportItem).where(DailyReportItem.report_id == report.id))
+        report.status = "published"
         report.updated_at = datetime.now(UTC)
 
     for section, section_items in sections.items():

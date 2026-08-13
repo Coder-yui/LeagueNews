@@ -11,7 +11,8 @@ from app.domain.event_types import (
 )
 from app.domain.event_categories import EVENT_CATEGORIES
 from app.domain.message_taxonomy import PRODUCTS, Product
-from app.models.event import Event
+from app.models.event import Event, EventMention
+from app.repositories.events import current_event_mention_conditions
 from app.schemas.event import EventDetailRead, EventPageRead
 from app.services.event_presentation import (
     event_card_payload,
@@ -82,6 +83,15 @@ def list_events(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     conditions = []
+    conditions.append(
+        select(EventMention.id)
+        .join(EventMention.normalized_item)
+        .where(
+            EventMention.event_id == Event.id,
+            *current_event_mention_conditions(),
+        )
+        .exists()
+    )
     if event_family:
         conditions.append(Event.event_family == event_family)
     if lifecycle:

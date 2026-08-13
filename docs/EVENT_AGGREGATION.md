@@ -43,10 +43,25 @@ metadata; they are not a parallel identity mechanism.
   or attach a family outside that routed space.
 - Create requires a minimal title and summary but no deterministic identity shape.
 - All membership writes for one model result commit atomically or roll back together.
+- A `running` aggregation run is still an active-ownership signal while its
+  `updated_at` is within the configured Pipeline Worker lease (5 minutes by default). A later invocation exits without an LLM call;
+  only an older run is reclaimed. If the persisted stage is `apply_membership`,
+  the saved `decision_draft` is replayed instead of calling the model again. The
+  idempotency key and database uniqueness constraints remain authoritative.
 - `repost` cannot create an Event. This is a deterministic application invariant enforced by
   `_validate_repost_actions()`; the model prompt repeats it as guidance, but is not the authority.
 - Source evidence, relation, source role, materiality and source reliability are preserved on
   `EventMention`.
+- A public EventMention is current only when its NormalizedItem is published and
+  `EventMention.normalized_item_revision == NormalizedItem.current_revision`. Historical mentions
+  remain stored for audit, but metrics, counts, references, detail/timeline, event listing and
+  report deduplication use only current mentions.
+- Material EventRevision evidence snapshots preserve the current title/summary and related
+  projection fields. When a NormalizedItem revision is invalidated, the projection is restored
+  from the newest still-valid snapshot and all derived metrics/references are recomputed. Legacy
+  revisions created before these snapshots do not contain enough information to rebuild a changed
+  title or summary reliably; the stable label is retained while lifecycle, counts, references and
+  metrics are reset from the remaining evidence.
 - Importance, credibility, heat, references and presentation are projections refreshed after
   membership; they do not choose or reject membership.
 

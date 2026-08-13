@@ -106,6 +106,17 @@ async def execute_pipeline_job(
         job.completed_at = datetime.now(UTC)
         return
 
+    if job.current_stage == "event_aggregation":
+        item = raw_item.normalized_item
+        if item is None or item.publication_status != "published":
+            job.status = "cancelled"
+            job.error_message = "published NormalizedItem is no longer available"
+            job.completed_at = datetime.now(UTC)
+            return
+        assert_execution_owned(db, execution_guard)
+        await publish_normalized_item_downstream(db, item)
+        return
+
     item_run = _active_item_run(db, raw_item.id)
     if item_run is None and (
         raw_item.normalized_item is None
@@ -119,6 +130,11 @@ async def execute_pipeline_job(
             execution_guard=execution_guard,
         )
     if item_run is not None:
+        if item_run.execution_mode == "manual":
+            job.status = "cancelled"
+            job.error_message = "manual processing run owns this RawItem"
+            job.completed_at = datetime.now(UTC)
+            return
         job.processing_run_id = item_run.id
         if item_run.status == "running":
             item_run = await resume_item_processing(

@@ -81,12 +81,15 @@ def enqueue_pending_jobs(db: Session = Depends(get_db)) -> dict[str, int]:
     return {"enqueued_count": len(jobs)}
 
 
-@router.post("/jobs/{job_id}/recover", response_model=PipelineCorrectionRead)
+@router.post(
+    "/jobs/{job_id}/recover",
+    response_model=PipelineCorrectionRead | PipelineJobRead,
+)
 async def recover_job(
     job_id: int,
     payload: PipelineCorrectionCreate,
     db: Session = Depends(get_db),
-) -> PipelineCorrection:
+) -> PipelineCorrection | PipelineJob:
     try:
         return await recover_failed_job(db, job_id=job_id, payload=payload)
     except LookupError as exc:

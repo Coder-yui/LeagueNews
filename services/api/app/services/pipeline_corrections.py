@@ -5,12 +5,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.normalized_item import NormalizedItem
-from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
+from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun
 from app.schemas.pipeline import PipelineCorrectionCreate
 from app.services.media_publication import withdraw_raw_item_media
 from app.services.pipeline_queue import enqueue_pipeline_job
+from app.services.raw_item_versions import is_latest_raw_item
 from app.workflows.reviewed_pipeline import (
     IMPORTANCE_STAGE,
     MESSAGE_ANALYSIS_STAGE,
@@ -115,6 +116,16 @@ def _resume_context(
 
 def _supersede_active_work(db: Session, *, raw_item_id: int) -> None:
     now = datetime.now(UTC)
+    for job in db.scalars(
+        select(PipelineJob).where(
+            PipelineJob.raw_item_id == raw_item_id,
+            PipelineJob.status.in_(["queued", "running"]),
+            PipelineJob.current_stage == "event_aggregation",
+        )
+    ):
+        job.status = "cancelled"
+        job.error_message = "superseded by message correction"
+        job.completed_at = now
     for run in db.scalars(
         select(ProcessingRun).where(
             ProcessingRun.raw_item_id == raw_item_id,
@@ -226,8 +237,7 @@ async def recover_failed_job(
     *,
     job_id: int,
     payload: PipelineCorrectionCreate,
-) -> PipelineCorrection:
-    from app.models.pipeline import PipelineJob
+) -> PipelineCorrection | PipelineJob:
 
     job = db.get(PipelineJob, job_id)
     if job is None:
@@ -237,6 +247,23 @@ async def recover_failed_job(
     raw_item = db.get(RawItem, job.raw_item_id)
     if raw_item is None:
         raise ValueError("raw item no longer exists")
+    if job.current_stage == "event_aggregation":
+        item = raw_item.normalized_item
+        if not is_latest_raw_item(db, raw_item) or item is None or item.publication_status != "published":
+            job.status = "cancelled"
+            job.error_message = "published NormalizedItem is no longer current"
+            job.completed_at = datetime.now(UTC)
+        else:
+            job.status = "queued"
+            job.error_message = None
+            job.completed_at = None
+            job.worker_id = None
+            job.lease_token = None
+            job.lease_expires_at = None
+            job.heartbeat_at = None
+        db.commit()
+        db.refresh(job)
+        return job
     if raw_item.normalized_item is not None:
         return await create_and_start_correction(
             db,

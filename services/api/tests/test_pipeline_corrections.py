@@ -26,6 +26,7 @@ from app.services.automatic_pipeline import (
     enqueue_pipeline_job,
     execute_pipeline_job,
 )
+from app.services.pipeline_corrections import recover_failed_job
 from app.services.pipeline_execution import PipelineExecutionGuard, PipelineLeaseLost
 from app.workflows.reviewed_pipeline import approve_review, reject_review
 from app.workflows.event_aggregation import aggregate_normalized_item
@@ -72,18 +73,24 @@ def _published_item(db: Session, *, suffix: str = "") -> NormalizedItem:
     return item
 
 
-def _final_manual_review(db: Session, item: NormalizedItem) -> tuple[PipelineCorrection, ReviewTask]:
-    correction = PipelineCorrection(
-        raw_item_id=item.raw_item_id,
-        normalized_item_id=item.id,
-        restart_from_stage="importance",
-        resume_mode="manual",
-        reason="修正消息内容",
-        status="running",
-        started_at=datetime.now(UTC),
-    )
-    db.add(correction)
-    item.publication_status = "withdrawn"
+def _final_manual_review(
+    db: Session,
+    item: NormalizedItem,
+    *,
+    correction: PipelineCorrection | None = None,
+) -> tuple[PipelineCorrection, ReviewTask]:
+    if correction is None:
+        correction = PipelineCorrection(
+            raw_item_id=item.raw_item_id,
+            normalized_item_id=item.id,
+            restart_from_stage="importance",
+            resume_mode="manual",
+            reason="修正消息内容",
+            status="running",
+            started_at=datetime.now(UTC),
+        )
+        db.add(correction)
+        item.publication_status = "withdrawn"
     db.flush()
     run = ProcessingRun(
         raw_item_id=item.raw_item_id,
@@ -343,6 +350,245 @@ async def test_event_failure_does_not_fail_published_message(
     assert completed_correction is not None
     assert completed_correction.status == "completed"
     assert completed_correction.completed_at is not None
+
+
+@pytest.mark.anyio
+async def test_event_job_does_not_advance_manual_processing_run(db: Session) -> None:
+    item = _published_item(db, suffix=" event job manual fence")
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="queued",
+        current_stage="event_aggregation",
+    )
+    db.add(job)
+    correction, review = _final_manual_review(db, item)
+    db.commit()
+
+    await execute_pipeline_job(db, job)
+
+    assert job.status == "cancelled"
+    assert job.error_message == "published NormalizedItem is no longer available"
+    assert review.status == "pending"
+    assert review.processing_run.status == "awaiting_review"
+    assert db.get(PipelineCorrection, correction.id).status == "running"
+    assert item.current_revision == 1
+
+
+@pytest.mark.anyio
+async def test_message_job_does_not_auto_approve_manual_processing_run(db: Session) -> None:
+    item = _published_item(db, suffix=" message job manual fence")
+    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued", current_stage="relevance")
+    db.add(job)
+    _correction, review = _final_manual_review(db, item)
+    db.commit()
+
+    await execute_pipeline_job(db, job)
+
+    assert job.status == "cancelled"
+    assert job.error_message == "manual processing run owns this RawItem"
+    assert review.status == "pending"
+    assert review.processing_run.status == "awaiting_review"
+    assert item.current_revision == 1
+
+
+@pytest.mark.anyio
+async def test_correction_cancels_old_event_job_and_new_publish_queues_fresh_job(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db, suffix=" event job supersession")
+    old_job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="running",
+        current_stage="event_aggregation",
+    )
+    db.add(old_job)
+    db.commit()
+
+    async def fake_start_item(_db: Session, _raw_item: RawItem, **_kwargs: object):
+        return object()
+
+    monkeypatch.setattr(correction_service, "start_item_processing", fake_start_item)
+    correction = await correction_service.create_and_start_correction(
+        db,
+        item=item,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="translation",
+            resume_mode="manual",
+            reason="修正并重新发布",
+        ),
+    )
+    assert old_job.status == "cancelled"
+    assert old_job.error_message == "superseded by message correction"
+
+    correction, review = _final_manual_review(db, item, correction=correction)
+    await approve_review(db, review, note="确认修正")
+
+    jobs = list(
+        db.scalars(
+            select(PipelineJob)
+            .where(PipelineJob.raw_item_id == item.raw_item_id)
+            .order_by(PipelineJob.id)
+        )
+    )
+    assert len(jobs) == 2
+    assert jobs[0].id == old_job.id
+    new_job = jobs[-1]
+    assert new_job.id != old_job.id
+    assert new_job.status == "queued"
+    assert new_job.current_stage == "event_aggregation"
+    assert item.current_revision == 2
+
+    async def run_downstream(_db: Session, published: NormalizedItem):
+        return await aggregate_normalized_item(
+            _db,
+            published,
+            llm_client=_EmptyEventClient(),
+        )
+
+    monkeypatch.setattr(automatic_pipeline, "publish_normalized_item_downstream", run_downstream)
+    await execute_pipeline_job(db, new_job)
+
+    event_run = db.scalar(
+        select(EventAggregationRun).where(
+            EventAggregationRun.normalized_item_id == item.id,
+            EventAggregationRun.normalized_item_revision == 2,
+        )
+    )
+    assert event_run is not None
+    assert event_run.status == "completed"
+
+
+@pytest.mark.anyio
+async def test_failed_event_job_recovery_requeues_without_message_correction(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db, suffix=" event retry")
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="failed",
+        current_stage="event_aggregation",
+        error_message="event downstream unavailable",
+        completed_at=datetime.now(UTC),
+    )
+    db.add(job)
+    db.commit()
+
+    async def run_downstream_fail(_db: Session, _published: NormalizedItem):
+        raise RuntimeError("event downstream unavailable")
+
+    monkeypatch.setattr(automatic_pipeline, "publish_normalized_item_downstream", run_downstream_fail)
+    with pytest.raises(RuntimeError, match="event downstream unavailable"):
+        await execute_pipeline_job(db, job)
+    job.status = "failed"
+    job.error_message = "event downstream unavailable"
+    job.completed_at = datetime.now(UTC)
+    db.commit()
+
+    recovered = await recover_failed_job(
+        db,
+        job_id=job.id,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="importance",
+            resume_mode="automatic",
+            reason="重试事件聚合",
+        ),
+    )
+
+    assert recovered.id == job.id
+    assert job.status == "queued"
+    assert item.publication_status == "published"
+    assert item.current_revision == 1
+    assert db.scalar(select(PipelineCorrection)) is None
+    assert db.scalar(select(ProcessingRun)) is None
+
+    async def run_downstream(_db: Session, published: NormalizedItem):
+        return await aggregate_normalized_item(
+            _db,
+            published,
+            llm_client=_EmptyEventClient(),
+        )
+
+    monkeypatch.setattr(automatic_pipeline, "publish_normalized_item_downstream", run_downstream)
+    await execute_pipeline_job(db, job)
+    event_run = db.scalar(select(EventAggregationRun))
+    assert event_run is not None
+    assert event_run.status == "completed"
+    assert item.publication_status == "published"
+
+
+@pytest.mark.anyio
+async def test_event_recovery_cancels_job_when_publication_is_withdrawn(db: Session) -> None:
+    item = _published_item(db, suffix=" withdrawn event retry")
+    item.publication_status = "withdrawn"
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="failed",
+        current_stage="event_aggregation",
+    )
+    db.add(job)
+    db.commit()
+
+    recovered = await recover_failed_job(
+        db,
+        job_id=job.id,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="importance",
+            resume_mode="automatic",
+            reason="重试事件聚合",
+        ),
+    )
+
+    assert recovered.id == job.id
+    assert job.status == "cancelled"
+    assert job.error_message == "published NormalizedItem is no longer current"
+    assert db.scalar(select(PipelineCorrection)) is None
+
+
+@pytest.mark.anyio
+async def test_message_job_recovery_still_creates_message_correction(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Source(name="Message recovery source", connector_type="manual")
+    db.add(source)
+    db.flush()
+    raw = RawItem(
+        source_id=source.id,
+        native_title="消息重试",
+        content_blocks=[{"type": "paragraph", "text": "消息重试"}],
+    )
+    db.add(raw)
+    db.flush()
+    job = PipelineJob(
+        raw_item_id=raw.id,
+        status="failed",
+        current_stage="relevance",
+    )
+    db.add(job)
+    db.commit()
+    started: dict[str, object] = {}
+
+    async def fake_start_item(_db: Session, _raw: RawItem, **kwargs: object):
+        started.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(correction_service, "start_item_processing", fake_start_item)
+    correction = await recover_failed_job(
+        db,
+        job_id=job.id,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="relevance",
+            resume_mode="manual",
+            reason="重试消息处理",
+        ),
+    )
+
+    assert isinstance(correction, PipelineCorrection)
+    assert correction.status == "running"
+    assert started["restart_from_stage"] == "relevance"
+    assert db.scalar(select(PipelineCorrection)) is not None
 
 
 def test_manual_rejection_cancels_correction(db: Session) -> None:

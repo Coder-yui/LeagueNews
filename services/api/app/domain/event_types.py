@@ -1,8 +1,8 @@
 from typing import Final, Literal, get_args
 
 
-AGGREGATION_POLICY_VERSION: Final = "event-aggregation-v3-deterministic-identity"
-IMPORTANCE_POLICY_VERSION: Final = "event-importance-v3-mention-snapshot"
+AGGREGATION_POLICY_VERSION: Final = "event-aggregation-v4-semantic-membership"
+IMPORTANCE_POLICY_VERSION: Final = "event-importance-v4-normalized-item-projection"
 CREDIBILITY_POLICY_VERSION: Final = "event-credibility-v1"
 HEAT_POLICY_VERSION: Final = "event-heat-v1"
 
@@ -67,6 +67,7 @@ CredibilityLevel = Literal[
 ]
 
 EVENT_FAMILIES: Final = frozenset(get_args(EventFamily))
+EVENT_FAMILY_ORDER: Final = tuple(get_args(EventFamily))
 EVENT_RELATIONS: Final = frozenset(get_args(EventRelation))
 EVENT_SOURCE_ROLES: Final = frozenset(get_args(EventSourceRole))
 EVENT_MATERIALITIES: Final = frozenset(get_args(EventMateriality))

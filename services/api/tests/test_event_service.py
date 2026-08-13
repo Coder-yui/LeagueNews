@@ -12,6 +12,7 @@ from app.models.source import Source
 from app.domain.importance import score_importance_profile
 from app.services.events import add_event_mention as _add_event_mention
 from app.services.events import create_event as _create_event
+from app.services.event_metrics import refresh_event_metrics
 
 
 def _snapshot(profile: str = "gameplay_announcement", **overrides: object) -> dict[str, object]:
@@ -323,6 +324,7 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
         )
         assert created is True
         assert item.importance_score == 0.78
+        refresh_event_metrics(db, {event.id})
         assert event.importance_score == 0.86
 
         item.current_revision = 2
@@ -346,6 +348,7 @@ def test_new_normalized_item_revision_can_be_aggregated_once() -> None:
             latest_development="消息第二修订",
         )
         assert added is True
+        refresh_event_metrics(db, {event.id})
         assert event.current_revision == 2
         assert event.message_count_total == 1
         assert event.importance_score == 0.86

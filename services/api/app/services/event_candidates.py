@@ -5,72 +5,30 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.domain.event_families import STRONG_ANCHOR_KEYS
-from app.domain.event_identity import event_identity_key, project_event_identity
+from app.domain.event_families import product_supports_family
 from app.models.event import Event
 from app.models.normalized_item import NormalizedItem
 
 
-FAMILY_WINDOWS_DAYS: Final[dict[str, int]] = {
-    "gameplay_balance": 45,
-    "gameplay_release": 120,
-    "cosmetic_release": 120,
-    "player_activity": 90,
-    "commercial_offer": 35,
-    "service_incident": 14,
-    "security_enforcement": 90,
-    "esports_match": 14,
-    "esports_schedule": 120,
-    "roster_change": 180,
-    "esports_rules": 180,
-    "universe_release": 365,
-    "media_release": 365,
-    "corporate_change": 365,
-    "platform_service": 180,
-    "other_named_development": 90,
-}
-
+RECALL_WINDOW_DAYS: Final = 365
 _WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
-_PRODUCT_DOMAINS = frozenset(
-    {
-        "lol_pc",
-        "tft",
-        "lol_esports",
-        "lol_universe",
-        "other_lol_product",
-        "riot_ecosystem",
-    }
-)
 
 
 def _tokens(value: str) -> set[str]:
     return set(_WORD_PATTERN.findall(value.casefold()))
 
 
-def _values(value: Any) -> set[str]:
-    values = value if isinstance(value, list) else [value]
-    return {str(item).strip().casefold() for item in values if str(item).strip()}
-
-
-def _anchor_score(
-    message_anchors: dict[str, Any], event_anchors: dict[str, Any]
-) -> tuple[int, list[str], bool]:
-    score = 0
-    reasons: list[str] = []
-    conflict = False
-    for key, message_value in message_anchors.items():
-        if key not in event_anchors:
-            continue
-        message_values = _values(message_value)
-        event_values = _values(event_anchors[key])
-        if message_values & event_values:
-            points = 60 if key in STRONG_ANCHOR_KEYS else 12
-            score += points
-            reasons.append(f"anchor:{key}")
-        elif key in STRONG_ANCHOR_KEYS and message_values and event_values:
-            conflict = True
-            reasons.append(f"anchor_conflict:{key}")
-    return score, reasons, conflict
+def _text_values(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        return {
+            text
+            for nested in value.values()
+            for text in _text_values(nested)
+        }
+    if isinstance(value, list):
+        return {text for nested in value for text in _text_values(nested)}
+    text = str(value or "").strip().casefold()
+    return {text} if text else set()
 
 
 def _observed_at(item: NormalizedItem) -> datetime:
@@ -83,93 +41,85 @@ def _event_time(event: Event) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _products_conflict(message_products: set[str], event_products: set[str]) -> bool:
-    """Reject candidates from a different explicit product domain."""
-    message_domains = message_products & _PRODUCT_DOMAINS
-    event_domains = event_products & _PRODUCT_DOMAINS
-    if not message_domains or not event_domains:
-        return False
-    return not message_domains.intersection(event_domains)
-
-
 def recall_event_candidates(
     db: Session,
     *,
     item: NormalizedItem,
-    family_hints: list[str] | tuple[str, ...],
-    anchors: dict[str, Any],
-    per_family_limit: int = 5,
+    possible_families: list[str] | tuple[str, ...],
+    entity_hints: dict[str, Any] | None = None,
     total_limit: int = 12,
 ) -> list[dict[str, Any]]:
-    if per_family_limit < 1 or total_limit < 1:
-        raise ValueError("candidate limits must be positive")
+    """Recall a bounded candidate set from upstream product/topic/entity semantics."""
+
+    if total_limit < 1:
+        raise ValueError("candidate limit must be positive")
     observed_at = _observed_at(item)
-    oldest = observed_at - timedelta(days=max(FAMILY_WINDOWS_DAYS.values()))
+    oldest = observed_at - timedelta(days=RECALL_WINDOW_DAYS)
     events = list(
         db.scalars(
             select(Event)
-            .where(
-                (Event.last_seen_at.is_(None) | (Event.last_seen_at >= oldest)),
-            )
+            .where(Event.last_seen_at.is_(None) | (Event.last_seen_at >= oldest))
             .order_by(Event.last_seen_at.desc(), Event.id.desc())
             .limit(500)
         )
     )
-    message_tokens = _tokens(f"{item.normalized_title} {item.summary}")
-    product_set = set(item.products)
-    ranked_by_family: dict[str, list[tuple[int, Event, list[str], str | None]]] = {
-        family: [] for family in family_hints
-    }
+    message_tokens = _tokens(
+        " ".join(
+            value
+            for value in (item.normalized_title, item.summary, item.normalized_text[:4000])
+            if value
+        )
+    )
+    message_entities = _text_values(entity_hints or {})
+    hinted_families = set(possible_families)
+    message_products = {str(product) for product in item.products}
+    ranked: list[tuple[float, Event, list[str]]] = []
+
     for event in events:
-        if event.event_family not in ranked_by_family:
+        event_products = {str(product) for product in event.products}
+        concrete_message_products = message_products - {"unknown"}
+        if concrete_message_products:
+            # Event membership is product-isolated. A cross-product message
+            # may recall single-product events in either domain, but legacy or
+            # manually-created multi-product Events are not attach candidates.
+            if len(event_products) != 1 or not event_products.issubset(
+                concrete_message_products
+            ):
+                continue
+        if hinted_families and event.event_family not in hinted_families:
             continue
-        event_product_set = set(event.products)
-        if _products_conflict(product_set, event_product_set):
-            continue
-        message_anchors = project_event_identity(
-            event.event_family,
-            anchors,
-            evidence_text=f"{item.normalized_title}\n{item.summary}\n{item.normalized_text}",
-            observed_on=observed_at,
-        )
-        event_anchors = project_event_identity(
-            event.event_family, event.canonical_anchors
-        )
-        anchor_points, reasons, conflict = _anchor_score(message_anchors, event_anchors)
-        if conflict:
-            continue
-        score = 20 + anchor_points
-        reasons.insert(0, "family")
-        if product_set & set(event.products):
+        if len(event_products) == 1:
+            event_product = next(iter(event_products))
+            if event_product != "unknown" and not product_supports_family(
+                event_product, event.event_family  # type: ignore[arg-type]
+            ):
+                continue
+        score = 0.0
+        reasons: list[str] = []
+        if event.event_family in hinted_families:
+            score += 30
+            reasons.append("family_hint")
+        product_overlap = message_products.intersection(event_products)
+        if product_overlap:
             score += 20
-            reasons.append("product")
+            reasons.append("product_overlap")
+        event_entities = _text_values(event.canonical_anchors)
+        entity_overlap = message_entities.intersection(event_entities)
+        if entity_overlap:
+            score += min(30, 10 * len(entity_overlap))
+            reasons.append("entity_overlap")
         event_tokens = _tokens(f"{event.title} {event.current_summary}")
         if message_tokens and event_tokens:
             similarity = len(message_tokens & event_tokens) / len(message_tokens | event_tokens)
-            text_points = round(similarity * 20)
-            score += text_points
-            if text_points:
-                reasons.append(f"text:{text_points}")
-        window_days = FAMILY_WINDOWS_DAYS.get(event.event_family, 90)
-        if abs((observed_at - _event_time(event)).total_seconds()) <= window_days * 86_400:
-            score += 8
-            reasons.append("time_window")
-        if event.aggregation_key and any(
-            str(value).casefold() in event.aggregation_key.casefold()
-            for value in anchors.values()
-            if isinstance(value, str) and value
-        ):
-            score += 40
-            reasons.append("aggregation_key")
-        ranked_by_family[event.event_family].append(
-            (score, event, reasons, event_identity_key(event.event_family, event_anchors))
-        )
+            if similarity:
+                score += similarity * 30
+                reasons.append("text_overlap")
+        age_days = abs((observed_at - _event_time(event)).total_seconds()) / 86_400
+        score += max(0.0, 20 * (1 - age_days / RECALL_WINDOW_DAYS))
+        reasons.append("recent_activity")
+        ranked.append((score, event, reasons))
 
-    selected: list[tuple[int, Event, list[str], str | None]] = []
-    for family in family_hints:
-        ranked = sorted(ranked_by_family[family], key=lambda row: (-row[0], row[1].id))
-        selected.extend(ranked[:per_family_limit])
-    selected = sorted(selected, key=lambda row: (-row[0], row[1].id))[:total_limit]
+    selected = sorted(ranked, key=lambda row: (-row[0], -row[1].id))[:total_limit]
     return [
         {
             "event_id": event.id,
@@ -179,11 +129,11 @@ def recall_event_candidates(
             "title": event.title,
             "current_summary": event.current_summary,
             "latest_development": event.latest_development,
-            "key_facts": event.key_facts,
+            "key_facts": event.key_facts[:12],
             "lifecycle_status": event.lifecycle_status,
-            "match_score": score,
-            "match_reasons": reasons,
-            "identity_key": identity_key,
+            "last_seen_at": event.last_seen_at.isoformat() if event.last_seen_at else None,
+            "recall_score": round(score, 4),
+            "recall_reasons": reasons,
         }
-        for score, event, reasons, identity_key in selected
+        for score, event, reasons in selected
     ]

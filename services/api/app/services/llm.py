@@ -1,9 +1,7 @@
 import json
 import hashlib
 import os
-import re
 import time
-from datetime import datetime
 from collections.abc import Callable
 from typing import Literal, TypeVar, cast
 from urllib.parse import urlsplit
@@ -34,27 +32,6 @@ from app.domain.message_taxonomy import (
     message_content_error,
 )
 from app.domain.message_entities import EntityType
-from app.domain.event_families import (
-    anchors_from_entities,
-    canonicalize_event_anchors,
-    determine_mythic_shop_market,
-    has_complete_mythic_shop_identity,
-    is_mythic_shop_event,
-    mythic_shop_rotation_period_from_date,
-)
-from app.domain.event_identity import (
-    event_identity_contract,
-    event_identity_matches,
-    identity_is_supported_by_message,
-    identity_anchors_with_hints,
-    project_event_identity,
-    resolve_esports_match_anchors,
-    select_identity_evidence,
-)
-from app.domain.event_importance import (
-    EVENT_FAMILY_IMPORTANCE_PROFILES,
-    is_importance_profile_compatible,
-)
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
@@ -64,7 +41,7 @@ from app.prompts.registry import (
     RELEVANCE_OPERATION,
     TRANSLATION_OPERATION,
 )
-from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
+from app.schemas.event_aggregation import EventAggregationResult
 
 
 class LLMConfigurationError(RuntimeError):
@@ -335,6 +312,10 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
   Riot/X 来源不等于只影响外服，必须依据消息实际适用范围判断。
 - competition_region：仅赛事使用 lpl/lck/international/other，非赛事用 none。
 - prominence：涉及普通对象用 normal，知名队伍/选手用 notable，明星选手或顶级焦点队伍用 star。
+  赛事知名度校准示例：Faker 属于 star；Chovy、Knight、Bin、TheShy、Caps，以及 T1、Gen.G、
+  HLE、BLG、TES、JDG、AL、IG、G2 等知名选手或队伍，通常至少为 notable；当消息的核心就是
+  明星选手、顶级焦点队伍或它们之间的焦点对局时，可为 star。示例不是封闭名单，也不能仅因正文
+  顺带提到该对象就升档，必须是消息实质涉及的对象。
 - skin_tier：仅新皮肤、新炫彩和国服新臻彩发布使用 standard / legendary /
   prestige_or_mythic / ultimate，非新外观发布使用 none；必须依据消息明确写出的档次，
   不得凭空推断。"臻彩"不是"至臻皮肤"，仅因臻彩名称不得标为 prestige_or_mythic。
@@ -372,363 +353,110 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
         self,
         *,
         message: dict[str, object],
-        admission_decision: str,
-        family_hints: list[str],
+        possible_event_families: list[str],
         candidates: list[dict[str, object]],
     ) -> EventAggregationResult:
-        candidate_by_id = {int(candidate["event_id"]): candidate for candidate in candidates}
+        candidate_by_id = {
+            int(candidate["event_id"]): candidate for candidate in candidates
+        }
 
-        def mythic_shop_expected_identity(
-            message: dict[str, object],
-        ) -> tuple[str, str] | None:
-            """Return (market, rotation_period) for the current message, or None if unknown."""
-            source = message.get("source")
-            if not isinstance(source, dict):
-                return None
-            market = determine_mythic_shop_market(
-                text="\n".join(
-                    str(message.get(key) or "") for key in ("title", "content")
-                ),
-                structured_data=message.get("structured_media"),
-                source_connector_type=source.get("connector_type"),
-            )
-            if market not in {"CN", "GLOBAL"}:
-                return None
-            observed_raw = source.get("published_at") or source.get("ingested_at")
-            observed: datetime | None = None
-            if isinstance(observed_raw, str) and observed_raw.strip():
-                try:
-                    observed = datetime.fromisoformat(observed_raw.replace("Z", "+00:00"))
-                except ValueError:
-                    observed = None
-            if observed is None:
-                return None
-            return market, mythic_shop_rotation_period_from_date(observed.date())
-
-        def validate_event_decisions(result: EventAggregationResult) -> str | None:
-            guidance = message.get("editorial_granularity_guidance") or []
-            daily_match_roundup = "daily_esports_match_roundup" in guidance
-            source = message.get("source")
-            observed_at: datetime | None = None
-            if isinstance(source, dict):
-                observed_raw = source.get("published_at") or source.get("ingested_at")
-                if isinstance(observed_raw, str) and observed_raw.strip():
-                    try:
-                        observed_at = datetime.fromisoformat(
-                            observed_raw.replace("Z", "+00:00")
-                        )
-                    except ValueError:
-                        observed_at = None
-            identity_evidence = "\n".join(
-                str(message.get(key) or "")
-                for key in ("title", "summary", "content")
-            )
-            message_anchors = anchors_from_entities(
-                message.get("entities") if isinstance(message.get("entities"), list) else []
-            )
+        def validate_candidate_references(result: EventAggregationResult) -> str | None:
+            if message.get("content_form") == "repost" and any(
+                mention.action == "create" for mention in result.mentions
+            ):
+                return "repost 消息不能 create Event，只能 attach 或 ignore"
             for mention in result.mentions:
-                mention_identity_evidence = select_identity_evidence(
-                    mention.event_family,
-                    message_text=identity_evidence,
-                    mention_excerpt=mention.evidence_excerpt,
-                )
-                if daily_match_roundup and mention.action != "ignore" and mention.event_family != "esports_match":
+                if mention.action != "attach":
+                    continue
+                candidate = candidate_by_id.get(int(mention.event_id or 0))
+                if candidate is None:
                     return (
-                        f"mention[{mention.mention_index}]：每日比赛汇总只能写入具体的 "
-                        "esports_match；请保留其他合法 mentions，并将该片段改为 ignore"
+                        f"mention[{mention.mention_index}] attach 只能引用本次输入的 "
+                        "candidate event_id"
                     )
-                if (
-                    mention.action in {"create", "update"}
-                    and mention.materiality == "material_update"
-                    and mention.importance is not None
-                    and not is_importance_profile_compatible(
-                        mention.event_family, mention.importance.profile
-                    )
-                ):
+                if candidate.get("event_family") != mention.event_family:
                     return (
-                        "material mention 的 importance.profile 必须与 event_family 兼容："
-                        f"{mention.event_family} + {mention.importance.profile}；允许值="
-                        f"{sorted(EVENT_FAMILY_IMPORTANCE_PROFILES[mention.event_family])}"
+                        f"mention[{mention.mention_index}] attach 的 event_family 必须与"
+                        "候选 Event 完全一致"
                     )
-                if mention.action in {"create", "update"} and mention.materiality == "material_update":
-                    display_values = {
-                        "event_title": mention.event_title,
-                        "proposed_summary": mention.proposed_summary,
-                        "latest_development": mention.latest_development,
-                    }
-                    english_only = [
-                        key
-                        for key, value in display_values.items()
-                        if value and not re.search(r"[\u4e00-\u9fff]", value)
-                    ]
-                    if english_only:
-                        return "Event 展示字段必须使用简体中文：" + ", ".join(english_only)
-                if mention.action == "create":
-                    normalized_anchors = canonicalize_event_anchors(
-                        mention.event_family, mention.canonical_anchors
+                candidate_products = {
+                    str(value) for value in candidate.get("products") or []
+                }
+                if mention.product is not None and candidate_products != {str(mention.product)}:
+                    return (
+                        f"mention[{mention.mention_index}] attach 的 product 必须与候选 Event 完全一致"
                     )
-                    normalized_anchors = identity_anchors_with_hints(
-                        mention.event_family, normalized_anchors, message_anchors
-                    )
-                    if mention.event_family == "esports_match":
-                        normalized_anchors = resolve_esports_match_anchors(
-                            normalized_anchors,
-                            message_text=identity_evidence,
-                            mention_excerpt=mention.evidence_excerpt,
-                            observed_on=observed_at,
-                        )
-                    if (
-                        mention.event_family == "commercial_offer"
-                        and normalized_anchors.get("shop") == "mythic_shop"
-                        and normalized_anchors.get("market") not in {"CN", "GLOBAL"}
-                    ):
-                        source = message.get("source")
-                        source_connector_type = (
-                            source.get("connector_type")
-                            if isinstance(source, dict)
-                            else None
-                        )
-                        normalized_anchors["market"] = determine_mythic_shop_market(
-                            text="\n".join(
-                                str(message.get(key) or "") for key in ("title", "content")
-                            ),
-                            structured_data=message.get("structured_media"),
-                            source_connector_type=source_connector_type,
-                        )
-                    if (
-                        mention.event_family == "commercial_offer"
-                        and normalized_anchors.get("shop") == "mythic_shop"
-                        and not has_complete_mythic_shop_identity(
-                            mention.event_family, normalized_anchors
-                        )
-                    ):
-                        return "mythic shop identity requires shop, market, and rotation_period anchors"
-                    incoming_identity = project_event_identity(
-                        mention.event_family,
-                        normalized_anchors,
-                        evidence_text=mention_identity_evidence,
-                        observed_on=observed_at,
-                    )
-                    if not incoming_identity:
-                        return (
-                            f"mention[{mention.mention_index}] {mention.event_family} create "
-                            "缺少完整 Event identity；请保留其他合法 mentions，并仅在当前消息有完整"
-                            "身份依据时补齐，否则将该片段改为 ignore"
-                        )
-                    if not identity_is_supported_by_message(
-                        mention.event_family,
-                        normalized_anchors,
-                        message_text=identity_evidence,
-                        mention_excerpt=mention.evidence_excerpt,
-                        message_anchors=message_anchors,
-                        observed_on=observed_at,
-                    ):
-                        return (
-                            f"mention[{mention.mention_index}] {mention.event_family} identity "
-                            "没有被当前消息证据支持；候选 Event 不能作为证据，请修正为消息明确表达的"
-                            " identity，或将该片段改为 ignore"
-                        )
-                    matching_candidates = [
-                        int(candidate["event_id"])
-                        for candidate in candidates
-                        if candidate.get("event_family") == mention.event_family
-                        and event_identity_matches(
-                            mention.event_family,
-                            candidate.get("canonical_anchors") or {},
-                            normalized_anchors,
-                            evidence_text=mention_identity_evidence,
-                            observed_on=observed_at,
-                        )
-                    ]
-                    if matching_candidates:
-                        return (
-                            "同一 Event identity 已存在，必须 update 而不是 create："
-                            f"{sorted(matching_candidates)}"
-                        )
-                if admission_decision == "update_existing_only" and mention.action == "create":
-                    return "update_existing_only 不允许 create"
-                if mention.action == "update":
-                    candidate = candidate_by_id.get(int(mention.candidate_event_id or 0))
-                    if candidate is None:
-                        return f"update 只能指向输入候选：{mention.candidate_event_id}"
-                    if candidate.get("event_family") != mention.event_family:
-                        return "update 的 event_family 必须与候选一致"
-                    candidate_anchors = candidate.get("canonical_anchors") or {}
-                    if (
-                        mention.event_family == "commercial_offer"
-                        and is_mythic_shop_event(mention.event_family, candidate_anchors)
-                    ):
-                        expected = mythic_shop_expected_identity(message)
-                        if expected is not None:
-                            expected_market, expected_period = expected
-                            normalized_candidate = canonicalize_event_anchors(
-                                mention.event_family, candidate_anchors
-                            )
-                            if (
-                                normalized_candidate.get("market") != expected_market
-                                or normalized_candidate.get("rotation_period")
-                                != expected_period
-                            ):
-                                return (
-                                    "mythic shop update 只能命中相同 market 和 rotation week 的候选："
-                                    f"候选={normalized_candidate.get('market')}/"
-                                    f"{normalized_candidate.get('rotation_period')}，"
-                                    f"当前消息={expected_market}/{expected_period}。"
-                                )
-                    incoming_anchors = canonicalize_event_anchors(
-                        mention.event_family,
-                        mention.canonical_anchors,
-                    )
-                    incoming_anchors = identity_anchors_with_hints(
-                        mention.event_family, incoming_anchors, message_anchors
-                    )
-                    if mention.event_family == "esports_match":
-                        incoming_anchors = resolve_esports_match_anchors(
-                            incoming_anchors,
-                            message_text=identity_evidence,
-                            mention_excerpt=mention.evidence_excerpt,
-                            observed_on=observed_at,
-                        )
-                    if not identity_is_supported_by_message(
-                        mention.event_family,
-                        incoming_anchors,
-                        message_text=identity_evidence,
-                        mention_excerpt=mention.evidence_excerpt,
-                        message_anchors=message_anchors,
-                        observed_on=observed_at,
-                    ):
-                        return (
-                            f"mention[{mention.mention_index}] {mention.event_family} update "
-                            "缺少当前消息中的 identity 证据；候选 Event 不能补充证据，请保留其他合法"
-                            " mentions，并将该片段改为 ignore"
-                        )
-                    if not event_identity_matches(
-                        mention.event_family,
-                        canonicalize_event_anchors(
-                            mention.event_family, candidate_anchors
-                        ),
-                        incoming_anchors,
-                        evidence_text=mention_identity_evidence,
-                        observed_on=observed_at,
-                    ):
-                        return (
-                            f"mention[{mention.mention_index}] update 的 canonical_anchors 与候选 "
-                            "Event identity 不兼容；请 create 正确 identity，若 admission 不允许 create "
-                            "则 ignore"
-                        )
-                if mention.action == "create" and mention.candidate_rejections:
-                    candidate_ids = {int(candidate["event_id"]) for candidate in candidates}
-                    rejected_ids = {value.event_id for value in mention.candidate_rejections}
-                    unknown_rejections = rejected_ids - candidate_ids
-                    if unknown_rejections:
-                        return f"candidate_rejections 引用了不存在的候选：{sorted(unknown_rejections)}"
             return None
 
-        def salvage_event_decisions(decoded: dict[str, object]) -> EventAggregationResult | None:
-            raw_mentions = decoded.get("mentions")
-            if not isinstance(raw_mentions, list):
-                return None
-            ignored = [
-                str(value)
-                for value in decoded.get("ignored_fragments", [])
-                if isinstance(value, str)
-            ][:12]
-            accepted: list[EventMentionDecision] = []
-            for raw_index, raw_mention in enumerate(raw_mentions[:12]):
-                try:
-                    mention = EventMentionDecision.model_validate(raw_mention)
-                    mention = mention.model_copy(
-                        update={"mention_index": len(accepted)}
-                    )
-                    proposed = EventAggregationResult(
-                        mentions=[*accepted, mention],
-                        ignored_fragments=ignored,
-                    )
-                    business_error = validate_event_decisions(proposed)
-                    if business_error:
-                        raise ValueError(business_error)
-                except (ValidationError, ValueError) as exc:
-                    if len(ignored) < 12:
-                        ignored.append(
-                            f"模型 mention[{raw_index}] 未通过确定性校验："
-                            f"{_compact_validation_error(exc)}"
-                        )
-                    continue
-                accepted.append(mention)
-            if not accepted:
-                return None
-            return EventAggregationResult(
-                mentions=accepted,
-                ignored_fragments=ignored,
-            )
+        prompt = """你是 LeagueNews 的事件聚合编辑器。输入是一条已经完成翻译、摘要、分类和实体
+提取的消息，以及由程序宽松召回的一组近期候选 Event。你的唯一核心任务是识别消息中的 0 到 N 个
+有意义事件 mention，并为每个 mention 选择 attach、create 或 ignore。一次响应处理整条消息；不要
+重做 OCR、翻译、消息分类、消息重要性或候选召回。
 
-        prompt = """你是 LeagueNews 的事件编辑器。输入是一条已经完成翻译、摘要、产品、消息类型、
-主题、实体和消息重要性处理的标准化消息，以及程序确定性召回的候选事件。一次响应必须处理整条
-消息，返回全部独立 EventMention；禁止按 topic 或候选重复分析，也不要重做消息分类、翻译、OCR、
-通用摘要、实体提取或消息重要性。
+Event 是用户认知中的同一件现实世界事情，Event 的最终身份是 event_id。候选的 family、实体、
+时间、标题和 recall_score 都只是帮助判断的上下文，不是确定性身份规则。你需要进行语义判断：
+- attach：该 mention 是某个候选 Event 的继续、确认、否认、修正、佐证或复述。
+- create：该 mention 是有意义的新现实状态变化，且没有合适候选。
+- ignore：没有独立可跟踪的现实变化，或证据不足以形成/连接 Event。
 
-事件是可验证的现实状态变化，不是相似消息文件夹。一个 topic 不等于一个事件。同一批平衡的多个
-英雄改动通常是一个 gameplay_balance；同批皮肤系列通常是一个 cosmetic_release；版本公告中的
-平衡、活动和皮肤可以是三个独立 mention。宣传、观点、复述和附属素材没有独立状态变化时 ignore。
+possible_event_families 是由上游 products + topics 推导的 taxonomy 路由范围。create/attach 的
+event_family 必须从这个范围中选择；不要重新猜测主题或消息类型。每个 create/attach mention
+必须输出 product：单产品消息填该产品；跨产品消息必须逐个 mention 选择所属产品，不能把整条消息
+的 products 原样复制到每个 Event。只有同一现实发展确实跨产品共享生命周期时，才把它判断为跨产品事件；
+不同产品的外观、活动、玩法或资源应拆成各自的 mention。ignore 不需要 product。
 
-事件粒度的首要判断是：子内容是否拥有独立生命周期、会独立更新，并且是用户认知上另一件值得单独
-知道的事情。商品、奖励、组成部分、子项目和附件默认是主事件的 key_facts 或 components；不要
-因为实体或 topic 数量拆分事件。
+事件粒度原则：
+1. 持续更新同一核心主体、同一现实发展且共享生命周期的消息属于同一 Event。
+2. 商品、奖励、组件、子内容和附件默认属于主 Event；不要仅因实体或 topic 数量拆分。
+3. 只有拥有明显独立生命周期和后续更新路径的现实发展才拆成多个 Event。
+4. 一条综合消息可以 attach 多个候选、create 其他 Event，并 ignore 非事件片段。
+5. 候选召回追求高 recall，可能包含无关 Event；不要因为候选存在或分数较高就强行 attach。
+6. preview、正式公告、后续更新、确认、否认和更正是否共享生命周期，由当前消息证据和候选上下文
+   判断，不要依赖固定字段形状。
+7. repost 消息不能 create Event；只能 attach 到已有事件或 ignore。转载本身不是新事件。
+8. 对 game_leak/测试服版本物料消息，同一产品、同一 cosmetic_release 批次中的多个外观默认合并为一个
+   create/attach mention，把各个外观放进 key_facts；不要因为列出多个皮肤就创建多个 Event。只有证据显示
+   它们拥有独立生命周期、不同版本或不同发布活动时才拆分。
 
-规则：
-1. action=create 仅在存在稳定身份锚点且没有同一真实候选时使用；candidate match_score 仅用于候选
-   排序，绝不代表可以 update。逐一填写同 family 强候选的 candidate_rejections。action=update 必须引用提供的 candidate_event_id。admission_decision 为
-   update_existing_only 时只能 update 或 ignore；没有足够可靠的候选时必须 ignore，不能因为
-   hashtags、实体提及或背景旁支而创建事件。
-2. relation 使用 reports/supports/confirms/denies/corrects/mentions。responsible_official 仅用于当前
-   原创官方来源在其职责范围内的直接表述；官方账号转发别人不是官方确认。
-3. material_update 表示新事实、修正、否认或改变当前状态；只有它可以提出 title、summary、最新
-   进展和关键事实。普通佐证用 corroboration_only，重复用 duplicate，上下文用
-   context_only，后三者不得改写事件投影。
-   面向展示的 event_title、proposed_summary、latest_development 和 key facts 必须使用简体中文。
-4. 每个 material mention 的 importance 必须针对该独立 Event 本体及其 event_family 选择兼容的受控
-   profile；综合公告或赛事汇总中的不同 Event 分别判断，不得复制整篇消息的 profile。只在适用时填写 bounded modifier
-   features；非 material mention 不填写 importance。不要输出分数。
-5. 神话商店轮换以周为周期、按市场区分，作为一个 commercial_offer Event；轮换中的至臻、臻彩、
-   普通皮肤和其他商品都是该事件的事实或组成部分。canonical_anchors 表达
-   {"shop":"mythic_shop", "market":"CN 或 GLOBAL", "rotation_period":"占位"}；rotation_period 由系统
-   按该条消息发布日期所在自然周统一覆盖，你无需精确推算周数，只需给可靠的市场。
-   神话商店只能 update 与当前消息相同 market + 相同 rotation week 的候选；若候选属于其他市场或
-   其他周，create_or_update 应 create 当前正确 identity 的新 Event，update_existing_only 下应
-   ignore，绝不能为了完成 update 而去错误绑定其他市场/周的候选。
-6. 普通电竞比赛按每场真实比赛一个 esports_match Event。每日赛前预告、赛后结果汇总只能分别
-   mention/update 对应比赛；不要创建 Daily Preview、Daily Schedule、Daily Summary 或 Results Summary
-   Event。每个 create/update 必须给出明确对阵双方、比赛日期和联赛，不能用自由生成的 match ID，
-   也不能只凭联赛或日期绑定。只有正式公布
-   未知赛程、延期、提前、重赛、场地/对阵/赛制变化才是 esports_schedule。
-7. 活动、通行证、活动商店和奖励体系中的皮肤、臻彩、图标、边框、表情、代币和战利品默认是主活动
-   Event 的 key_facts/components；只有明确拥有独立发布日期和后续生命周期的新对象才可单独拆出。
-8. evidence_excerpt 必须是当前输入中的简短证据。canonical_anchors 只保留身份所需的版本、活动、
-   英雄、皮肤系列、战队、选手、比赛、赛区或时间范围；不得虚构。
-9. mention_index 从 0 连续递增。一个响应可以同时更新多个事件、创建其他事件并忽略非独立内容。
-   discussion、preview、commentary 若没有新的可核验状态变化应 ignore；消息主体之外的旁支话题
-   若没有独立新事实也应 ignore。
+event_family 语义边界：
+- gameplay_balance 是既有玩法/数值的调整；gameplay_release 是新英雄、模式、机制或玩法内容上线。
+- cosmetic_release 是外观资产本身的发布；player_activity 是需要参与、兑换、领取或完成任务的活动，
+  即使奖励是外观也不因此改成 cosmetic_release。
+- commercial_offer 是商店、付费商品或限时销售变化；service_incident 是具体故障、热修或服务异常；
+  platform_service 是平台能力或服务产品本身的发布/变化。
+- esports_match 是一场具体比赛的完整生命周期，包括赛前确定的对阵与时间、进行中更新和赛果；
+  esports_schedule 只用于赛事日历/赛程体系本身，或延期、改期、场地、对阵、赛制等实质安排变化，
+  不能因为消息是赛前预告就把具体比赛改成 esports_schedule。
+- roster_change 是选手/教练/阵容变动；esports_rules 是赛事规则和竞赛制度变化。
+- universe_release、media_release、corporate_change、security_enforcement 按其字面现实变化使用；没有更
+  合适 family 的命名发展才用 other_named_development。
+- 编辑政策明确不跟踪例行免费英雄轮换/周免名单；这类消息 ignore。该例只用于模型语义边界，程序
+  不通过文本规则拦截它。
+
+输出规则：
+- mention_index 从 0 连续递增。
+- attach 必须引用 candidate_events 中的 event_id，且 event_family 与候选一致；候选 Event 的产品必须
+  与 mention.product 完全一致。
+- create 不引用 event_id，必须提供最小 new_event.title 和 new_event.summary。
+  canonical_anchors 仅是可选描述/召回特征，不需要完整，也不得虚构。
+- ignore 不引用 Event。
+- create/attach 的 evidence_excerpt 必须来自当前消息。
+- relation、source_role、materiality 描述当前 mention；非 material attach 不得提交 projection。
+- attach 的 projection 可选，只用于当前 Event 的展示标题、摘要、最新进展或 key facts；它不能改变
+  membership 决定。create 的初始展示字段放在 new_event。
+- 展示字段使用简体中文。
 只输出符合 schema 的 JSON。"""
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
-                "admission_decision": admission_decision,
-                "family_hints": family_hints,
-                "identity_contracts": {
-                    family: event_identity_contract(family) for family in family_hints
-                },
-                "importance_profiles_by_family": {
-                    family: sorted(EVENT_FAMILY_IMPORTANCE_PROFILES[family])
-                    for family in family_hints
-                },
+                "possible_event_families": possible_event_families,
                 "message": message,
                 "candidate_events": candidates,
             },
-            max_tokens=6000,
+            max_tokens=3200,
             schema=EventAggregationResult,
             operation=EVENT_AGGREGATION_OPERATION,
-            business_validator=validate_event_decisions,
-            final_fallback=salvage_event_decisions,
+            business_validator=validate_candidate_references,
         )
 
     async def translate(

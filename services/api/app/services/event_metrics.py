@@ -45,13 +45,21 @@ def refresh_event_importance(event: Event, mentions: list[EventMention]) -> None
     evidence = []
     for mention in mentions:
         snapshot = mention.domain_importance_snapshot
+        calculation = mention.normalized_item.importance_calculation
         evidence.append(
             EventImportanceEvidence(
                 normalized_item_id=mention.normalized_item_id,
                 normalized_item_revision=mention.normalized_item_revision,
                 mention_index=mention.mention_index,
-                profile=snapshot.get("profile"),
-                domain_score=snapshot.get("score"),
+                profile=(
+                    snapshot.get("profile")
+                    or calculation.get("importance_profile")
+                ),
+                domain_score=(
+                    snapshot.get("score")
+                    if snapshot
+                    else mention.normalized_item.importance_score
+                ),
                 materiality=mention.materiality,
             )
         )

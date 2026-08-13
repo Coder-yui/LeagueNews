@@ -1,0 +1,416 @@
+{
+  "fixture_version": "event-aggregation-eval-v2",
+  "evaluated_at": "2026-08-13T03:27:01.527744+00:00",
+  "case_ids": [
+    "weekly-free-champions-ignore",
+    "nasus-pbe-balance-corroboration",
+    "alistar-icon-original-and-repost",
+    "blg-jdg-specific-fixture",
+    "tft-character-and-activity-announcement"
+  ],
+  "predictions": {
+    "items": [
+      {
+        "normalized_item_id": 1722,
+        "mentions": []
+      },
+      {
+        "normalized_item_id": 1711,
+        "mentions": [
+          {
+            "action": "create",
+            "event_key": "nasus-pbe-2026-07-31",
+            "relation": "reports",
+            "event_family": "gameplay_balance"
+          }
+        ]
+      },
+      {
+        "normalized_item_id": 1719,
+        "mentions": [
+          {
+            "action": "attach",
+            "event_key": "nasus-pbe-2026-07-31",
+            "relation": "reports",
+            "event_family": "gameplay_balance"
+          }
+        ]
+      },
+      {
+        "normalized_item_id": 1700,
+        "mentions": [
+          {
+            "action": "create",
+            "event_key": "classic-alistar-icon-code",
+            "relation": "reports",
+            "event_family": "player_activity"
+          }
+        ]
+      },
+      {
+        "normalized_item_id": 1742,
+        "mentions": [
+          {
+            "action": "attach",
+            "event_key": "classic-alistar-icon-code",
+            "relation": "reports",
+            "event_family": "player_activity"
+          }
+        ]
+      },
+      {
+        "normalized_item_id": 1785,
+        "mentions": [
+          {
+            "action": "create",
+            "event_key": "2026-lpl-stage3-blg-jdg-2026-08-01",
+            "relation": "reports",
+            "event_family": "esports_match"
+          }
+        ]
+      },
+      {
+        "normalized_item_id": 1755,
+        "mentions": [
+          {
+            "action": "create",
+            "event_key": "tft-force-of-nature-2026-08-27",
+            "relation": "reports",
+            "event_family": "player_activity"
+          },
+          {
+            "action": "create",
+            "event_key": "tft-s18-ivern-release",
+            "relation": "reports",
+            "event_family": "gameplay_release"
+          }
+        ]
+      }
+    ]
+  },
+  "score": {
+    "fixture_version": "event-aggregation-eval-v2",
+    "item_count": 7,
+    "counts": {
+      "exact": 7,
+      "missing_prediction": 0
+    },
+    "details": [
+      {
+        "normalized_item_id": 1722,
+        "outcome": "exact",
+        "missing": [],
+        "extra": []
+      },
+      {
+        "normalized_item_id": 1711,
+        "outcome": "exact",
+        "missing": [],
+        "extra": []
+      },
+      {
+        "normalized_item_id": 1719,
+        "outcome": "exact",
+        "missing": [],
+        "extra": []
+      },
+      {
+        "normalized_item_id": 1700,
+        "outcome": "exact",
+        "missing": [],
+        "extra": []
+      },
+      {
+        "normalized_item_id": 1742,
+        "outcome": "exact",
+        "missing": [],
+        "extra": []
+      },
+      {
+        "normalized_item_id": 1785,
+        "outcome": "exact",
+        "missing": [],
+        "extra": []
+      },
+      {
+        "normalized_item_id": 1755,
+        "outcome": "exact",
+        "missing": [],
+        "extra": []
+      }
+    ]
+  },
+  "raw_decisions": [
+    {
+      "normalized_item_id": 1722,
+      "decision": {
+        "mentions": [
+          {
+            "mention_index": 0,
+            "action": "ignore",
+            "event_id": null,
+            "event_family": null,
+            "relation": "reports",
+            "source_role": "responsible_official",
+            "materiality": "context_only",
+            "evidence_excerpt": "7月31日周免英雄更新公告",
+            "new_event": null,
+            "projection": null
+          }
+        ]
+      }
+    },
+    {
+      "normalized_item_id": 1711,
+      "decision": {
+        "mentions": [
+          {
+            "mention_index": 0,
+            "action": "create",
+            "event_id": null,
+            "event_family": "gameplay_balance",
+            "relation": "reports",
+            "source_role": "known_leaker",
+            "materiality": "material_update",
+            "evidence_excerpt": "内瑟斯基础法力值从326提高到376，基础法力回复从1.49提高到1.59，Q技能从小兵获得的层数从3提高到4，从英雄/野怪/炮车获得的层数从12降低到10。",
+            "new_event": {
+              "title": "内瑟斯数值调整",
+              "summary": "内瑟斯基础法力值、法力回复提高，Q技能层数获取调整：小兵层数提高，英雄/野怪/炮车层数降低。",
+              "canonical_anchors": {
+                "champion": "内瑟斯",
+                "product": "lol_pc"
+              },
+              "latest_development": "泄露显示内瑟斯基础法力值从326提高到376，基础法力回复从1.49提高到1.59，Q技能从小兵获得的层数从3提高到4，从英雄/野怪/炮车获得的层数从12降低到10。",
+              "key_facts": [
+                {
+                  "attribute": "基础法力值",
+                  "change": "326 -> 376"
+                },
+                {
+                  "attribute": "基础法力回复",
+                  "change": "1.49 -> 1.59"
+                },
+                {
+                  "attribute": "Q技能小兵层数",
+                  "change": "3 -> 4"
+                },
+                {
+                  "attribute": "Q技能英雄/野怪/炮车层数",
+                  "change": "12 -> 10"
+                }
+              ]
+            },
+            "projection": null
+          }
+        ]
+      }
+    },
+    {
+      "normalized_item_id": 1719,
+      "decision": {
+        "mentions": [
+          {
+            "mention_index": 0,
+            "action": "attach",
+            "event_id": 1,
+            "event_family": "gameplay_balance",
+            "relation": "reports",
+            "source_role": "known_leaker",
+            "materiality": "material_update",
+            "evidence_excerpt": "测试服7月31日对内瑟斯进行改动：基础法力值从326提升至376，基础法力回复从1.49提升至1.59；Q技能汲魂痛击的小兵叠加层数从3提升至4，英雄/野怪/炮车兵叠加层数从12降低至10。",
+            "new_event": null,
+            "projection": {
+              "title": "内瑟斯数值调整",
+              "summary": "内瑟斯基础法力值、法力回复提高，Q技能层数获取调整：小兵层数提高，英雄/野怪/炮车层数降低。",
+              "latest_development": "测试服泄露显示内瑟斯基础法力值从326提高到376，基础法力回复从1.49提高到1.59，Q技能从小兵获得的层数从3提高到4，从英雄/野怪/炮车获得的层数从12降低到10。",
+              "key_facts": [
+                {
+                  "attribute": "基础法力值",
+                  "change": "326 -> 376"
+                },
+                {
+                  "attribute": "基础法力回复",
+                  "change": "1.49 -> 1.59"
+                },
+                {
+                  "attribute": "Q技能小兵层数",
+                  "change": "3 -> 4"
+                },
+                {
+                  "attribute": "Q技能英雄/野怪/炮车层数",
+                  "change": "12 -> 10"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "normalized_item_id": 1700,
+      "decision": {
+        "mentions": [
+          {
+            "mention_index": 0,
+            "action": "create",
+            "event_id": null,
+            "event_family": "player_activity",
+            "relation": "reports",
+            "source_role": "responsible_official",
+            "materiality": "material_update",
+            "evidence_excerpt": "现在前往 riot.com/Classic 兑换代码 CC-CLASS-ALIST-T0123，即可免费获得阿利斯塔图标",
+            "new_event": {
+              "title": "免费领取阿利斯塔图标活动",
+              "summary": "玩家可通过兑换代码 CC-CLASS-ALIST-T0123 在 riot.com/Classic 免费获得阿利斯塔图标。",
+              "canonical_anchors": {
+                "code": "CC-CLASS-ALIST-T0123",
+                "champion": "阿利斯塔"
+              },
+              "latest_development": "官方发布兑换码，玩家可免费领取阿利斯塔图标。",
+              "key_facts": [
+                {
+                  "code": "CC-CLASS-ALIST-T0123",
+                  "reward": "阿利斯塔图标",
+                  "url": "riot.com/Classic"
+                }
+              ]
+            },
+            "projection": null
+          }
+        ]
+      }
+    },
+    {
+      "normalized_item_id": 1742,
+      "decision": {
+        "mentions": [
+          {
+            "mention_index": 0,
+            "action": "attach",
+            "event_id": 1,
+            "event_family": "player_activity",
+            "relation": "reports",
+            "source_role": "republisher",
+            "materiality": "material_update",
+            "evidence_excerpt": "转发 @LoLUKN：现在前往 riot.com/Classic 兑换代码 CC-CLASS-ALIST-T0123，即可免费获得阿利斯塔图标，展现你的经典风格！",
+            "new_event": null,
+            "projection": {
+              "title": "免费领取阿利斯塔图标活动",
+              "summary": "玩家可通过兑换代码 CC-CLASS-ALIST-T0123 在 riot.com/Classic 免费获得阿利斯塔图标。",
+              "latest_development": "官方发布兑换码，玩家可免费领取阿利斯塔图标。",
+              "key_facts": [
+                {
+                  "code": "CC-CLASS-ALIST-T0123",
+                  "reward": "阿利斯塔图标",
+                  "url": "riot.com/Classic"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "normalized_item_id": 1785,
+      "decision": {
+        "mentions": [
+          {
+            "mention_index": 0,
+            "action": "create",
+            "event_id": null,
+            "event_family": "esports_match",
+            "relation": "reports",
+            "source_role": "first_party_participant",
+            "materiality": "material_update",
+            "evidence_excerpt": "2026年8月1日19:00 BLG vs JDG",
+            "new_event": {
+              "title": "2026LPL第三赛段组内赛：BLG vs JDG",
+              "summary": "BLG电子竞技俱乐部发布赛前预告，2026年8月1日19:00将进行2026LPL第三赛段组内赛，对阵双方为BLG和JDG。",
+              "canonical_anchors": {
+                "teams": [
+                  "BLG",
+                  "JDG"
+                ],
+                "league": "LPL",
+                "stage": "第三赛段组内赛"
+              },
+              "latest_development": "赛前预告发布",
+              "key_facts": [
+                {
+                  "time": "2026-08-01T19:00:00+00:00",
+                  "teams": [
+                    "BLG",
+                    "JDG"
+                  ],
+                  "event": "2026LPL第三赛段组内赛"
+                }
+              ]
+            },
+            "projection": null
+          }
+        ]
+      }
+    },
+    {
+      "normalized_item_id": 1755,
+      "decision": {
+        "mentions": [
+          {
+            "mention_index": 0,
+            "action": "create",
+            "event_id": null,
+            "event_family": "player_activity",
+            "relation": "reports",
+            "source_role": "responsible_official",
+            "materiality": "material_update",
+            "evidence_excerpt": "8月27日来#云顶之弈自然之力#，准备好开启你的奇幻冒险吧。",
+            "new_event": {
+              "title": "云顶之弈S18“自然之力”活动开启",
+              "summary": "官方宣布云顶之弈S18赛季“自然之力”活动将于8月27日开启，内容来自测试服，以正式服为准。",
+              "canonical_anchors": {
+                "activity": "自然之力",
+                "game": "云顶之弈",
+                "patch": "S18"
+              },
+              "latest_development": "活动将于8月27日开启",
+              "key_facts": [
+                {
+                  "date": "8月27日",
+                  "activity": "自然之力"
+                }
+              ]
+            },
+            "projection": null
+          },
+          {
+            "mention_index": 1,
+            "action": "create",
+            "event_id": null,
+            "event_family": "gameplay_release",
+            "relation": "reports",
+            "source_role": "responsible_official",
+            "materiality": "material_update",
+            "evidence_excerpt": "云顶之弈S18艾翁登场",
+            "new_event": {
+              "title": "云顶之弈S18新英雄艾翁登场",
+              "summary": "云顶之弈S18赛季推出新英雄艾翁，具体上线时间以正式服为准。",
+              "canonical_anchors": {
+                "champion": "艾翁",
+                "game": "云顶之弈",
+                "patch": "S18"
+              },
+              "latest_development": "艾翁在S18登场",
+              "key_facts": [
+                {
+                  "champion": "艾翁",
+                  "patch": "S18"
+                }
+              ]
+            },
+            "projection": null
+          }
+        ]
+      }
+    }
+  ]
+}

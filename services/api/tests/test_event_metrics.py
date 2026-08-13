@@ -41,7 +41,7 @@ def test_event_importance_uses_strongest_valid_material_domain_evidence() -> Non
 
     assert score == 0.86
     assert importance_level(score) == "critical"
-    assert breakdown["policy_version"] == "event-importance-v3-mention-snapshot"
+    assert breakdown["policy_version"] == "event-importance-v4-normalized-item-projection"
     assert breakdown["method"] == "max_material_domain_score"
     assert breakdown["dominant_profile"] == "activity_free_skin"
     assert breakdown["dominant_normalized_item_id"] == 3

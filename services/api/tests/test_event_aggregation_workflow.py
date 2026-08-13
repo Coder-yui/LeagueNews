@@ -1,5 +1,5 @@
-from datetime import UTC, datetime
-import re
+import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -8,64 +8,23 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 from app.core.database import Base
-from app.domain.event_admission import decide_event_admission
-from app.domain.event_categories import event_category
-from app.domain.event_families import (
-    anchors_from_entities,
-    canonicalize_event_anchors,
-    determine_mythic_shop_market,
-    has_complete_mythic_shop_identity,
-    mythic_shop_rotation_period_from_date,
-)
-from app.domain.event_identity import (
-    balance_change_signature,
-    event_identity_key,
-    event_identity_matches,
-    identity_is_supported_by_message,
-    identity_anchors_with_hints,
-    project_event_identity,
-    resolve_esports_match_anchors,
-)
-from app.domain.event_granularity import explicit_match_count, is_daily_match_roundup
-from app.domain.importance import score_importance_profile
-from app.models.event import Event, EventAggregationRun, EventMention
+from app.domain.event_admission import derive_event_space, minimal_event_filter
+from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
-from app.schemas.event import EventDetailRead
 from app.schemas.event_aggregation import EventAggregationResult
 from app.services.event_candidates import recall_event_candidates
+from app.services.event_metrics import refresh_event_metrics
 from app.services.events import create_event
 from app.services.llm import LLMAnalysisError
-from app.workflows.event_aggregation import (
-    _aggregation_key,
-    _mythic_shop_anchors,
-    _select_content,
-    aggregate_normalized_item,
-)
+from app.workflows.event_aggregation import aggregate_normalized_item
 
 
-def _importance(profile: str, **features: object) -> dict[str, object]:
-    return {"profile": profile, **features}
-
-
-def _snapshot(profile: str = "gameplay_announcement", **overrides: object) -> dict[str, object]:
-    features = {
-        "scale": "standard",
-        "competition_region": "none",
-        "prominence": "normal",
-        "skin_tier": "none",
-        "is_bulk_update": False,
-        **overrides,
-    }
-    result = score_importance_profile(profile, features)
-    return {
-        "policy_version": "importance-v11-repost-weekly-rotation",
-        "profile": profile,
-        "score": result.score,
-        "features": dict(result.features),
-        "modifiers": list(result.modifiers),
-    }
+def _engine():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return engine
 
 
 def _item(
@@ -74,914 +33,242 @@ def _item(
     source: Source,
     external_id: str,
     title: str,
-    message_type: str,
-    topics: list[str],
-    entities: list[dict[str, object]],
-    content_form: str = "original",
+    text: str | None = None,
     products: list[str] | None = None,
+    topics: list[str] | None = None,
+    message_type: str = "game_announcement",
+    entities: list[dict[str, object]] | None = None,
+    content_form: str = "original",
+    publication_status: str = "published",
+    importance_score: float = 0.72,
     importance_profile: str = "gameplay_announcement",
-    domain_score: float = 0.5,
     published_at: datetime | None = None,
 ) -> NormalizedItem:
+    content = title if text is None else text
     raw = RawItem(
         source_id=source.id,
         external_id=external_id,
         native_title=title,
         canonical_url=f"https://example.com/{external_id}",
-        content_blocks=[{"type": "paragraph", "text": title}],
-        published_at=published_at or datetime.now(UTC),
+        content_blocks=(
+            [{"type": "paragraph", "text": content}] if title or content else []
+        ),
+        published_at=published_at or datetime(2026, 8, 12, 8, tzinfo=UTC),
     )
     db.add(raw)
     db.flush()
     item = NormalizedItem(
         raw_item_id=raw.id,
         normalized_title=title,
-        normalized_text=title,
-        summary=title,
-        entities=entities,
+        normalized_text=content,
+        summary=content,
+        entities=entities or [],
         products=products or ["lol_pc"],
         message_type=message_type,
-        topics=topics,
+        topics=topics or ["balance_gameplay"],
         content_form=content_form,
-        importance_score=domain_score,
+        importance_score=importance_score,
         importance_calculation={
             "importance_profile": importance_profile,
-            "profile_score": domain_score,
-            "final_score": domain_score,
+            "profile_score": importance_score,
+            "final_score": importance_score,
         },
-        translated_title=title,
-        translated_text=title,
-        translated_content_blocks=[{"type": "paragraph", "text": title}],
+        translated_title=title or None,
+        translated_text=content or None,
+        translated_content_blocks=(
+            [{"type": "paragraph", "text": content}] if content else []
+        ),
         translation_status="not_required",
         analysis_model="test",
         analysis_version="test",
+        publication_status=publication_status,
     )
     db.add(item)
     db.flush()
     return item
 
 
-class ScenarioClient:
-    def __init__(self) -> None:
+class StaticClient:
+    def __init__(self, result: EventAggregationResult) -> None:
+        self.result = result
         self.calls = 0
+        self.payloads: list[dict[str, object]] = []
 
     async def aggregate_events(self, **payload: object) -> EventAggregationResult:
         self.calls += 1
-        message = payload["message"]
-        assert isinstance(message, dict)
-        title = str(message["title"])
-        candidates = payload["candidates"]
-        assert isinstance(candidates, list)
-        if title == "26.17 平衡爆料":
-            mentions = [
-                {
-                    "mention_index": 0,
-                    "event_family": "gameplay_balance",
-                    "action": "create",
-                    "candidate_event_id": None,
-                    "relation": "reports",
-                    "source_role": "known_leaker",
-                    "materiality": "material_update",
-                    "canonical_anchors": {"patch_version": "patch:26.17"},
-                    "event_title": "26.17 版本平衡调整",
-                    "proposed_summary": "爆料称 26.17 将进行平衡调整。",
-                    "latest_development": "首次爆料",
-                    "importance": _importance("leak_gameplay"),
-                    "evidence_excerpt": "26.17 平衡爆料",
-                }
-            ]
-        elif title == "星界活动爆料":
-            mentions = [
-                {
-                    "mention_index": 0,
-                    "event_family": "player_activity",
-                    "action": "create",
-                    "candidate_event_id": None,
-                    "relation": "reports",
-                    "source_role": "known_leaker",
-                    "materiality": "material_update",
-                    "canonical_anchors": {
-                        "activity_name": "activity:star",
-                        "window_start": "2026-08-20",
-                    },
-                    "event_title": "星界活动",
-                    "proposed_summary": "爆料称星界活动将在下版本开放。",
-                    "latest_development": "首次爆料",
-                    "importance": _importance("leak_content"),
-                    "evidence_excerpt": "星界活动爆料",
-                }
-            ]
-        else:
-            by_family = {str(candidate["event_family"]): candidate for candidate in candidates}
-            mentions = [
-                {
-                    "mention_index": 0,
-                    "event_family": "gameplay_balance",
-                    "action": "update",
-                    "candidate_event_id": by_family["gameplay_balance"]["event_id"],
-                    "relation": "confirms",
-                    "source_role": "responsible_official",
-                    "materiality": "material_update",
-                    "canonical_anchors": {"patch_version": "patch:26.17"},
-                    "event_title": "26.17 版本平衡调整",
-                    "proposed_summary": "官网确认 26.17 版本平衡调整。",
-                    "latest_development": "官网确认",
-                    "importance": _importance("gameplay_announcement"),
-                    "evidence_excerpt": "官网确认平衡调整",
-                },
-                {
-                    "mention_index": 1,
-                    "event_family": "player_activity",
-                    "action": "update",
-                    "candidate_event_id": by_family["player_activity"]["event_id"],
-                    "relation": "confirms",
-                    "source_role": "responsible_official",
-                    "materiality": "material_update",
-                    "canonical_anchors": {
-                        "activity_name": "activity:star",
-                        "window_end": "2026-09-01",
-                    },
-                    "event_title": "星界活动",
-                    "proposed_summary": "官网确认星界活动。",
-                    "latest_development": "官网确认",
-                    "importance": _importance("activity_announcement"),
-                    "evidence_excerpt": "官网确认活动",
-                },
-                {
-                    "mention_index": 2,
-                    "event_family": "cosmetic_release",
-                    "action": "create",
-                    "candidate_event_id": None,
-                    "relation": "reports",
-                    "source_role": "responsible_official",
-                    "materiality": "material_update",
-                    "canonical_anchors": {"skin_series": "skin:star-series"},
-                    "event_title": "星界系列皮肤发布",
-                    "proposed_summary": "官网公布星界系列皮肤。",
-                    "latest_development": "官网首次公布",
-                    "importance": _importance("cosmetic_announcement"),
-                    "evidence_excerpt": "星界系列皮肤",
-                },
-            ]
-        return EventAggregationResult.model_validate(
-            {"mentions": mentions, "ignored_fragments": []}
-        )
+        self.payloads.append(payload)
+        return self.result
 
 
-def test_admission_is_deterministic_and_can_avoid_model_calls() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
+class ErrorThenSuccessClient(StaticClient):
+    async def aggregate_events(self, **payload: object) -> EventAggregationResult:
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            raise LLMAnalysisError("temporary invalid model response")
+        return self.result
+
+
+def _result(*mentions: dict[str, object]) -> EventAggregationResult:
+    return EventAggregationResult.model_validate({"mentions": list(mentions)})
+
+
+def _aggregate(
+    db: Session, item: NormalizedItem, client: StaticClient
+) -> EventAggregationRun:
+    return asyncio.run(aggregate_normalized_item(db, item, llm_client=client))
+
+
+def _create_decision(
+    *,
+    mention_index: int = 0,
+    product: str | None = None,
+    family: str = "gameplay_balance",
+    title: str = "26.17 版本平衡调整",
+    summary: str = "26.17 版本平衡调整已经公布。",
+    evidence: str = "26.17 版本平衡调整",
+) -> dict[str, object]:
+    return {
+        "mention_index": mention_index,
+        "action": "create",
+        "event_id": None,
+        "product": product,
+        "event_family": family,
+        "relation": "reports",
+        "source_role": "known_leaker",
+        "materiality": "material_update",
+        "evidence_excerpt": evidence,
+        "new_event": {
+            "title": title,
+            "summary": summary,
+            "canonical_anchors": {"patch_version": "26.17"},
+            "latest_development": "首次出现",
+            "key_facts": [],
+        },
+    }
+
+
+def test_minimal_filter_only_skips_unpublished_or_semantically_empty_items() -> None:
+    engine = _engine()
     with Session(engine) as db:
-        source = Source(name="Admission source")
+        source = Source(name="filter")
         db.add(source)
         db.flush()
-        unknown = _item(
+        unpublished = _item(
             db,
             source=source,
-            external_id="unknown",
-            title="无语义",
-            message_type="unknown",
-            topics=["unknown"],
-            entities=[],
-            products=["unknown"],
-            content_form="media_only",
+            external_id="unpublished",
+            title="有语义但未发布",
+            publication_status="withdrawn",
         )
+        empty = _item(db, source=source, external_id="empty", title="", text="")
         repost = _item(
             db,
             source=source,
             external_id="repost",
-            title="转载 26.17",
-            message_type="game_leak",
-            topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:26.17"}],
+            title="有明确事件语义的转发",
             content_form="repost",
         )
-        leak = _item(
+        leak = _item(db, source=source, external_id="leak", title="没有锚点的爆料")
+
+        assert minimal_event_filter(unpublished).decision == "skip"
+        assert minimal_event_filter(empty).decision == "skip"
+        assert minimal_event_filter(repost).decision == "process"
+        assert minimal_event_filter(leak).decision == "process"
+
+
+def test_event_space_routes_real_products_and_topics() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        source = Source(name="routing")
+        db.add(source)
+        db.flush()
+        esports = _item(
             db,
             source=source,
-            external_id="leak",
-            title="26.17 爆料",
-            message_type="game_leak",
+            external_id="esports-routing",
+            title="BLG 阵容变动",
+            products=["lol_esports"],
+            topics=["esports_rosters"],
+        )
+        lol_pc = _item(
+            db,
+            source=source,
+            external_id="lol-routing",
+            title="英雄平衡调整",
+            products=["lol_pc"],
             topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:26.17"}],
         )
 
-        assert decide_event_admission(unknown).decision == "skip"
-        assert decide_event_admission(repost).decision == "update_existing_only"
-        assert decide_event_admission(leak).decision == "create_or_update"
+        esports_space = derive_event_space(esports)
+        lol_space = derive_event_space(lol_pc)
+
+        assert esports_space.products == ("lol_esports",)
+        assert esports_space.possible_families == ("roster_change",)
+        assert lol_space.possible_families == ("gameplay_balance",)
 
 
-@pytest.mark.parametrize(
-    ("title", "message_type", "topics", "expected"),
-    [
-        ("本周周免英雄名单", "game_community_notice", ["champions"], "skip"),
-        ("This week's free champion rotation", "game_community_notice", ["champions"], "skip"),
-        ("26.17 英雄平衡调整", "game_patch_notes", ["balance_gameplay"], "create_or_update"),
-        ("新英雄发布", "game_announcement", ["champions"], "create_or_update"),
-    ],
-)
-def test_free_champion_rotation_exclusion_is_narrow(
-    title: str, message_type: str, topics: list[str], expected: str
-) -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name=f"Admission {title}")
+def test_apply_ignores_family_outside_routed_event_space_and_keeps_valid_mentions() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="routing-validation")
         db.add(source)
         db.flush()
         item = _item(
             db,
             source=source,
-            external_id=title,
-            title=title,
-            message_type=message_type,
-            topics=topics,
-            entities=[{"type": "champion", "canonical_id": "champion:test"}],
-        )
-        assert decide_event_admission(item).decision == expected
-
-
-@pytest.mark.anyio
-async def test_free_champion_rotation_is_recorded_as_zero_call_skip() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Free rotation workflow source")
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="free-rotation-workflow",
-            title="This week's free champion rotation",
-            message_type="game_community_notice",
-            topics=["champions"],
-            entities=[{"type": "champion", "canonical_id": "champion:test"}],
-        )
-        db.commit()
-
-        class FailingClient:
-            async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
-                raise AssertionError("free rotation must not call the event model")
-
-        run = await aggregate_normalized_item(db, item, llm_client=FailingClient())
-
-        assert run.outcome == "skipped_by_admission"
-        assert run.admission_decision == "skip"
-        assert run.model_call_count == 0
-        assert "free champion rotation" in run.decision_draft["admission_reasons"][0]
-
-
-def test_mythic_shop_identity_is_market_and_rotation_period() -> None:
-    anchors = {
-        "shop": "Mythic Shop",
-        "market": "CN",
-        "rotation": "2026 week 32",
-        "products": ["skin:a", "chromas:b"],
-    }
-    assert canonicalize_event_anchors("commercial_offer", anchors) == {
-        "shop": "mythic_shop",
-        "market": "CN",
-        "rotation_period": "2026-w32",
-    }
-    assert has_complete_mythic_shop_identity(
-        "commercial_offer", {"shop": "mythic_shop", "market": "CN", "rotation_period": "2026-w32"}
-    )
-    same_rotation_different_products = _aggregation_key(
-        event_family="commercial_offer",
-        products=["lol_pc"],
-        canonical_anchors=canonicalize_event_anchors("commercial_offer", anchors),
-    )
-    same_rotation_more_products = _aggregation_key(
-        event_family="commercial_offer",
-        products=["lol_pc", "tft"],
-        canonical_anchors=canonicalize_event_anchors("commercial_offer", anchors),
-    )
-    next_rotation = _aggregation_key(
-        event_family="commercial_offer",
-        products=["lol_pc"],
-        canonical_anchors={
-            "shop": "mythic_shop",
-            "market": "CN",
-            "rotation_period": "2026-w33",
-        },
-    )
-    overseas = _aggregation_key(
-        event_family="commercial_offer",
-        products=["lol_pc"],
-        canonical_anchors={
-            "shop": "mythic_shop",
-            "market": "GLOBAL",
-            "rotation_period": "2026-w32",
-        },
-    )
-    assert same_rotation_different_products == same_rotation_more_products
-    assert same_rotation_different_products != next_rotation
-    assert same_rotation_different_products != overseas
-
-
-def test_esports_match_identity_accepts_reversed_pair_and_rejects_other_match() -> None:
-    existing = {
-        "match": "IG_vs_LNG",
-        "date": "2026-08-02",
-        "league": "lpl",
-    }
-    reversed_pair = {
-        "match": "LNG vs IG",
-        "date": "2026-08-02",
-        "league": "LPL",
-    }
-    other_match = {
-        "match": "TT_vs_WE",
-        "date": "2026-08-02",
-        "league": "lpl",
-    }
-
-    assert event_identity_matches("esports_match", existing, reversed_pair)
-    assert not event_identity_matches("esports_match", existing, other_match)
-
-    assert project_event_identity(
-        "esports_match",
-        {
-            "team_home": "LNG",
-            "team_away": "IG",
-            "match_time": "2026-08-02T17:00:00+08:00",
-            "league": "LPL",
-        },
-    ) == {"match": "ig_vs_lng", "date": "2026-08-02", "league": "lpl"}
-
-
-def test_esports_match_identity_requires_a_complete_pair() -> None:
-    roundup = {"team": ["AL", "EDG", "WE", "BLG"], "date": "2026-07-31", "league": "lpl"}
-
-    assert event_identity_key("esports_match", roundup) is None
-    assert event_identity_key(
-        "esports_match",
-        {"match": "AL_vs_EDG", "date": "2026-07-31", "league": "lpl"},
-    ) is not None
-    assert event_identity_key("esports_match", {"match": "match:0"}) is None
-
-
-def test_esports_update_identity_requires_current_message_pair_evidence() -> None:
-    anchors = {
-        "match": "BLG_vs_WE",
-        "date": "2026-07-31",
-        "league": "lpl",
-    }
-    observed_at = datetime(2026, 7, 31, 8, tzinfo=UTC)
-
-    assert not identity_is_supported_by_message(
-        "esports_match",
-        anchors,
-        message_text="今日预测：2-0 2-1 #Bin #BLG",
-        mention_excerpt="今日预测：2-0 2-1",
-        observed_on=observed_at,
-    )
-    assert identity_is_supported_by_message(
-        "esports_match",
-        anchors,
-        message_text="今日赛程：AL vs EDG；GEN vs T1；17:00 WE vs BLG",
-        mention_excerpt="17:00 WE vs BLG",
-        observed_on=observed_at,
-    )
-
-
-def test_esports_identity_resolves_date_and_league_from_message_evidence() -> None:
-    resolved = resolve_esports_match_anchors(
-        {"match": "艾欧尼亚队_vs_德玛西亚队"},
-        message_text="#2026LPL第三赛段#",
-        mention_excerpt="艾欧尼亚队 1:0 德玛西亚队",
-        observed_on=datetime(2026, 7, 31, 12, tzinfo=UTC),
-    )
-
-    assert resolved["date"] == "2026-07-31"
-    assert resolved["league"] == "lpl"
-    assert identity_is_supported_by_message(
-        "esports_match",
-        resolved,
-        message_text="#2026LPL第三赛段# 艾欧尼亚队 1:0 德玛西亚队",
-        mention_excerpt="艾欧尼亚队 1:0 德玛西亚队",
-        observed_on=datetime(2026, 7, 31, 12, tzinfo=UTC),
-    )
-
-
-def test_generic_identity_requires_a_complete_shape_and_ignores_optional_facts() -> None:
-    assert event_identity_key("esports_schedule", {"date": "2026-08-01"}) is None
-    assert project_event_identity(
-        "player_activity",
-        {
-            "activity_name": "星界活动",
-            "window_start": "2026-08-01",
-            "market": "CN",
-        },
-    ) == {"activity_name": "星界活动"}
-    assert event_identity_matches(
-        "player_activity",
-        {"activity_name": "星界活动"},
-        {
-            "activity_name": "星界活动",
-            "window_start": "2026-08-01",
-            "market": "CN",
-        },
-    )
-
-
-def test_message_identity_hints_only_fill_missing_single_values() -> None:
-    assert identity_anchors_with_hints(
-        "gameplay_balance",
-        {"champion": "Nasus"},
-        {"champion": "内瑟斯"},
-    ) == {"champion": "内瑟斯"}
-    assert identity_anchors_with_hints(
-        "gameplay_balance",
-        {"champion": "内瑟斯"},
-        {"champion": ["阿狸", "内瑟斯"]},
-    ) == {"champion": "内瑟斯"}
-
-
-def test_gameplay_balance_uses_display_subject_and_change_signature() -> None:
-    english = anchors_from_entities(
-        [{"type": "champion", "name": "内瑟斯", "canonical_name": "Nasus"}]
-    )
-    chinese = anchors_from_entities(
-        [{"type": "champion", "canonical_name": "内瑟斯"}]
-    )
-
-    assert english == chinese == {"champion": "内瑟斯"}
-    assert balance_change_signature("法力值 326 → 376，回复 1.49 → 1.59") == (
-        "changes:1.49>1.59|326>376"
-    )
-
-
-def test_gameplay_balance_aliases_produce_same_aggregation_key() -> None:
-    text = "内瑟斯基础法力值 326 → 376，法力回复 1.49 → 1.59，Q 3 → 4、12 → 10"
-    english = project_event_identity(
-        "gameplay_balance",
-        {"champion": "内瑟斯", "game_version": "unknown"},
-        evidence_text=text,
-    )
-    chinese = project_event_identity(
-        "gameplay_balance",
-        {"champion": "内瑟斯", "patch": "测试服7月31日"},
-        evidence_text=text,
-    )
-
-    assert _aggregation_key(
-        event_family="gameplay_balance",
-        products=["lol_pc"],
-        canonical_anchors=english,
-    ) == _aggregation_key(
-        event_family="gameplay_balance",
-        products=["lol_pc"],
-        canonical_anchors=chinese,
-    )
-
-    different_change = project_event_identity(
-        "gameplay_balance",
-        {"champion": "内瑟斯"},
-        evidence_text="内瑟斯基础法力值 376 → 400",
-    )
-    assert different_change != english
-
-
-def test_gameplay_balance_patch_identity_overrides_change_signature() -> None:
-    first = project_event_identity(
-        "gameplay_balance",
-        {"patch_version": "Patch 26.17", "champion": "内瑟斯"},
-        evidence_text="法力值 326 → 376",
-    )
-    second = project_event_identity(
-        "gameplay_balance",
-        {"patch": "26.17", "champion": ["阿狸", "内瑟斯"]},
-        evidence_text="伤害 10 → 20",
-    )
-
-    assert first == second == {"patch_version": "patch:26.17"}
-    assert project_event_identity(
-        "gameplay_balance",
-        {"patch_version": "2026.7.31", "champion": "内瑟斯"},
-        evidence_text="内瑟斯基础法力值 326 → 376",
-    ) == {
-        "champion": "内瑟斯",
-        "change_signature": "changes:326>376",
-    }
-
-
-@pytest.mark.parametrize(
-    ("connector_type", "text", "expected"),
-    [
-        ("x_twitter", "Mythic Shop weekly rotation", "GLOBAL"),
-        ("baidu_tieba", "神话商城本周轮换", "CN"),
-        ("x_twitter", "国服本周神话商城", "CN"),
-        ("baidu_tieba", "global Mythic Shop rotation", "GLOBAL"),
-    ],
-)
-def test_mythic_shop_market_prefers_explicit_text_over_source_fallback(
-    connector_type: str, text: str, expected: str
-) -> None:
-    assert (
-        determine_mythic_shop_market(
-            text=text,
-            source_connector_type=connector_type,
-        )
-        == expected
-    )
-
-
-def test_mythic_shop_market_identity_changes_by_market_and_week() -> None:
-    def key(market: str, period: str) -> str:
-        return _aggregation_key(
-            event_family="commercial_offer",
+            external_id="routing-validation",
+            title="阵容变化",
             products=["lol_pc"],
-            canonical_anchors={
-                "shop": "mythic_shop",
-                "market": market,
-                "rotation_period": period,
-            },
-        )
-
-    assert key("CN", "2026-w32") != key("GLOBAL", "2026-w32")
-    assert key("CN", "2026-w32") != key("CN", "2026-w33")
-
-
-def test_mythic_shop_rotation_period_is_deterministic_iso_week() -> None:
-    from datetime import date
-
-    assert mythic_shop_rotation_period_from_date(date(2026, 8, 3)) == "2026-w32"
-    assert mythic_shop_rotation_period_from_date(date(2026, 8, 9)) == "2026-w32"
-    assert mythic_shop_rotation_period_from_date(date(2026, 8, 10)) == "2026-w33"
-    # Same ISO week and market unify into one identity regardless of phrasing.
-    normalized = canonicalize_event_anchors(
-        "commercial_offer",
-        {"shop": "mythic_shop", "market": "CN", "rotation_period": "daily browse"},
-    )
-    assert normalized["rotation_period"] == "daily-browse"
-    direct = {
-        "shop": "mythic_shop",
-        "market": "CN",
-        "rotation_period": mythic_shop_rotation_period_from_date(date(2026, 8, 6)),
-    }
-    assert _aggregation_key(
-        event_family="commercial_offer",
-        products=["lol_pc"],
-        canonical_anchors=direct,
-    ) == _aggregation_key(
-        event_family="commercial_offer",
-        products=["lol_pc", "tft"],
-        canonical_anchors=direct,
-    )
-
-
-def test_mythic_shop_rotation_period_falls_back_to_ingested_at() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Mythic CN source", connector_type="baidu_tieba")
-        db.add(source)
-        db.flush()
-        # RawItem content is immutable; set timestamps at creation time.
-        raw = RawItem(
-            source_id=source.id,
-            external_id="mythic-fallback",
-            native_title="本周国服神话商城轮换",
-            canonical_url="https://example.com/mythic-fallback",
-            content_blocks=[
-                {"type": "paragraph", "text": "本周国服神话商城轮换"}
-            ],
-            published_at=None,
-            ingested_at=datetime(2026, 8, 5, tzinfo=UTC),
-        )
-        db.add(raw)
-        db.flush()
-        item = NormalizedItem(
-            raw_item_id=raw.id,
-            normalized_title="本周国服神话商城轮换",
-            normalized_text="本周国服神话商城轮换",
-            summary="本周国服神话商城轮换",
-            entities=[],
-            products=["lol_pc"],
-            message_type="shop_announcement",
-            topics=["shop_monetization"],
-            content_form="original",
-            importance_score=0.5,
-            importance_calculation={
-                "importance_profile": "gameplay_announcement",
-                "profile_score": 0.5,
-                "final_score": 0.5,
-            },
-            translated_title="本周国服神话商城轮换",
-            translated_text="本周国服神话商城轮换",
-            translated_content_blocks=[{"type": "paragraph", "text": "本周国服神话商城轮换"}],
-            translation_status="not_required",
-            analysis_model="test",
-            analysis_version="test",
-        )
-        db.add(item)
-        db.commit()
-        anchors = _mythic_shop_anchors(
-            item,
-            event_family="commercial_offer",
-            anchors={
-                "shop": "mythic_shop",
-                "market": "unknown",
-                "rotation_period": "none",
-            },
-        )
-        assert re.fullmatch(r"\d{4}-w\d{2}", anchors["rotation_period"])
-        assert anchors["rotation_period"] != "none"
-
-
-def test_daily_match_roundup_hint_excludes_schedule_summary() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Esports roundup")
-        db.add(source)
-        db.flush()
-        roundup = _item(
-            db,
-            source=source,
-            external_id="lck-roundup",
-            title="今日 LCK 三场比赛 A vs B、C vs D、E vs F",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[
-                {"type": "team", "canonical_id": value}
-                for value in ("team:a", "team:b", "team:c", "team:d", "team:e", "team:f")
-            ],
-            products=["lol_esports"],
-        )
-        postponed = _item(
-            db,
-            source=source,
-            external_id="postponed-match",
-            title="今日比赛延期：A vs B",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[],
-            products=["lol_esports"],
-        )
-        assert is_daily_match_roundup(roundup)
-        assert not is_daily_match_roundup(postponed)
-
-
-@pytest.mark.parametrize(
-    "title",
-    [
-        "Dplus Kia 对阵 GenG 的 LCK 比赛预告 19:00",
-        "T1 Home Ground ticket information: opening daily at 14:00",
-        "T1 vs Gen.G tickets: 17:00, presale 14:00, general sale 14:00",
-    ],
-)
-def test_single_match_or_ticket_times_are_not_daily_roundups(title: str) -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Precision roundup source")
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id=title[:20],
-            title=title,
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[
-                {"type": "team", "canonical_id": "team:t1"},
-                {"type": "team", "canonical_id": "team:geng"},
-            ],
-            products=["lol_esports"],
-        )
-        assert explicit_match_count(item) <= 1
-        assert not is_daily_match_roundup(item)
-
-
-def test_duplicate_normalized_and_translated_match_text_counts_once() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Duplicate text source")
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="duplicate-match-text",
-            title="今天比赛 A vs B",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[],
-            products=["lol_esports"],
-        )
-        item.normalized_text = "今天比赛 A vs B"
-        item.translated_text = "今天比赛 A vs B"
-        assert explicit_match_count(item) == 1
-        assert not is_daily_match_roundup(item)
-
-
-def test_team_entities_do_not_imply_multiple_matches() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Entity precision source")
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="team-entities-one-match",
-            title="A vs B 19:00",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[
-                {"type": "team", "canonical_id": value}
-                for value in ("team:a", "team:b", "team:c", "team:d")
-            ],
-            products=["lol_esports"],
-        )
-        assert explicit_match_count(item) == 1
-        assert not is_daily_match_roundup(item)
-
-
-class DailyRoundupScheduleClient:
-    async def aggregate_events(self, **payload: object) -> EventAggregationResult:
-        message = payload["message"]
-        assert isinstance(message, dict)
-        assert "daily_esports_match_roundup" in message["editorial_granularity_guidance"]
-        return EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "esports_schedule",
-                        "action": "create",
-                        "relation": "reports",
-                        "source_role": "responsible_official",
-                        "materiality": "material_update",
-                        "canonical_anchors": {"date": "2026-08-12"},
-                        "event_title": "今日赛程汇总",
-                        "proposed_summary": "今日比赛安排。",
-                        "importance": _importance("esports_schedule"),
-                        "evidence_excerpt": "今日三场比赛",
-                    }
-                ]
-            }
-        )
-
-
-class DailyMatchClient:
-    async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
-        matches = (("A", "B"), ("C", "D"), ("E", "F"))
-        return EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": index,
-                        "event_family": "esports_match",
-                        "action": "create",
-                        "relation": "reports",
-                        "source_role": "responsible_official",
-                        "materiality": "material_update",
-                        "canonical_anchors": {
-                            "team1": matches[index][0],
-                            "team2": matches[index][1],
-                            "date": "2026-08-12",
-                            "league": "LCK",
-                        },
-                        "event_title": f"第 {index + 1} 场比赛",
-                        "proposed_summary": f"第 {index + 1} 场比赛安排。",
-                        "importance": _importance(
-                            ("esports_regular", "esports_playoffs", "worlds_key")[index],
-                            competition_region=("lck", "lpl", "international")[index],
-                        ),
-                        "evidence_excerpt": (
-                            f"{matches[index][0]} vs {matches[index][1]}"
-                        ),
-                    }
-                    for index in range(3)
-                ]
-            }
-        )
-
-
-@pytest.mark.anyio
-async def test_three_match_roundup_creates_three_match_events_without_daily_event() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Three match roundup source", is_official=True)
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="three-match-roundup",
-            title="今日 LCK 三场比赛 A vs B、C vs D、E vs F",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[],
-            products=["lol_esports"],
-            published_at=datetime(2026, 8, 12, tzinfo=UTC),
+            topics=["balance_gameplay"],
         )
         db.commit()
+        client = StaticClient(
+            _result(
+                _create_decision(family="gameplay_balance"),
+                {
+                    **_create_decision(
+                        mention_index=1,
+                        family="player_activity",
+                        evidence="抽奖活动",
+                    ),
+                },
+            )
+        )
 
-        run = await aggregate_normalized_item(db, item, llm_client=DailyMatchClient())
+        run = _aggregate(db, item, client)
 
         assert run.outcome == "applied"
-        assert db.scalar(select(func.count(Event.id))) == 3
-        assert {
-            event.event_family for event in db.scalars(select(Event)).all()
-        } == {"esports_match"}
-        assert sorted(event.importance_score for event in db.scalars(select(Event))) == [
-            0.6,
-            0.73,
-            0.81,
-        ]
-
-
-@pytest.mark.anyio
-async def test_daily_roundup_cannot_create_schedule_summary_event() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Roundup validator source", is_official=True)
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="roundup-validator",
-            title="今日 LEC 三场比赛 A vs B、C vs D、E vs F",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[],
-            products=["lol_esports"],
+        assert db.scalar(select(func.count(Event.id))) == 1
+        assert run.decision_draft["mentions"][1]["action"] == "ignore"
+        assert run.decision_draft["suppressed_mentions"][0]["reason"] == (
+            "outside_upstream_event_space"
         )
-        db.commit()
-        with pytest.raises(ValueError, match="daily match reminders"):
-            await aggregate_normalized_item(
-                db, item, llm_client=DailyRoundupScheduleClient()
-            )
 
 
-@pytest.mark.parametrize("league", ["LPL", "LCK", "LEC"])
-def test_daily_roundup_detection_applies_to_all_leagues(league: str) -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name=f"{league} roundup source")
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id=f"{league}-roundup",
-            title=f"今日 {league} 三场比赛 A vs B、C vs D、E vs F",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[],
-            products=["lol_esports"],
-        )
-        assert is_daily_match_roundup(item)
+def test_membership_schema_checks_only_structural_action_invariants() -> None:
+    create = EventAggregationResult.model_validate(
+        {"mentions": [_create_decision()]}
+    )
+    assert create.mentions[0].new_event is not None
+    assert create.mentions[0].new_event.canonical_anchors == {"patch_version": "26.17"}
 
-
-@pytest.mark.parametrize(
-    ("family", "products", "expected"),
-    [
-        ("esports_schedule", ["lol_pc", "lol_esports"], "esports"),
-        ("gameplay_release", ["lol_pc"], "lol_pc"),
-        ("gameplay_release", ["tft"], "tft"),
-        ("gameplay_release", ["other_lol_product"], "other_products"),
-        ("corporate_change", ["riot_ecosystem"], "ecosystem"),
-    ],
-)
-def test_event_category_mapping_is_centralized(
-    family: str, products: list[str], expected: str
-) -> None:
-    assert event_category(event_family=family, products=products) == expected
-
-
-def test_structured_output_rejects_nonmaterial_rewrites_and_bad_indexes() -> None:
-    assert "unresolved_points" not in Event.__table__.columns
-    assert "unresolved_points" not in EventDetailRead.model_fields
-
-    with pytest.raises(ValidationError, match="non-material mentions"):
-        EventAggregationResult.model_validate(
+    with pytest.raises(ValidationError, match="attach requires event_id"):
+        _result(
             {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "gameplay_balance",
-                        "action": "update",
-                        "candidate_event_id": 1,
-                        "relation": "supports",
-                        "source_role": "independent_media",
-                        "materiality": "corroboration_only",
-                        "evidence_excerpt": "重复报道",
-                        "proposed_summary": "不允许改写",
-                    }
-                ]
+                "mention_index": 0,
+                "action": "attach",
+                "event_family": "gameplay_balance",
+                "evidence_excerpt": "证据",
+            }
+        )
+    with pytest.raises(ValidationError, match="create requires new_event"):
+        _result(
+            {
+                "mention_index": 0,
+                "action": "create",
+                "event_family": "gameplay_balance",
+                "evidence_excerpt": "证据",
             }
         )
     with pytest.raises(ValidationError, match="contiguous"):
@@ -989,733 +276,515 @@ def test_structured_output_rejects_nonmaterial_rewrites_and_bad_indexes() -> Non
             {
                 "mentions": [
                     {
+                        **_create_decision(),
                         "mention_index": 1,
-                        "event_family": "gameplay_balance",
-                        "action": "ignore",
-                        "relation": "mentions",
-                        "source_role": "unknown",
-                        "materiality": "context_only",
                     }
                 ]
             }
         )
-    with pytest.raises(ValidationError, match="requires importance semantics"):
-        EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "gameplay_balance",
-                        "action": "create",
-                        "relation": "reports",
-                        "source_role": "known_leaker",
-                        "materiality": "material_update",
-                        "canonical_anchors": {"patch_version": "patch:missing"},
-                        "event_title": "缺少重要性语义",
-                        "proposed_summary": "必须被拒绝。",
-                    }
-                ]
-            }
-        )
-    with pytest.raises(ValidationError, match="non-material mentions"):
-        EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "gameplay_balance",
-                        "action": "update",
-                        "candidate_event_id": 1,
-                        "relation": "supports",
-                        "source_role": "independent_media",
-                        "materiality": "context_only",
-                        "importance": _importance("patch_official_notes"),
-                        "evidence_excerpt": "仅为上下文",
-                    }
-                ]
-            }
-        )
-    duplicate_create = {
-        "event_family": "gameplay_balance",
-        "action": "create",
-        "candidate_event_id": None,
-        "relation": "reports",
-        "source_role": "known_leaker",
-        "materiality": "material_update",
-        "canonical_anchors": {"patch_version": "patch:26.99"},
-        "event_title": "冲突事件",
-        "proposed_summary": "相同身份只能创建一次。",
-        "importance": _importance("leak_gameplay"),
-        "evidence_excerpt": "冲突",
-    }
-    with pytest.raises(ValidationError, match="must be merged"):
-        EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {**duplicate_create, "mention_index": 0},
-                    {**duplicate_create, "mention_index": 1},
-                ]
-            }
-        )
+    with pytest.raises(ValidationError, match="evidence_excerpt"):
+        _result({**_create_decision(), "evidence_excerpt": ""})
 
 
-def test_long_content_prefers_entity_relevant_translated_blocks() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        source = Source(name="Long article source")
+def test_zero_mentions_completes_with_one_model_call_and_run_idempotency() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="zero")
         db.add(source)
         db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="long",
-            title="超长版本公告",
-            message_type="game_patch_notes",
-            topics=["balance_gameplay"],
-            entities=[
-                {
-                    "type": "champion",
-                    "name": "阿狸",
-                    "canonical_id": "champion:ahri",
-                }
-            ],
-        )
-        item.translated_text = "无关段落" * 10_000 + "阿狸伤害调整"
-        item.translated_content_blocks = [
-            {"type": "paragraph", "text": "无关段落" * 7_000},
-            {"type": "paragraph", "text": "阿狸伤害调整"},
-        ]
-
-        selected, metadata = _select_content(item)
-
-        assert len(selected) <= 24_000
-        assert "阿狸伤害调整" in selected
-        assert metadata["content_truncated"] is True
-        assert metadata["strategy"] == "entity_relevant_translated_blocks"
-
-
-@pytest.mark.anyio
-async def test_one_official_call_updates_two_events_and_creates_a_third() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        leaker = Source(name="Leaker", reliability_score=0.8)
-        official = Source(name="Official", is_official=True, reliability_score=1)
-        db.add_all([leaker, official])
-        db.flush()
-        balance_item = _item(
-            db,
-            source=leaker,
-            external_id="balance",
-            title="26.17 平衡爆料",
-            message_type="game_leak",
-            topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:26.17"}],
-        )
-        activity_item = _item(
-            db,
-            source=leaker,
-            external_id="activity",
-            title="星界活动爆料",
-            message_type="game_leak",
-            topics=["activities_rewards"],
-            entities=[{"type": "activity", "canonical_id": "activity:star"}],
-        )
-        official_item = _item(
-            db,
-            source=official,
-            external_id="patch-notes",
-            title="26.17 官网综合版本公告",
-            message_type="game_patch_notes",
-            topics=["balance_gameplay", "activities_rewards", "cosmetics"],
-            entities=[
-                {"type": "patch", "canonical_id": "patch:26.17"},
-                {"type": "activity", "canonical_id": "activity:star"},
-                {"type": "skin", "canonical_id": "skin:star-series"},
-            ],
-            importance_profile="patch_official_notes",
-            domain_score=0.92,
-        )
+        item = _item(db, source=source, external_id="zero", title="只有背景讨论")
         db.commit()
-        client = ScenarioClient()
+        client = StaticClient(_result())
 
-        await aggregate_normalized_item(db, balance_item, llm_client=client)
-        await aggregate_normalized_item(db, activity_item, llm_client=client)
-        official_run = await aggregate_normalized_item(db, official_item, llm_client=client)
+        first = _aggregate(db, item, client)
+        second = _aggregate(db, item, client)
 
-        assert client.calls == 3
-        assert official_run.model_call_count == 1
-        assert official_run.outcome == "applied"
-        assert {candidate["event_family"] for candidate in official_run.candidate_snapshot} == {
-            "gameplay_balance",
-            "player_activity",
-        }
-        assert db.scalar(select(func.count(Event.id))) == 3
-        assert db.scalar(select(func.count(EventMention.id))) == 5
-        by_family = {
-            event.event_family: event for event in db.scalars(select(Event)).all()
-        }
-        assert by_family["gameplay_balance"].message_count_total == 2
-        assert by_family["player_activity"].message_count_total == 2
-        assert by_family["player_activity"].canonical_anchors == {
-            "activity_name": "activity:star"
-        }
-        assert by_family["cosmetic_release"].message_count_total == 1
-        assert by_family["gameplay_balance"].current_summary.startswith("官网确认")
-        assert by_family["gameplay_balance"].credibility_level == "officially_confirmed"
-        assert by_family["gameplay_balance"].credibility_score == 1
-        assert official_item.importance_score == 0.92
-        assert {
-            family: by_family[family].importance_score
-            for family in ("gameplay_balance", "player_activity", "cosmetic_release")
-        } == {
-            "gameplay_balance": 0.86,
-            "player_activity": 0.72,
-            "cosmetic_release": 0.68,
-        }
-        snapshots = {
-            mention.mention_index: mention.domain_importance_snapshot
-            for mention in db.scalars(
-                select(EventMention).where(
-                    EventMention.normalized_item_id == official_item.id
-                )
-            )
-        }
-        assert [snapshots[index]["profile"] for index in range(3)] == [
-            "gameplay_announcement",
-            "activity_announcement",
-            "cosmetic_announcement",
-        ]
-        assert by_family["gameplay_balance"].heat_score > 0
-
-        repeated = await aggregate_normalized_item(db, official_item, llm_client=client)
-        assert repeated.id == official_run.id
-        assert client.calls == 3
-        assert db.scalar(select(func.count(EventMention.id))) == 5
-
-
-@pytest.mark.anyio
-async def test_skip_and_update_only_without_candidates_make_zero_calls() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="No-call source")
-        db.add(source)
-        db.flush()
-        skipped = _item(
-            db,
-            source=source,
-            external_id="skipped",
-            title="仅媒体",
-            message_type="unknown",
-            topics=["unknown"],
-            entities=[],
-            products=["unknown"],
-            content_form="media_only",
-        )
-        repost = _item(
-            db,
-            source=source,
-            external_id="no-candidate-repost",
-            title="转载未知事件",
-            message_type="game_leak",
-            topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:99.1"}],
-            content_form="repost",
-        )
-        db.commit()
-        client = ScenarioClient()
-
-        skipped_run = await aggregate_normalized_item(db, skipped, llm_client=client)
-        repost_run = await aggregate_normalized_item(db, repost, llm_client=client)
-
-        assert client.calls == 0
-        assert skipped_run.model_call_count == 0
-        assert skipped_run.outcome == "skipped_by_admission"
-        assert repost_run.model_call_count == 0
-        assert repost_run.outcome == "no_existing_candidate"
-        assert db.scalar(select(func.count(EventAggregationRun.id))) == 2
-
-
-class CollisionClient:
-    async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
-        return EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "gameplay_balance",
-                        "action": "create",
-                        "candidate_event_id": None,
-                        "relation": "reports",
-                        "source_role": "known_leaker",
-                        "materiality": "material_update",
-                        "canonical_anchors": {"patch_version": "patch:26.99"},
-                        "event_title": "冲突事件",
-                        "proposed_summary": "第一项会先进入待提交事务。",
-                        "latest_development": "测试事务回滚",
-                        "importance": _importance("leak_gameplay"),
-                        "evidence_excerpt": "冲突",
-                    },
-                    {
-                        "mention_index": 1,
-                        "event_family": "gameplay_balance",
-                        "action": "update",
-                        "candidate_event_id": 999999,
-                        "relation": "supports",
-                        "source_role": "known_leaker",
-                        "materiality": "material_update",
-                        "canonical_anchors": {"patch_version": "patch:26.98"},
-                        "proposed_summary": "第二项引用已消失的候选。",
-                        "importance": _importance("leak_gameplay"),
-                        "evidence_excerpt": "不存在的候选",
-                    },
-                ]
-            }
-        )
-
-
-class DuplicateIdentityClient:
-    async def aggregate_events(self, **payload: object) -> EventAggregationResult:
-        message = payload["message"]
-        assert isinstance(message, dict)
-        title = str(message["title"])
-        return EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "esports_schedule",
-                        "action": "create",
-                        "candidate_event_id": None,
-                        "relation": "reports",
-                        "source_role": "responsible_official",
-                        "materiality": "material_update",
-                        "canonical_anchors": {
-                            "tournament": "2026LPL",
-                            "date": "2026-08-01",
-                        },
-                        "event_title": "8 月 1 日赛程",
-                        "proposed_summary": title,
-                        "latest_development": title,
-                        "key_fact_changes": {
-                            "add": [{"fact": title}],
-                        },
-                        "importance": _importance("esports_schedule"),
-                        "evidence_excerpt": title,
-                    }
-                ]
-            }
-        )
-
-
-class RepostOfficialRoleClient:
-    async def aggregate_events(self, **payload: object) -> EventAggregationResult:
-        candidates = payload["candidates"]
-        assert isinstance(candidates, list)
-        return EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "esports_schedule",
-                        "action": "update",
-                        "candidate_event_id": candidates[0]["event_id"],
-                        "relation": "supports",
-                        "source_role": "responsible_official",
-                        "materiality": "corroboration_only",
-                        "canonical_anchors": {
-                            "league": "LCK",
-                            "date": "2026-08-01",
-                        },
-                        "evidence_excerpt": "官方账号转载同日赛程",
-                    }
-                ]
-            }
-        )
-
-
-@pytest.mark.anyio
-async def test_official_repost_cannot_claim_responsible_official_role() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        official = Source(name="Reposting official", is_official=True, reliability_score=1)
-        db.add(official)
-        db.flush()
-        original = _item(
-            db,
-            source=official,
-            external_id="original-schedule",
-            title="8 月 1 日赛程",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[],
-        )
-        repost = _item(
-            db,
-            source=official,
-            external_id="repost-schedule",
-            title="转发 8 月 1 日赛程",
-            message_type="esports_announcement",
-            topics=["esports_schedule"],
-            entities=[],
-            content_form="repost",
-        )
-        db.commit()
-        event, _created = create_event(
-            db,
-            normalized_item_id=original.id,
-            mention_index=0,
-            event_family="esports_schedule",
-            products=["lol_pc"],
-            canonical_anchors={"league": "LCK", "date": "2026-08-01"},
-            aggregation_key="schedule-2026-08-01",
-            title="8 月 1 日赛程",
-            current_summary="赛程已公布。",
-            source_role="responsible_official",
-            domain_importance_snapshot=_snapshot(
-                "esports_schedule", competition_region="lck"
-            ),
-        )
-
-        await aggregate_normalized_item(db, repost, llm_client=RepostOfficialRoleClient())
-
-        mention = db.scalar(
-            select(EventMention).where(
-                EventMention.event_id == event.id,
-                EventMention.normalized_item_id == repost.id,
-            )
-        )
-        assert mention is not None
-        assert mention.source_role == "republisher"
-
-
-@pytest.mark.anyio
-async def test_duplicate_create_identity_updates_existing_event() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        official = Source(
-            name="Schedule official", is_official=True, reliability_score=1
-        )
-        db.add(official)
-        db.flush()
-        first = _item(
-            db,
-            source=official,
-            external_id="schedule-1",
-            title="首次发布赛程",
-            message_type="esports_announcement",
-            topics=["esports"],
-            entities=[],
-        )
-        second = _item(
-            db,
-            source=official,
-            external_id="schedule-2",
-            title="再次发布同日赛程",
-            message_type="esports_announcement",
-            topics=["esports"],
-            entities=[],
-        )
-        db.commit()
-        client = DuplicateIdentityClient()
-
-        await aggregate_normalized_item(db, first, llm_client=client)
-        await aggregate_normalized_item(db, second, llm_client=client)
-
-        event = db.scalar(select(Event))
-        assert event is not None
-        assert event.current_summary == "再次发布同日赛程"
-        assert event.message_count_total == 2
-        assert len(event.key_facts) == 2
-        assert db.scalar(select(func.count(Event.id))) == 1
-        assert db.scalar(select(func.count(EventMention.id))) == 2
-
-
-class FailedModelClient:
-    async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
-        raise LLMAnalysisError("两次结构校验失败")
-
-
-@pytest.mark.anyio
-async def test_manual_retry_accumulates_model_call_audit() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Retry audit source", reliability_score=0.8)
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="retry-audit",
-            title="26.17 平衡爆料",
-            message_type="game_leak",
-            topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:26.17"}],
-        )
-        db.commit()
-
-        with pytest.raises(LLMAnalysisError):
-            await aggregate_normalized_item(db, item, llm_client=FailedModelClient())
-        failed = db.scalar(select(EventAggregationRun))
-        assert failed is not None
-        assert failed.model_call_count == 2
-
-        completed = await aggregate_normalized_item(db, item, llm_client=ScenarioClient())
-
-        assert completed.status == "completed"
-        assert completed.model_call_count == 3
-
-
-@pytest.mark.anyio
-async def test_multi_mention_application_is_atomic() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Atomic source", reliability_score=0.8)
-        db.add(source)
-        db.flush()
-        item = _item(
-            db,
-            source=source,
-            external_id="atomic",
-            title="一次响应包含冲突动作",
-            message_type="game_leak",
-            topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:26.99"}],
-        )
-        db.commit()
-
-        with pytest.raises(Exception, match="disappeared"):
-            await aggregate_normalized_item(db, item, llm_client=CollisionClient())
-
+        assert first.id == second.id
+        assert first.status == "completed"
+        assert first.outcome == "ignored"
+        assert first.model_call_count == 1
+        assert client.calls == 1
         assert db.scalar(select(func.count(Event.id))) == 0
         assert db.scalar(select(func.count(EventMention.id))) == 0
+
+
+def test_minimal_skip_is_audited_without_model_call() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="skip")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="skip",
+            title="尚未发布",
+            publication_status="withdrawn",
+        )
+        db.commit()
+        client = StaticClient(_result())
+
+        run = _aggregate(db, item, client)
+
+        assert run.admission_decision == "skip"
+        assert run.outcome == "skipped_by_minimal_filter"
+        assert run.model_call_count == 0
+        assert client.calls == 0
+
+
+def test_create_persists_membership_then_refreshes_projections() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="leaker", reliability_score=0.8)
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="create",
+            title="26.17 版本平衡调整",
+            importance_score=0.81,
+            importance_profile="leak_gameplay",
+        )
+        db.commit()
+        client = StaticClient(_result(_create_decision()))
+
+        run = _aggregate(db, item, client)
+        event = db.scalar(select(Event))
+        mention = db.scalar(
+            select(EventMention).where(EventMention.normalized_item_id == item.id)
+        )
+
+        assert run.outcome == "applied"
+        assert event is not None and mention is not None
+        assert event.aggregation_key is None
+        assert event.importance_score == 0.81
+        assert event.importance_breakdown["dominant_normalized_item_id"] == item.id
+        assert event.heat_score > 0
+        assert event.message_count_total == 1
+        assert mention.evidence_excerpt == "26.17 版本平衡调整"
+        assert mention.impact_snapshot == {}
+        assert db.scalar(select(func.count(EventRevision.id))) == 1
+        assert client.payloads[0].keys() == {
+            "message",
+            "possible_event_families",
+            "candidates",
+        }
+
+
+def test_mixed_attach_and_create_is_atomic_and_uses_one_call() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="official", is_official=True, reliability_score=1)
+        db.add(source)
+        db.flush()
+        seed_item = _item(
+            db,
+            source=source,
+            external_id="seed",
+            title="26.17 平衡预览",
+            published_at=datetime(2026, 8, 11, 8, tzinfo=UTC),
+        )
+        db.commit()
+        existing, _ = create_event(
+            db,
+            normalized_item_id=seed_item.id,
+            mention_index=0,
+            event_family="gameplay_balance",
+            products=["lol_pc"],
+            canonical_anchors={"patch_version": "26.17"},
+            title="26.17 平衡预览",
+            current_summary="预览已经发布。",
+            evidence_excerpt="26.17 平衡预览",
+        )
+        refresh_event_metrics(db, {existing.id})
+        db.commit()
+
+        item = _item(
+            db,
+            source=source,
+            external_id="mixed",
+            title="官网确认平衡并公布新皮肤",
+            topics=["balance_gameplay", "cosmetics"],
+        )
+        db.commit()
+        client = StaticClient(
+            _result(
+                {
+                    "mention_index": 0,
+                    "action": "attach",
+                    "event_id": existing.id,
+                    "event_family": "gameplay_balance",
+                    "relation": "confirms",
+                    "source_role": "responsible_official",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "官网确认平衡调整",
+                    "projection": {
+                        "summary": "官网已经确认 26.17 平衡调整。",
+                        "latest_development": "官网确认",
+                    },
+                },
+                {
+                    **_create_decision(
+                        mention_index=1,
+                        family="cosmetic_release",
+                        title="星界系列皮肤",
+                        summary="官网公布星界系列皮肤。",
+                        evidence="公布星界系列皮肤",
+                    ),
+                    "source_role": "responsible_official",
+                },
+            )
+        )
+
+        run = _aggregate(db, item, client)
+        db.refresh(existing)
+
+        assert run.outcome == "applied"
+        assert client.calls == 1
+        assert db.scalar(select(func.count(Event.id))) == 2
+        assert db.scalar(select(func.count(EventMention.id))) == 3
+        assert existing.current_summary == "官网已经确认 26.17 平衡调整。"
+        assert existing.current_revision == 2
+        attached = db.scalar(
+            select(EventMention).where(EventMention.normalized_item_id == item.id)
+        )
+        assert attached is not None
+        assert attached.source_role == "responsible_official"
+
+
+def test_attach_must_reference_this_request_candidate_set() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="invalid candidate")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="invalid", title="一个新公告")
+        db.commit()
+        client = StaticClient(
+            _result(
+                {
+                    "mention_index": 0,
+                    "action": "attach",
+                    "event_id": 999,
+                    "event_family": "gameplay_balance",
+                    "relation": "reports",
+                    "source_role": "unknown",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "一个新公告",
+                }
+            )
+        )
+
+        with pytest.raises(ValueError, match="non-candidate"):
+            _aggregate(db, item, client)
+
+        assert db.scalar(select(func.count(Event.id))) == 0
         run = db.scalar(select(EventAggregationRun))
         assert run is not None
         assert run.status == "failed"
         assert run.outcome == "apply_error"
 
 
-class PartialTopicClient:
-    async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
-        return EventAggregationResult.model_validate(
-            {
-                "mentions": [
-                    {
-                        "mention_index": 0,
-                        "event_family": "player_activity",
-                        "action": "create",
-                        "candidate_event_id": None,
-                        "relation": "reports",
-                        "source_role": "responsible_official",
-                        "materiality": "material_update",
-                        "canonical_anchors": {"activity_name": "activity:one"},
-                        "event_title": "唯一独立活动",
-                        "proposed_summary": "只有活动构成独立事件。",
-                        "latest_development": "活动公布",
-                        "key_fact_changes": {
-                            "add": [
-                                {"fact": "至臻皮肤 A"},
-                                {"fact": "臻彩 B"},
-                                {"fact": "图标 C"},
-                                {"fact": "边框 D"},
-                            ]
-                        },
-                        "importance": _importance("activity_announcement"),
-                        "evidence_excerpt": "活动公布",
-                    }
-                ],
-                "ignored_fragments": ["皮肤仅作为活动奖励出现，不构成独立发布事件"],
-            }
-        )
-
-
-@pytest.mark.anyio
-async def test_multiple_topics_can_produce_only_one_independent_event() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
+def test_multi_mention_failure_rolls_back_all_membership_writes() -> None:
+    engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
-        official = Source(name="Partial topic official", is_official=True, reliability_score=1)
-        db.add(official)
-        db.flush()
-        item = _item(
-            db,
-            source=official,
-            external_id="partial-topics",
-            title="活动及作为奖励出现的皮肤",
-            message_type="game_announcement",
-            topics=["activities_rewards", "cosmetics"],
-            entities=[{"type": "activity", "canonical_id": "activity:one"}],
-        )
-        db.commit()
-
-        run = await aggregate_normalized_item(db, item, llm_client=PartialTopicClient())
-
-        assert run.outcome == "applied"
-        assert run.model_call_count == 1
-        assert len(run.decision_draft["ignored_fragments"]) == 1
-        assert db.scalar(select(func.count(Event.id))) == 1
-        assert db.scalar(select(func.count(EventMention.id))) == 1
-        event = db.scalar(select(Event))
-        assert event is not None
-        assert len(event.key_facts) == 4
-
-
-def test_strong_anchor_conflict_prevents_similar_event_merge() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Anchor conflict source", reliability_score=0.8)
+        source = Source(name="atomic")
         db.add(source)
         db.flush()
-        old_item = _item(
-            db,
-            source=source,
-            external_id="patch-26-17",
-            title="版本平衡调整",
-            message_type="game_leak",
-            topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:26.17"}],
+        item = _item(db, source=source, external_id="atomic", title="综合公告")
+        db.commit()
+        client = StaticClient(
+            _result(
+                _create_decision(mention_index=0),
+                {
+                    "mention_index": 1,
+                    "action": "attach",
+                    "event_id": 999,
+                        "event_family": "gameplay_balance",
+                    "relation": "reports",
+                    "source_role": "unknown",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "活动更新",
+                },
+            )
         )
-        new_item = _item(
+
+        with pytest.raises(ValueError, match="non-candidate"):
+            _aggregate(db, item, client)
+
+        assert db.scalar(select(func.count(Event.id))) == 0
+        assert db.scalar(select(func.count(EventMention.id))) == 0
+        assert db.scalar(select(func.count(EventRevision.id))) == 0
+
+
+def test_official_repost_cannot_claim_responsible_official_role() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="official repost", is_official=True)
+        db.add(source)
+        db.flush()
+        seed_item = _item(
             db,
             source=source,
-            external_id="patch-26-18",
-            title="版本平衡调整",
-            message_type="game_leak",
-            topics=["balance_gameplay"],
-            entities=[{"type": "patch", "canonical_id": "patch:26.18"}],
+            external_id="seed-repost",
+            title="原始事件",
         )
         db.commit()
-        create_event(
+        existing, _ = create_event(
             db,
-            normalized_item_id=old_item.id,
+            normalized_item_id=seed_item.id,
             mention_index=0,
             event_family="gameplay_balance",
             products=["lol_pc"],
-            canonical_anchors={"patch_version": "patch:26.17"},
-            aggregation_key="patch-26-17-event",
-            title="版本平衡调整",
-            current_summary="26.17 平衡调整。",
-            domain_importance_snapshot=_snapshot(),
+            canonical_anchors={},
+            title="原始事件",
+            current_summary="原始事件已发布。",
+            evidence_excerpt="原始事件",
         )
-
-        candidates = recall_event_candidates(
-            db,
-            item=new_item,
-            family_hints=["gameplay_balance"],
-            anchors={"patch_version": "patch:26.18"},
-        )
-
-        assert candidates == []
-
-
-@pytest.mark.parametrize(
-    ("message_products", "event_products", "expected"),
-    [
-        (["other_lol_product"], ["lol_pc"], False),
-        (["lol_pc"], ["other_lol_product"], False),
-        (["lol_pc", "other_lol_product"], ["lol_pc"], True),
-        (["unknown"], ["lol_pc"], True),
-    ],
-)
-def test_candidate_recall_respects_explicit_product_domains(
-    message_products: list[str], event_products: list[str], expected: bool
-) -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Product boundary source", reliability_score=0.8)
-        db.add(source)
-        db.flush()
         item = _item(
             db,
             source=source,
-            external_id=f"message-{message_products}",
-            title="命名内容发布",
-            message_type="other_lol_product_announcement",
-            topics=["gameplay"],
-            entities=[{"type": "product", "canonical_id": "product:demo"}],
-            products=message_products,
+            external_id="repost",
+            title="转发一个事件",
+            content_form="repost",
         )
         db.commit()
-        create_event(
-            db,
-            normalized_item_id=item.id,
-            mention_index=0,
-            event_family="gameplay_release",
-            products=event_products,
-            canonical_anchors={"product": "product:demo"},
-            aggregation_key=f"product-boundary-{message_products}-{event_products}",
-            title="命名内容发布",
-            current_summary="内容已发布。",
-            domain_importance_snapshot=_snapshot("gameplay_announcement"),
+        decision = _create_decision()
+        decision["action"] = "attach"
+        decision["event_id"] = existing.id
+        decision["new_event"] = None
+        decision["source_role"] = "responsible_official"
+        client = StaticClient(_result(decision))
+
+        _aggregate(db, item, client)
+        mention = db.scalar(
+            select(EventMention).where(EventMention.normalized_item_id == item.id)
         )
-        candidates = recall_event_candidates(
-            db,
-            item=item,
-            family_hints=["gameplay_release"],
-            anchors={"product": "product:demo"},
-        )
-        assert bool(candidates) is expected
+
+        assert mention is not None
+        assert mention.source_role == "republisher"
 
 
-def test_candidate_snapshot_identity_key_belongs_to_each_event() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
+def test_manual_retry_accumulates_model_call_audit() -> None:
+    engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="Candidate identity source", reliability_score=0.8)
+        source = Source(name="retry")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="retry", title="可重试公告")
+        db.commit()
+        client = ErrorThenSuccessClient(_result(_create_decision()))
+
+        with pytest.raises(LLMAnalysisError):
+            _aggregate(db, item, client)
+        failed = db.scalar(select(EventAggregationRun))
+        assert failed is not None
+        previous_count = failed.model_call_count
+        assert failed.status == "failed"
+
+        completed = _aggregate(db, item, client)
+
+        assert completed.status == "completed"
+        assert completed.model_call_count == previous_count + 1
+        assert client.calls == 2
+        assert db.scalar(select(func.count(Event.id))) == 1
+
+
+def test_cross_product_mentions_isolate_event_products() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="cross-product")
         db.add(source)
         db.flush()
         item = _item(
             db,
             source=source,
-            external_id="candidate-identity-message",
-            title="两个活动的后续消息",
-            message_type="game_announcement",
-            topics=["activities_rewards"],
-            entities=[],
+            external_id="cross-product",
+            title="测试服同时出现 PC 皮肤和云顶物料",
+            products=["lol_pc", "tft"],
+            topics=["cosmetics", "tft_gameplay"],
         )
-        for index, activity in enumerate(("星界活动", "峡谷活动")):
-            origin = _item(
-                db,
-                source=source,
-                external_id=f"candidate-identity-{index}",
-                title=activity,
-                message_type="game_announcement",
-                topics=["activities_rewards"],
-                entities=[{"type": "activity", "canonical_id": activity}],
+        db.commit()
+        client = StaticClient(
+            _result(
+                {
+                    **_create_decision(
+                        product="lol_pc",
+                        title="PC 新皮肤",
+                        summary="PC 新增皮肤。",
+                        evidence="PC 新皮肤",
+                    ),
+                },
+                {
+                    **_create_decision(
+                        mention_index=1,
+                        product="tft",
+                        title="云顶新物料",
+                        summary="云顶新增物料。",
+                        evidence="云顶新物料",
+                    ),
+                },
             )
-            create_event(
-                db,
-                normalized_item_id=origin.id,
-                mention_index=0,
-                event_family="player_activity",
-                products=["lol_pc"],
-                canonical_anchors={"activity_name": activity},
-                aggregation_key=f"activity-{index}",
-                title=activity,
-                current_summary=f"{activity}已公布。",
-                domain_importance_snapshot=_snapshot("activity_announcement"),
+        )
+
+        run = _aggregate(db, item, client)
+
+        assert run.outcome == "applied"
+        events = db.scalars(select(Event).order_by(Event.id)).all()
+        assert [event.products for event in events] == [["lol_pc"], ["tft"]]
+
+
+def test_cross_product_mention_requires_explicit_product() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="cross-product-required")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="cross-product-required",
+            title="测试服同时出现 PC 皮肤和云顶物料",
+            products=["lol_pc", "tft"],
+            topics=["cosmetics", "tft_gameplay"],
+        )
+        db.commit()
+        client = StaticClient(_result(_create_decision()))
+
+        with pytest.raises(ValueError, match="must specify product"):
+            _aggregate(db, item, client)
+
+        assert db.scalar(select(func.count(Event.id))) == 0
+
+
+def test_repost_cannot_create_event() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="repost")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="repost-create",
+            title="转发一条皮肤爆料",
+            content_form="repost",
+        )
+        db.commit()
+        client = StaticClient(_result(_create_decision()))
+
+        with pytest.raises(ValueError, match="repost messages cannot create"):
+            _aggregate(db, item, client)
+
+        assert db.scalar(select(func.count(Event.id))) == 0
+
+
+def test_cosmetic_leak_creates_are_collapsed_into_one_batch_event() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="leak batch")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="leak-batch",
+            title="测试服皮肤物料",
+            message_type="game_leak",
+            products=["lol_pc"],
+            topics=["cosmetics"],
+        )
+        db.commit()
+        client = StaticClient(
+            _result(
+                    _create_decision(
+                        family="cosmetic_release",
+                        product="lol_pc",
+                    title="花仙子璐璐炫彩",
+                    summary="花仙子璐璐炫彩曝光。",
+                    evidence="花仙子璐璐炫彩",
+                ),
+                {
+                    **_create_decision(
+                        mention_index=1,
+                        family="cosmetic_release",
+                        product="lol_pc",
+                        title="花仙子格温炫彩",
+                        summary="花仙子格温炫彩曝光。",
+                        evidence="花仙子格温炫彩",
+                    ),
+                },
             )
+        )
+        client.result.mentions[0].new_event.key_facts = [
+            {"type": "cosmetic", "target": "花仙子璐璐炫彩"}
+        ]
+        client.result.mentions[1].new_event.key_facts = [
+            {"type": "cosmetic", "target": "花仙子格温炫彩"}
+        ]
+
+        run = _aggregate(db, item, client)
+        event = db.scalar(select(Event))
+
+        assert run.outcome == "applied"
+        assert db.scalar(select(func.count(Event.id))) == 1
+        assert db.scalar(select(func.count(EventMention.id))) == 1
+        assert event is not None
+        assert len(event.key_facts) == 2
+
+
+def test_candidate_recall_is_generic_high_recall_and_bounded() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="recall")
+        db.add(source)
+        db.flush()
+        now = datetime(2026, 8, 12, 8, tzinfo=UTC)
+        for index, (family, products) in enumerate(
+                [
+                    ("gameplay_balance", ["lol_pc"]),
+                    ("gameplay_balance", ["lol_pc"]),
+                    ("gameplay_balance", ["lol_pc"]),
+                    ("gameplay_balance", ["lol_pc"]),
+                    ("commercial_offer", ["tft"]),
+                    ("esports_match", ["lol_esports"]),
+            ]
+        ):
+            db.add(
+                Event(
+                    title=f"候选事件 {index}",
+                    current_summary=f"共同实体 星界 {index}",
+                    event_family=family,
+                    products=products,
+                    canonical_anchors={"entity": "星界"},
+                    first_seen_at=now - timedelta(days=index),
+                    last_seen_at=now - timedelta(days=index),
+                )
+            )
+        item = _item(
+            db,
+            source=source,
+            external_id="recall-message",
+            title="星界相关更新",
+            entities=[{"type": "activity", "name": "星界"}],
+            products=["lol_pc"],
+            topics=["balance_gameplay"],
+            published_at=now,
+        )
+        db.commit()
 
         candidates = recall_event_candidates(
             db,
             item=item,
-            family_hints=["player_activity"],
-            anchors={},
+            possible_families=["gameplay_balance"],
+            entity_hints={"activity_name": "星界"},
+            total_limit=4,
         )
 
-        assert len(candidates) == 2
-        assert {
-            candidate["identity_key"] for candidate in candidates
-        } == {
-            event_identity_key("player_activity", candidate["canonical_anchors"])
-            for candidate in candidates
-        }
-        assert len({candidate["identity_key"] for candidate in candidates}) == 2
+        assert len(candidates) == 4
+        assert candidates[0]["event_family"] == "gameplay_balance"
+        assert all(candidate["products"] == ["lol_pc"] for candidate in candidates)
+        assert all(candidate["event_family"] == "gameplay_balance" for candidate in candidates)
+        assert all("identity_key" not in candidate for candidate in candidates)
+        assert all("recall_reasons" in candidate for candidate in candidates)

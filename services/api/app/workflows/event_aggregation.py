@@ -8,29 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.domain.event_admission import AdmissionDecision, decide_event_admission
-from app.domain.event_families import (
-    canonicalize_event_anchors,
-    determine_mythic_shop_market,
-    is_mythic_shop_event,
-    mythic_shop_rotation_period_from_date,
-)
-from app.domain.event_identity import (
-    event_identity_key,
-    event_identity_matches,
-    identity_is_supported_by_message,
-    identity_anchors_with_hints,
-    project_event_identity,
-    resolve_esports_match_anchors,
-    select_identity_evidence,
-)
-from app.domain.event_granularity import editorial_granularity_guidance
-from app.domain.event_types import AGGREGATION_POLICY_VERSION
-from app.domain.importance import IMPORTANCE_POLICY_VERSION, score_importance_profile
 from app.core.config import settings
+from app.domain.event_admission import AdmissionDecision, minimal_event_filter
+from app.domain.event_families import EventSpace, product_supports_family
+from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun
 from app.models.normalized_item import NormalizedItem
-from app.schemas.event_aggregation import EventMentionDecision
+from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
 from app.services.event_candidates import recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import add_event_mention, create_event
@@ -50,21 +34,6 @@ def _run_key(item: NormalizedItem) -> str:
 def _fingerprint(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
-
-
-def _aggregation_key(
-    *, event_family: str, products: list[str], canonical_anchors: dict[str, Any]
-) -> str:
-    identity_products = [] if is_mythic_shop_event(event_family, canonical_anchors) else sorted(products)
-    identity_key = event_identity_key(event_family, canonical_anchors)
-    if identity_key is None:
-        raise ValueError(f"{event_family} lacks a deterministic identity")
-    identity = {
-        "event_family": event_family,
-        "products": identity_products,
-        "identity_key": identity_key,
-    }
-    return f"event-v1:{event_family}:{_fingerprint(identity)[:32]}"
 
 
 def _normalize_upstream_url(value: str) -> str | None:
@@ -108,32 +77,10 @@ def _verified_source_role(item: NormalizedItem, proposed_role: str) -> str:
     return proposed_role
 
 
-def _domain_importance_snapshot(
-    decision: EventMentionDecision,
-) -> dict[str, Any] | None:
-    semantics = decision.importance
-    if semantics is None:
-        return None
-    features = semantics.model_dump(mode="json", exclude={"profile"})
-    result = score_importance_profile(
-        semantics.profile,
-        features,
-        content=decision.evidence_excerpt,
-    )
-    return {
-        "policy_version": IMPORTANCE_POLICY_VERSION,
-        "profile": result.profile,
-        "score": result.score,
-        "features": dict(result.features),
-        "modifiers": list(result.modifiers),
-    }
-
-
 def _source_payload(item: NormalizedItem) -> dict[str, object]:
     return {
         "source_id": item.raw_item.source_id,
         "source_name": item.raw_item.source.name,
-        "connector_type": item.raw_item.source.connector_type,
         "is_official": item.raw_item.source.is_official,
         "reliability_score": item.raw_item.source.reliability_score,
         "content_form": item.content_form,
@@ -155,16 +102,18 @@ def _block_text(block: dict[str, Any]) -> str:
     return ""
 
 
-def _select_content(item: NormalizedItem, *, limit: int = 24_000) -> tuple[str, dict[str, object]]:
+def _select_content(
+    item: NormalizedItem, *, limit: int = 24_000
+) -> tuple[str, dict[str, object]]:
     content = item.translated_text or item.normalized_text
     if len(content) <= limit:
         return content, {
             "content_truncated": False,
             "original_characters": len(content),
             "selected_characters": len(content),
-            "strategy": "full_existing_message_projection",
+            "strategy": "full_message_projection",
         }
-    terms = {
+    entity_terms = {
         str(value).strip().casefold()
         for entity in item.entities
         for value in (
@@ -174,113 +123,57 @@ def _select_content(item: NormalizedItem, *, limit: int = 24_000) -> tuple[str, 
         )
         if isinstance(value, str) and len(value.strip()) >= 2
     }
-    blocks = item.translated_content_blocks
     scored: list[tuple[int, int, str]] = []
-    for index, block in enumerate(blocks):
+    for index, block in enumerate(item.translated_content_blocks):
         text_value = _block_text(block).strip()
         if not text_value:
             continue
         lowered = text_value.casefold()
-        score = sum(1 for term in terms if term in lowered)
-        scored.append((score, index, text_value))
-    chosen: list[tuple[int, str]] = []
+        scored.append((sum(term in lowered for term in entity_terms), index, text_value))
+    selected: list[tuple[int, str]] = []
     used = 0
     for _score, index, text_value in sorted(scored, key=lambda row: (-row[0], row[1])):
         if used >= limit:
             break
-        remaining = limit - used
-        selected = text_value[:remaining]
-        chosen.append((index, selected))
-        used += len(selected) + 1
-    if not chosen:
-        selected_content = content[:limit]
-        strategy = "bounded_existing_message_projection"
-    else:
-        selected_content = "\n".join(value for _, value in sorted(chosen))[:limit]
-        strategy = "entity_relevant_translated_blocks"
-    return selected_content, {
+        value = text_value[: limit - used]
+        selected.append((index, value))
+        used += len(value) + 1
+    bounded = (
+        "\n".join(value for _, value in sorted(selected))[:limit]
+        if selected
+        else content[:limit]
+    )
+    return bounded, {
         "content_truncated": True,
         "original_characters": len(content),
-        "selected_characters": len(selected_content),
-        "selected_block_indexes": [index for index, _ in sorted(chosen)],
-        "strategy": strategy,
+        "selected_characters": len(bounded),
+        "selected_block_indexes": [index for index, _ in sorted(selected)],
+        "strategy": "entity_relevant_blocks" if selected else "bounded_message_projection",
     }
 
 
 def _message_payload(item: NormalizedItem) -> tuple[dict[str, object], dict[str, object]]:
-    selected_content, truncation = _select_content(item)
-    media_data = [
-        {
-            "extraction_id": link.media_extraction_id,
-            "translated_data": link.translated_structured_data,
-        }
-        for link in item.media_links[:12]
-    ]
-    payload: dict[str, object] = {
+    content, truncation = _select_content(item)
+    return {
         "normalized_item_id": item.id,
         "normalized_item_revision": item.current_revision,
         "title": item.translated_title or item.normalized_title,
         "summary": item.summary,
-        "content": selected_content,
+        "content": content,
         "products": item.products,
         "content_form": item.content_form,
         "message_type": item.message_type,
         "topics": item.topics,
         "entities": item.entities,
-        "message_importance": {
-            "score": item.importance_score,
-            "dimensions": item.importance_dimensions,
-        },
-        "structured_media": media_data,
+        "structured_media": [
+            {
+                "extraction_id": link.media_extraction_id,
+                "translated_data": link.translated_structured_data,
+            }
+            for link in item.media_links[:12]
+        ],
         "source": _source_payload(item),
-        "editorial_granularity_guidance": editorial_granularity_guidance(item),
-    }
-    return payload, truncation
-
-
-def _mythic_shop_anchors(
-    item: NormalizedItem,
-    *,
-    event_family: str,
-    anchors: dict[str, Any],
-) -> dict[str, Any]:
-    if not is_mythic_shop_event(event_family, anchors):
-        return canonicalize_event_anchors(event_family, anchors)
-    text = "\n".join(
-        value
-        for value in (
-            item.raw_item.native_title,
-            item.translated_title,
-            item.normalized_title,
-            item.normalized_text,
-            item.translated_text,
-        )
-        if isinstance(value, str) and value.strip()
-    )
-    structured_data: list[Any] = [anchors, item.facets]
-    structured_data.extend(
-        value
-        for link in item.media_links
-        for value in (
-            link.media_extraction.structured_data,
-            link.translated_structured_data,
-        )
-    )
-    market = determine_mythic_shop_market(
-        text=text,
-        structured_data=structured_data,
-        source_connector_type=item.raw_item.source.connector_type,
-    )
-    observed_at = item.raw_item.published_at or item.raw_item.ingested_at
-    rotation_period = (
-        mythic_shop_rotation_period_from_date(observed_at.date())
-        if observed_at is not None
-        else None
-    )
-    return canonicalize_event_anchors(
-        event_family,
-        {**anchors, "market": market, "rotation_period": rotation_period},
-    )
+    }, truncation
 
 
 def _record_for_item(db: Session, item: NormalizedItem) -> EventAggregationRun | None:
@@ -298,7 +191,7 @@ def _complete_without_call(
 ) -> EventAggregationRun:
     run.admission_decision = admission.decision
     run.candidate_snapshot = []
-    run.decision_draft = {"mentions": [], "admission_reasons": list(admission.reasons)}
+    run.decision_draft = {"mentions": [], "filter_reasons": list(admission.reasons)}
     run.model_call_count = 0
     run.status = "completed"
     run.outcome = outcome
@@ -308,26 +201,304 @@ def _complete_without_call(
     return run
 
 
-def _fact_identity(value: dict[str, Any]) -> str:
-    for key in ("id", "key", "name", "fact"):
-        if value.get(key):
-            return f"{key}:{value[key]}"
-    return _fingerprint(value)
+def _resolve_mention_product(
+    mention: EventMentionDecision, *, item_products: list[str]
+) -> str:
+    products = [str(product) for product in item_products]
+    if mention.product is not None:
+        product = str(mention.product)
+        if product not in products:
+            raise ValueError(
+                f"mention[{mention.mention_index}] product {product} is not in message products"
+            )
+        return product
+    concrete_products = [product for product in products if product != "unknown"]
+    if len(concrete_products) == 1 and len(set(products)) == 1:
+        return concrete_products[0]
+    raise ValueError(
+        f"mention[{mention.mention_index}] must specify product for a cross-product message"
+    )
 
 
-def _apply_fact_changes(
-    current: list[dict[str, Any]], changes: dict[str, Any]
-) -> list[dict[str, Any]]:
-    values = {_fact_identity(value): dict(value) for value in current}
-    for identity in changes.get("remove", []):
-        values.pop(str(identity), None)
-        for key in [key for key in values if key.endswith(f":{identity}")]:
-            values.pop(key, None)
-    for value in changes.get("replace", []):
-        values[_fact_identity(value)] = dict(value)
-    for value in changes.get("add", []):
-        values.setdefault(_fact_identity(value), dict(value))
-    return list(values.values())
+def _validate_candidate_references(
+    result: EventAggregationResult,
+    candidates: list[dict[str, Any]],
+    *,
+    item_products: list[str],
+) -> dict[int, str]:
+    candidate_by_id = {int(candidate["event_id"]): candidate for candidate in candidates}
+    resolved_products: dict[int, str] = {}
+    for mention in result.mentions:
+        if mention.action == "ignore":
+            continue
+        product = _resolve_mention_product(mention, item_products=item_products)
+        resolved_products[mention.mention_index] = product
+        if mention.action != "attach":
+            continue
+        candidate = candidate_by_id.get(int(mention.event_id or 0))
+        if candidate is None:
+            raise ValueError(f"mention[{mention.mention_index}] references a non-candidate event")
+        if candidate.get("event_family") != mention.event_family:
+            raise ValueError(f"mention[{mention.mention_index}] candidate family does not match")
+        candidate_products = {str(value) for value in candidate.get("products") or []}
+        if candidate_products != {product}:
+            raise ValueError(
+                f"mention[{mention.mention_index}] candidate must be isolated to product {product}"
+            )
+    return resolved_products
+
+
+def _validate_product_family_compatibility(
+    result: EventAggregationResult, resolved_products: dict[int, str]
+) -> None:
+    for mention in result.mentions:
+        if mention.action == "ignore":
+            continue
+        product = resolved_products[mention.mention_index]
+        if product != "unknown" and not product_supports_family(
+            product, mention.event_family  # type: ignore[arg-type]
+        ):
+            raise ValueError(
+                f"mention[{mention.mention_index}] event_family {mention.event_family} "
+                f"is not supported by product {product}"
+            )
+
+
+def _suppress_out_of_space_mentions(
+    result: EventAggregationResult, event_space: EventSpace
+) -> tuple[EventAggregationResult, list[dict[str, object]]]:
+    """Treat model mentions outside upstream routing as explicit ignores.
+
+    Upstream products/topics define the event search space. A model may still
+    notice a semantically plausible fragment that upstream did not classify;
+    that fragment must not expand the taxonomy or abort valid mentions in the
+    same message.
+    """
+
+    allowed = set(event_space.possible_families)
+    suppressed: list[dict[str, object]] = []
+    mentions: list[EventMentionDecision] = []
+    for mention in result.mentions:
+        if mention.action != "ignore" and mention.event_family not in allowed:
+            suppressed.append(
+                {
+                    "mention_index": mention.mention_index,
+                    "event_family": mention.event_family,
+                    "product": mention.product,
+                    "reason": "outside_upstream_event_space",
+                    "evidence_excerpt": mention.evidence_excerpt,
+                }
+            )
+            mentions.append(
+                mention.model_copy(
+                    update={
+                        "action": "ignore",
+                        "event_id": None,
+                        "new_event": None,
+                        "projection": None,
+                        "relation": "mentions",
+                        "materiality": "context_only",
+                    }
+                )
+            )
+        else:
+            mentions.append(mention)
+    return EventAggregationResult(mentions=mentions), suppressed
+
+
+def _validate_repost_actions(item: NormalizedItem, result: EventAggregationResult) -> None:
+    if item.content_form != "repost":
+        return
+    if any(mention.action == "create" for mention in result.mentions):
+        raise ValueError("repost messages cannot create events")
+
+
+def _merge_anchor_values(left: object, right: object) -> object:
+    left_values = left if isinstance(left, list) else [left]
+    right_values = right if isinstance(right, list) else [right]
+    merged: list[object] = []
+    for value in [*left_values, *right_values]:
+        if value not in merged:
+            merged.append(value)
+    return merged[0] if len(merged) == 1 else merged
+
+
+def _coalesce_cosmetic_batch_creates(
+    item: NormalizedItem, result: EventAggregationResult
+) -> EventAggregationResult:
+    """Collapse same-product cosmetic leak creates from one message into one batch."""
+
+    if item.message_type != "game_leak":
+        return result
+    groups: dict[tuple[str, str], list[EventMentionDecision]] = {}
+    for mention in result.mentions:
+        if mention.action != "create" or mention.event_family != "cosmetic_release":
+            continue
+        product = (
+            str(mention.product)
+            if mention.product is not None
+            else _resolve_mention_product(mention, item_products=item.products)
+        )
+        groups.setdefault((product, str(mention.event_family)), []).append(mention)
+    if not any(len(group) > 1 for group in groups.values()):
+        return result
+
+    first_by_group = {key: values[0] for key, values in groups.items()}
+    consumed: set[int] = set()
+    collapsed: list[EventMentionDecision] = []
+    for mention in result.mentions:
+        if mention.action != "create" or mention.event_family != "cosmetic_release":
+            collapsed.append(mention)
+            continue
+        product = (
+            str(mention.product)
+            if mention.product is not None
+            else _resolve_mention_product(mention, item_products=item.products)
+        )
+        key = (product, str(mention.event_family))
+        first = first_by_group[key]
+        if first.mention_index in consumed:
+            continue
+        consumed.add(first.mention_index)
+        members = groups[key]
+        seed = first.new_event
+        if seed is None:
+            raise ValueError("cosmetic create mention is missing new_event")
+        if len(members) > 1:
+            titles = [value.new_event.title for value in members if value.new_event]
+            summaries = [value.new_event.summary for value in members if value.new_event]
+            latest = [
+                value.new_event.latest_development
+                for value in members
+                if value.new_event and value.new_event.latest_development
+            ]
+            facts: list[dict[str, Any]] = []
+            anchors: dict[str, Any] = {}
+            excerpts: list[str] = []
+            for value in members:
+                if value.new_event:
+                    for fact in value.new_event.key_facts:
+                        if fact not in facts:
+                            facts.append(fact)
+                    for anchor_key, anchor_value in value.new_event.canonical_anchors.items():
+                        if anchor_key in anchors:
+                            anchors[anchor_key] = _merge_anchor_values(
+                                anchors[anchor_key], anchor_value
+                            )
+                        else:
+                            anchors[anchor_key] = anchor_value
+                if value.evidence_excerpt and value.evidence_excerpt not in excerpts:
+                    excerpts.append(value.evidence_excerpt)
+            seed = seed.model_copy(
+                update={
+                    "title": titles[0] if titles else seed.title,
+                    "summary": "；".join(dict.fromkeys(summaries)) or seed.summary,
+                    "latest_development": "；".join(dict.fromkeys(latest)),
+                    "key_facts": facts[:20],
+                    "canonical_anchors": anchors,
+                }
+            )
+            first = first.model_copy(
+                update={
+                    "product": product,
+                    "evidence_excerpt": "；".join(excerpts)[:2000],
+                    "new_event": seed,
+                }
+            )
+        collapsed.append(first)
+
+    normalized = [mention.model_copy(update={"mention_index": index}) for index, mention in enumerate(collapsed)]
+    return EventAggregationResult(mentions=normalized)
+
+
+def apply_membership_transaction(
+    db: Session,
+    *,
+    item: NormalizedItem,
+    result: EventAggregationResult,
+    candidates: list[dict[str, Any]],
+    event_space: EventSpace | None = None,
+) -> tuple[int, set[int]]:
+    """Apply already-decided membership. The caller owns the surrounding transaction."""
+
+    _validate_repost_actions(item, result)
+    result = _coalesce_cosmetic_batch_creates(item, result)
+    resolved_products = _validate_candidate_references(
+        result, candidates, item_products=item.products
+    )
+    _validate_product_family_compatibility(result, resolved_products)
+    applied_count = 0
+    affected_event_ids: set[int] = set()
+    independence_group = _independence_group(item)
+
+    for decision in result.mentions:
+        if decision.action == "ignore":
+            continue
+        source_role = _verified_source_role(item, decision.source_role)
+        claim_fingerprint = _fingerprint(
+            {
+                "family": decision.event_family,
+                "product": resolved_products[decision.mention_index],
+                "excerpt": decision.evidence_excerpt,
+            }
+        )
+        if decision.action == "create":
+            seed = decision.new_event
+            if seed is None:  # Pydantic enforces this; keep type narrowing explicit.
+                raise ValueError("create mention is missing new_event")
+            if decision.event_family is None:
+                raise ValueError("create mention is missing event_family")
+            event, _created = create_event(
+                db,
+                normalized_item_id=item.id,
+                mention_index=decision.mention_index,
+                event_family=decision.event_family,
+                products=[resolved_products[decision.mention_index]],
+                canonical_anchors=seed.canonical_anchors,
+                aggregation_key=None,
+                title=seed.title,
+                current_summary=seed.summary,
+                relation=decision.relation,
+                source_role=source_role,
+                materiality=decision.materiality,
+                independence_group=independence_group,
+                evidence_excerpt=decision.evidence_excerpt,
+                content_fingerprint=claim_fingerprint,
+                latest_development=seed.latest_development,
+                key_facts=seed.key_facts,
+                commit=False,
+                use_savepoint=False,
+            )
+        else:
+            if decision.event_family is None:
+                raise ValueError("attach mention is missing event_family")
+            event = db.get(Event, int(decision.event_id or 0))
+            if event is None:
+                raise ValueError(f"candidate event {decision.event_id} disappeared")
+            proposal = decision.projection
+            event, _added = add_event_mention(
+                db,
+                event_id=event.id,
+                normalized_item_id=item.id,
+                mention_index=decision.mention_index,
+                relation=decision.relation,
+                source_role=source_role,
+                materiality=decision.materiality,
+                independence_group=independence_group,
+                evidence_excerpt=decision.evidence_excerpt,
+                content_fingerprint=claim_fingerprint,
+                title=proposal.title if proposal else None,
+                current_summary=proposal.summary if proposal else None,
+                latest_development=proposal.latest_development if proposal else None,
+                key_facts=proposal.key_facts if proposal else None,
+                commit=False,
+                use_savepoint=False,
+            )
+        affected_event_ids.add(event.id)
+        applied_count += 1
+
+    refresh_event_metrics(db, affected_event_ids)
+    return applied_count, affected_event_ids
 
 
 async def aggregate_normalized_item(
@@ -336,8 +507,6 @@ async def aggregate_normalized_item(
     *,
     llm_client: LLMClient | None = None,
 ) -> EventAggregationRun:
-    if item.publication_status != "published":
-        raise ValueError("event aggregation requires a published NormalizedItem")
     if not is_latest_raw_item(db, item.raw_item):
         raise ValueError("event aggregation requires the latest RawItem revision")
 
@@ -350,7 +519,7 @@ async def aggregate_normalized_item(
             normalized_item_id=item.id,
             normalized_item_revision=item.current_revision,
             status="running",
-            current_stage="admission",
+            current_stage="minimal_filter",
             aggregation_policy_version=AGGREGATION_POLICY_VERSION,
             idempotency_key=_run_key(item),
         )
@@ -370,29 +539,29 @@ async def aggregate_normalized_item(
         raise RuntimeError("event aggregation is already running for this item") from None
     db.refresh(run)
 
-    admission = decide_event_admission(item)
+    admission = minimal_event_filter(item)
     run.admission_decision = admission.decision
     if admission.decision == "skip":
         return _complete_without_call(
-            db, run, outcome="skipped_by_admission", admission=admission
+            db, run, outcome="skipped_by_minimal_filter", admission=admission
         )
 
     candidates = recall_event_candidates(
         db,
         item=item,
-        family_hints=list(admission.family_hints),
-        anchors=admission.strong_anchors,
+        possible_families=admission.event_space.possible_families,
+        entity_hints=admission.entity_hints,
     )
     run.candidate_snapshot = candidates
-    if admission.decision == "update_existing_only" and not candidates:
-        return _complete_without_call(
-            db, run, outcome="no_existing_candidate", admission=admission
-        )
-
     message, truncation = _message_payload(item)
     run.current_stage = "model_decision"
     run.input_fingerprint = _fingerprint(
-        {"message": message, "candidates": candidates, "admission": admission.decision}
+        {
+            "message": message,
+            "products": admission.event_space.products,
+            "possible_event_families": admission.event_space.possible_families,
+            "candidates": candidates,
+        }
     )
     db.commit()
 
@@ -400,20 +569,24 @@ async def aggregate_normalized_item(
     try:
         result = await client.aggregate_events(
             message=message,
-            admission_decision=admission.decision,
-            family_hints=list(admission.family_hints),
+            possible_event_families=list(admission.event_space.possible_families),
             candidates=candidates,
         )
-        metadata = execution_metadata(result)
-        run.model_call_count = (
-            previous_model_call_count + int(metadata.get("retry_count") or 0) + 1
+        # Normalize the semantic result before persisting the audit draft so
+        # the recorded decision matches the membership transaction exactly.
+        result = _coalesce_cosmetic_batch_creates(item, result)
+        result, suppressed_mentions = _suppress_out_of_space_mentions(
+            result, admission.event_space
         )
+        metadata = execution_metadata(result)
+        run.model_call_count = previous_model_call_count + int(metadata.get("retry_count") or 0) + 1
         run.decision_draft = {
             **result.model_dump(mode="json"),
+            "suppressed_mentions": suppressed_mentions,
             "input_truncation": truncation,
             "execution_metadata": metadata,
         }
-        run.current_stage = "apply"
+        run.current_stage = "apply_membership"
         db.commit()
     except (LLMConfigurationError, LLMAnalysisError) as exc:
         db.rollback()
@@ -431,180 +604,13 @@ async def aggregate_normalized_item(
         raise
 
     try:
-        applied_count = 0
-        affected_event_ids: set[int] = set()
-        daily_match_roundup = "daily_esports_match_roundup" in (
-            message.get("editorial_granularity_guidance") or []
+        applied_count, _affected_event_ids = apply_membership_transaction(
+            db,
+            item=item,
+            result=result,
+            candidates=candidates,
+            event_space=admission.event_space,
         )
-        admission_anchors = admission.strong_anchors
-        for decision in result.mentions:
-            if decision.action == "ignore":
-                continue
-            if daily_match_roundup and decision.event_family != "esports_match":
-                raise ValueError(
-                    "daily match reminders/results may only create or update concrete esports_match events"
-                )
-            fact_changes = decision.key_fact_changes.model_dump(mode="json")
-            claim_fingerprint = _fingerprint(
-                {
-                    "family": decision.event_family,
-                    "anchors": decision.canonical_anchors,
-                    "excerpt": decision.evidence_excerpt,
-                }
-            )
-            independence_group = _independence_group(item)
-            source_role = _verified_source_role(item, decision.source_role)
-            domain_importance_snapshot = _domain_importance_snapshot(decision)
-            canonical_anchors = _mythic_shop_anchors(
-                item,
-                event_family=decision.event_family,
-                anchors=decision.canonical_anchors,
-            )
-            canonical_anchors = identity_anchors_with_hints(
-                decision.event_family, canonical_anchors, admission_anchors
-            )
-            observed_at = item.raw_item.published_at or item.raw_item.ingested_at
-            identity_evidence = select_identity_evidence(
-                decision.event_family,
-                message_text="\n".join(
-                    value
-                    for value in (
-                        str(message.get("title") or ""),
-                        str(message.get("summary") or ""),
-                        str(message.get("content") or ""),
-                    )
-                    if value
-                ),
-                mention_excerpt=decision.evidence_excerpt,
-            )
-            incoming_anchors = canonical_anchors
-            message_identity_text = "\n".join(
-                str(message.get(key) or "") for key in ("title", "summary", "content")
-            )
-            if decision.event_family == "esports_match":
-                incoming_anchors = resolve_esports_match_anchors(
-                    incoming_anchors,
-                    message_text=message_identity_text,
-                    mention_excerpt=decision.evidence_excerpt,
-                    observed_on=observed_at,
-                )
-            if not identity_is_supported_by_message(
-                decision.event_family,
-                incoming_anchors,
-                message_text=message_identity_text,
-                mention_excerpt=decision.evidence_excerpt,
-                message_anchors=admission_anchors,
-                observed_on=observed_at,
-            ):
-                raise ValueError(
-                    f"mention[{decision.mention_index}] identity is not supported by message evidence"
-                )
-            projected_identity = project_event_identity(
-                decision.event_family,
-                incoming_anchors,
-                evidence_text=identity_evidence,
-                observed_on=observed_at,
-            )
-            if not projected_identity:
-                raise ValueError(
-                    f"{decision.event_family} mention lacks a deterministic identity"
-                )
-            if decision.action == "create":
-                canonical_anchors = projected_identity
-                aggregation_key = _aggregation_key(
-                    event_family=decision.event_family,
-                    products=item.products,
-                    canonical_anchors=canonical_anchors,
-                )
-                existing_event = db.scalar(
-                    select(Event).where(Event.aggregation_key == aggregation_key)
-                )
-                if existing_event is None:
-                    event, _created = create_event(
-                        db,
-                        normalized_item_id=item.id,
-                        mention_index=decision.mention_index,
-                        event_family=decision.event_family,
-                        products=item.products,
-                        canonical_anchors=canonical_anchors,
-                        aggregation_key=aggregation_key,
-                        title=decision.event_title or "",
-                        current_summary=decision.proposed_summary or "",
-                        relation=decision.relation,
-                        source_role=source_role,
-                        materiality=decision.materiality,
-                        independence_group=independence_group,
-                        evidence_excerpt=decision.evidence_excerpt,
-                        structured_fact_changes=fact_changes,
-                        domain_importance_snapshot=domain_importance_snapshot,
-                        content_fingerprint=claim_fingerprint,
-                        latest_development=decision.latest_development or "",
-                        key_facts=list(decision.key_fact_changes.add),
-                        commit=False,
-                        use_savepoint=False,
-                    )
-                else:
-                    event, _created = add_event_mention(
-                        db,
-                        event_id=existing_event.id,
-                        normalized_item_id=item.id,
-                        mention_index=decision.mention_index,
-                        relation=decision.relation,
-                        source_role=source_role,
-                        materiality=decision.materiality,
-                        independence_group=independence_group,
-                        evidence_excerpt=decision.evidence_excerpt,
-                        structured_fact_changes=fact_changes,
-                        domain_importance_snapshot=domain_importance_snapshot,
-                        content_fingerprint=claim_fingerprint,
-                        title=decision.event_title,
-                        current_summary=decision.proposed_summary,
-                        latest_development=decision.latest_development,
-                        canonical_anchors=existing_event.canonical_anchors,
-                        key_facts=_apply_fact_changes(
-                            existing_event.key_facts, fact_changes
-                        ),
-                        commit=False,
-                        use_savepoint=False,
-                    )
-            else:
-                event = db.get(Event, int(decision.candidate_event_id or 0))
-                if event is None:
-                    raise ValueError(f"candidate event {decision.candidate_event_id} disappeared")
-                if event.event_family != decision.event_family:
-                    raise ValueError("candidate event family does not match")
-                if not event_identity_matches(
-                    decision.event_family,
-                    event.canonical_anchors,
-                    incoming_anchors,
-                    evidence_text=identity_evidence,
-                    observed_on=observed_at,
-                ):
-                    raise ValueError("event update candidate identity does not match")
-                add_event_mention(
-                    db,
-                    event_id=event.id,
-                    normalized_item_id=item.id,
-                    mention_index=decision.mention_index,
-                    relation=decision.relation,
-                    source_role=source_role,
-                    materiality=decision.materiality,
-                    independence_group=independence_group,
-                    evidence_excerpt=decision.evidence_excerpt,
-                    structured_fact_changes=fact_changes,
-                    domain_importance_snapshot=domain_importance_snapshot,
-                    content_fingerprint=claim_fingerprint,
-                    title=decision.event_title,
-                    current_summary=decision.proposed_summary,
-                    latest_development=decision.latest_development,
-                    canonical_anchors=event.canonical_anchors,
-                    key_facts=_apply_fact_changes(event.key_facts, fact_changes),
-                    commit=False,
-                    use_savepoint=False,
-                )
-            affected_event_ids.add(event.id)
-            applied_count += 1
-        refresh_event_metrics(db, affected_event_ids)
         run.status = "completed"
         run.outcome = "applied" if applied_count else "ignored"
         run.applied_at = datetime.now(UTC)

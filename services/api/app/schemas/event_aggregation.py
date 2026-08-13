@@ -3,98 +3,77 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.event_types import EventFamily, EventMateriality, EventRelation, EventSourceRole
-from app.domain.event_identity import event_identity_key, event_identity_matches
-from app.domain.importance import (
-    CompetitionRegion,
-    ImportanceProfile,
-    ImportanceScale,
-    Prominence,
-    SkinTier,
-)
+from app.domain.message_taxonomy import Product
 
 
-class EventImportanceSemantics(BaseModel):
+class NewEventSeed(BaseModel):
+    """The minimum description needed to create an Event."""
+
     model_config = ConfigDict(extra="forbid")
 
-    profile: ImportanceProfile
-    scale: ImportanceScale = "standard"
-    competition_region: CompetitionRegion = "none"
-    prominence: Prominence = "normal"
-    skin_tier: SkinTier = "none"
-    is_bulk_update: bool = False
+    title: str = Field(min_length=1, max_length=500)
+    summary: str = Field(min_length=1)
+    canonical_anchors: dict[str, Any] = Field(default_factory=dict)
+    latest_development: str = ""
+    key_facts: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
 
 
-class KeyFactChanges(BaseModel):
+class EventProjectionProposal(BaseModel):
+    """Optional presentation changes, evaluated only after membership is chosen."""
+
     model_config = ConfigDict(extra="forbid")
 
-    add: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
-    replace: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
-    remove: list[str] = Field(default_factory=list, max_length=12)
-
-    def has_changes(self) -> bool:
-        return bool(self.add or self.replace or self.remove)
-
-
-class CandidateRejection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    event_id: int = Field(ge=1)
-    reason: str = Field(min_length=1, max_length=500)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    summary: str | None = Field(default=None, min_length=1)
+    latest_development: str | None = None
+    key_facts: list[dict[str, Any]] | None = Field(default=None, max_length=20)
 
 
 class EventMentionDecision(BaseModel):
+    """One semantic membership decision made from the message and recalled candidates."""
+
     model_config = ConfigDict(extra="forbid")
 
     mention_index: int = Field(ge=0)
-    event_family: EventFamily
-    action: Literal["create", "update", "ignore"]
-    candidate_event_id: int | None = None
-    relation: EventRelation
-    source_role: EventSourceRole
-    materiality: EventMateriality
-    canonical_anchors: dict[str, Any] = Field(default_factory=dict)
-    event_title: str | None = Field(default=None, max_length=500)
-    proposed_summary: str | None = None
-    latest_development: str | None = None
-    key_fact_changes: KeyFactChanges = Field(default_factory=KeyFactChanges)
-    importance: EventImportanceSemantics | None = None
+    action: Literal["attach", "create", "ignore"]
+    event_id: int | None = Field(default=None, ge=1)
+    # A message may cover multiple products, but each event mention is routed
+    # to one product domain. The workflow can infer this only for single-product
+    # messages; cross-product messages must carry it explicitly.
+    product: Product | None = None
+    event_family: EventFamily | None = None
+    relation: EventRelation = "reports"
+    source_role: EventSourceRole = "unknown"
+    materiality: EventMateriality = "material_update"
     evidence_excerpt: str = Field(default="", max_length=2000)
-    candidate_rejections: list[CandidateRejection] = Field(default_factory=list)
+    new_event: NewEventSeed | None = None
+    projection: EventProjectionProposal | None = None
 
     @model_validator(mode="after")
     def validate_action_contract(self) -> "EventMentionDecision":
+        if self.action != "ignore" and self.event_family is None:
+            raise ValueError("create/attach requires event_family")
         if self.action == "create":
-            if self.candidate_event_id is not None:
-                raise ValueError("create cannot include candidate_event_id")
-            if not self.canonical_anchors:
-                raise ValueError("create requires canonical_anchors")
-            if not (self.event_title or "").strip() or not (
-                self.proposed_summary or ""
-            ).strip():
-                raise ValueError("create requires event_title and proposed_summary")
+            if self.event_id is not None:
+                raise ValueError("create cannot reference event_id")
+            if self.new_event is None:
+                raise ValueError("create requires new_event")
+            if self.projection is not None:
+                raise ValueError("create uses new_event, not projection")
             if self.materiality != "material_update":
                 raise ValueError("create requires material_update")
-        elif self.action == "update":
-            if self.candidate_event_id is None:
-                raise ValueError("update requires candidate_event_id")
-            if not self.evidence_excerpt.strip():
-                raise ValueError("update requires evidence_excerpt")
-
-        if (
-            self.action in {"create", "update"}
-            and self.materiality == "material_update"
-            and self.importance is None
-        ):
-            raise ValueError("material create/update requires importance semantics")
-
-        if self.materiality != "material_update" and (
-            self.event_title is not None
-            or self.proposed_summary is not None
-            or self.latest_development is not None
-            or self.key_fact_changes.has_changes()
-            or self.importance is not None
-        ):
-            raise ValueError("non-material mentions cannot change the event projection")
+        elif self.action == "attach":
+            if self.event_id is None:
+                raise ValueError("attach requires event_id")
+            if self.new_event is not None:
+                raise ValueError("attach cannot include new_event")
+            if self.materiality != "material_update" and self.projection is not None:
+                raise ValueError("non-material attach cannot change the event projection")
+        else:
+            if self.event_id is not None or self.new_event is not None or self.projection is not None:
+                raise ValueError("ignore cannot reference or change an event")
+        if self.action != "ignore" and not self.evidence_excerpt.strip():
+            raise ValueError("create/attach requires evidence_excerpt")
         return self
 
 
@@ -102,43 +81,10 @@ class EventAggregationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mentions: list[EventMentionDecision] = Field(default_factory=list, max_length=12)
-    ignored_fragments: list[str] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="after")
     def validate_mention_indexes(self) -> "EventAggregationResult":
         indexes = [mention.mention_index for mention in self.mentions]
         if indexes != list(range(len(indexes))):
             raise ValueError("mention_index must be unique, ordered, and contiguous from zero")
-        create_mentions: list[EventMentionDecision] = []
-        for mention in self.mentions:
-            if mention.action != "create":
-                continue
-            identity_key = event_identity_key(
-                mention.event_family,
-                mention.canonical_anchors,
-                evidence_text=mention.evidence_excerpt,
-            )
-            if identity_key is None:
-                continue
-            for previous in create_mentions:
-                if previous.event_family != mention.event_family:
-                    continue
-                same_identity = event_identity_matches(
-                    mention.event_family,
-                    previous.canonical_anchors,
-                    mention.canonical_anchors,
-                    evidence_text=mention.evidence_excerpt,
-                ) or event_identity_matches(
-                    mention.event_family,
-                    mention.canonical_anchors,
-                    previous.canonical_anchors,
-                    evidence_text=previous.evidence_excerpt,
-                )
-                if same_identity:
-                    raise ValueError(
-                        "create mentions with the same family and anchors must be merged "
-                        f"into one event: indexes {previous.mention_index} and "
-                        f"{mention.mention_index}"
-                    )
-            create_mentions.append(mention)
         return self

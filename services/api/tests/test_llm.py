@@ -15,7 +15,6 @@ from app.services.llm import (
     TranslationResult,
     execution_metadata,
 )
-from app.domain.event_importance import is_importance_profile_compatible
 from app.workflows.translate_item import build_translation, detect_language
 
 
@@ -334,322 +333,182 @@ def _client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeComple
     return client, completions
 
 
-def _event_aggregation_response(event_family: str, profile: str) -> str:
-    anchors_by_family = {
-        "esports_match": {
-            "match": "IG_vs_LNG",
-            "date": "2026-08-02",
-            "league": "lpl",
-        },
-        "gameplay_balance": {
-            "champion": "内瑟斯",
-            "change_signature": "changes:326>376",
-        },
-        "cosmetic_release": {"skin_series": "花仙子", "patch_version": "26.16"},
-    }
+def _membership_response() -> str:
     return json.dumps(
         {
             "mentions": [
                 {
                     "mention_index": 0,
-                    "event_family": event_family,
                     "action": "create",
-                    "candidate_event_id": None,
+                    "event_id": None,
+                    "event_family": "gameplay_balance",
                     "relation": "reports",
                     "source_role": "known_leaker",
                     "materiality": "material_update",
-                    "canonical_anchors": anchors_by_family.get(
-                        event_family, {"release_name": "test:event"}
-                    ),
-                    "event_title": "测试事件",
-                    "proposed_summary": "测试事件摘要。",
-                    "importance": {"profile": profile},
-                    "evidence_excerpt": (
-                        "内瑟斯法力值 326 → 376"
-                        if event_family == "gameplay_balance"
-                        else "IG vs LNG"
-                    ),
+                    "evidence_excerpt": "内瑟斯法力值调整",
+                    "new_event": {
+                        "title": "内瑟斯平衡调整",
+                        "summary": "消息称内瑟斯将进行平衡调整。",
+                        "canonical_anchors": {"champion": "内瑟斯"},
+                    },
                 }
-            ],
-            "ignored_fragments": [],
+            ]
         },
         ensure_ascii=False,
     )
 
 
-def test_event_importance_profile_compatibility_guard_accepts_valid_combination() -> None:
-    client, _ = _client_with_responses(
-        [_event_aggregation_response("esports_match", "worlds_key")]
-    )
+def test_event_aggregation_contract_is_membership_centered() -> None:
+    client, completions = _client_with_responses([_membership_response()])
 
     result = asyncio.run(
         client.aggregate_events(
-            message={
-                "title": "IG vs LNG",
-                "content": "IG vs LNG",
-                "source": {"published_at": "2026-08-02T10:00:00+08:00"},
-                "editorial_granularity_guidance": [],
-            },
-            admission_decision="create_or_update",
-            family_hints=["esports_match"],
+            message={"title": "内瑟斯改动", "content": "内瑟斯法力值调整"},
+            possible_event_families=["gameplay_balance"],
             candidates=[],
         )
     )
 
-    assert result.mentions[0].importance is not None
-    assert is_importance_profile_compatible("esports_match", "worlds_key")
+    mention = result.mentions[0]
+    assert mention.action == "create"
+    assert mention.event_id is None
+    assert mention.new_event is not None
+    assert mention.new_event.title == "内瑟斯平衡调整"
+    messages = completions.calls[0]["messages"]
+    assert isinstance(messages, list)
+    prompt = messages[0]["content"]
+    assert "attach、create 或 ignore" in prompt
+    assert "Event 的最终身份是 event_id" in prompt
+    assert "不需要完整" in prompt
+    payload = json.loads(messages[1]["content"])
+    assert set(payload) == {"possible_event_families", "message", "candidate_events"}
+    assert "identity_contracts" not in payload
+    assert "importance_profiles_by_family" not in payload
+    assert "admission_decision" not in payload
 
 
-def test_other_product_gameplay_release_profile_is_compatible() -> None:
-    assert is_importance_profile_compatible(
-        "gameplay_release", "other_product_announcement"
-    )
-
-
-@pytest.mark.parametrize(
-    ("event_family", "profile"),
-    [
-        ("gameplay_balance", "worlds_key"),
-        ("cosmetic_release", "patch_official_notes"),
-        ("esports_match", "cosmetic_announcement"),
-        ("esports_match", "other_product_announcement"),
-    ],
-)
-def test_event_importance_profile_compatibility_guard_rejects_mismatch(
-    event_family: str, profile: str
-) -> None:
-    response = _event_aggregation_response(event_family, profile)
-    client, _ = _client_with_responses([response, response])
-
-    with pytest.raises(LLMAnalysisError, match="importance.profile"):
-        asyncio.run(
-            client.aggregate_events(
-                message={"title": "测试", "editorial_granularity_guidance": []},
-                admission_decision="create_or_update",
-                family_hints=[event_family],
-                candidates=[],
-            )
-        )
-
-
-def test_event_aggregation_rejects_english_only_projection() -> None:
-    payload = json.loads(_event_aggregation_response("gameplay_balance", "leak_gameplay"))
-    payload["mentions"][0]["event_title"] = "Nasus balance changes leaked"
-    payload["mentions"][0]["proposed_summary"] = "Leaked changes to Nasus."
-    response = json.dumps(payload, ensure_ascii=False)
-    client, _ = _client_with_responses([response, response])
-
-    with pytest.raises(LLMAnalysisError, match="简体中文"):
-        asyncio.run(
-            client.aggregate_events(
-                message={"title": "内瑟斯改动", "editorial_granularity_guidance": []},
-                admission_decision="create_or_update",
-                family_hints=["gameplay_balance"],
-                candidates=[],
-            )
-        )
-
-
-def test_event_aggregation_rejects_incompatible_match_update() -> None:
+def test_event_aggregation_accepts_attach_create_and_ignore_together() -> None:
     response = json.dumps(
         {
             "mentions": [
                 {
                     "mention_index": 0,
-                    "event_family": "esports_match",
-                    "action": "update",
-                    "candidate_event_id": 125,
+                    "action": "attach",
+                    "event_id": 17,
+                    "event_family": "gameplay_balance",
+                    "relation": "confirms",
+                    "source_role": "responsible_official",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "官方确认调整",
+                    "projection": {
+                        "summary": "官方已经确认调整。",
+                        "latest_development": "官方确认",
+                    },
+                },
+                {
+                    "mention_index": 1,
+                    "action": "create",
+                    "event_family": "cosmetic_release",
                     "relation": "reports",
                     "source_role": "responsible_official",
                     "materiality": "material_update",
-                    "canonical_anchors": {
-                        "match": "AL_vs_TT",
-                        "date": "2026-08-02",
-                        "league": "lpl",
+                    "evidence_excerpt": "同时公布新皮肤",
+                    "new_event": {
+                        "title": "新系列皮肤",
+                        "summary": "官方公布新系列皮肤。",
                     },
-                    "event_title": "AL 对阵 TT",
-                    "proposed_summary": "AL 对阵 TT 的比赛已经结束。",
-                    "importance": {"profile": "esports_regular"},
-                    "evidence_excerpt": "AL 对阵 TT",
-                }
-            ],
-            "ignored_fragments": [],
+                },
+                {
+                    "mention_index": 2,
+                    "action": "ignore",
+                    "evidence_excerpt": "",
+                },
+            ]
         },
         ensure_ascii=False,
     )
-    candidate = {
-        "event_id": 125,
-        "event_family": "esports_match",
-        "products": ["lol_esports"],
-        "canonical_anchors": {
-            "match": "AL_vs_EDG",
-            "date": "2026-08-02",
-            "league": "lpl",
-        },
-        "match_score": 68,
-    }
-    client, _ = _client_with_responses([response, response])
-
-    with pytest.raises(LLMAnalysisError, match="Event identity"):
-        asyncio.run(
-            client.aggregate_events(
-                message={"title": "AL 对阵 TT", "editorial_granularity_guidance": []},
-                admission_decision="create_or_update",
-                family_hints=["esports_match"],
-                candidates=[candidate],
-            )
-        )
-
-
-def test_event_aggregation_rejects_create_when_exact_identity_candidate_exists() -> None:
-    response = _event_aggregation_response("gameplay_balance", "leak_gameplay")
-    candidate = {
-        "event_id": 77,
-        "event_family": "gameplay_balance",
-        "products": ["lol_pc"],
-        "canonical_anchors": {
-            "champion": "内瑟斯",
-            "change_signature": "changes:326>376",
-        },
-        "match_score": 1,
-    }
-    client, _ = _client_with_responses([response, response])
-
-    with pytest.raises(LLMAnalysisError, match="必须 update 而不是 create"):
-        asyncio.run(
-            client.aggregate_events(
-                message={"title": "内瑟斯改动", "editorial_granularity_guidance": []},
-                admission_decision="create_or_update",
-                family_hints=["gameplay_balance"],
-                candidates=[candidate],
-            )
-        )
-
-
-def test_event_aggregation_salvages_valid_mentions_after_retry() -> None:
-    valid = json.loads(_event_aggregation_response("gameplay_balance", "leak_gameplay"))[
-        "mentions"
-    ][0]
-    invalid = {
-        **valid,
-        "mention_index": 1,
-        "event_family": "esports_match",
-        "canonical_anchors": {"league": "lpl"},
-        "importance": {"profile": "esports_regular"},
-        "evidence_excerpt": "没有明确对阵的附属片段",
-    }
-    response = json.dumps(
-        {"mentions": [valid, invalid], "ignored_fragments": []}, ensure_ascii=False
-    )
-    client, _ = _client_with_responses([response, response])
+    client, _ = _client_with_responses([response])
 
     result = asyncio.run(
         client.aggregate_events(
-            message={
-                "title": "内瑟斯改动",
-                "content": "内瑟斯法力值 326 → 376；没有明确对阵的附属片段",
-                "editorial_granularity_guidance": [],
-            },
-            admission_decision="create_or_update",
-            family_hints=["gameplay_balance", "esports_match"],
-            candidates=[],
+            message={"title": "综合公告", "content": "官方确认调整，同时公布新皮肤。"},
+            possible_event_families=["gameplay_balance", "cosmetic_release"],
+            candidates=[
+                {
+                    "event_id": 17,
+                    "event_family": "gameplay_balance",
+                    "title": "既有调整",
+                    "current_summary": "此前预览。",
+                }
+            ],
         )
     )
 
-    assert [mention.event_family for mention in result.mentions] == ["gameplay_balance"]
-    assert result.ignored_fragments[0].startswith("模型 mention[1]")
-    assert execution_metadata(result)["error_type"] == "partial_acceptance"
+    assert [mention.action for mention in result.mentions] == [
+        "attach",
+        "create",
+        "ignore",
+    ]
 
 
-def _mythic_candidate(event_id: int = 99) -> dict[str, object]:
-    return {
-        "event_id": event_id,
-        "event_family": "commercial_offer",
-        "products": ["lol_pc"],
-        "canonical_anchors": {
-            "shop": "mythic_shop",
-            "market": "GLOBAL",
-            "rotation_period": "2026-w32",
-        },
-        "title": "Mythic Shop rotation",
-        "current_summary": "本周神话商城轮换。",
-        "latest_development": "",
-        "key_facts": [],
-        "lifecycle_status": "active",
-        "match_score": 70,
-        "match_reasons": ["family", "anchor:shop"],
-    }
-
-
-def _mythic_update_response(candidate_id: int) -> str:
-    return json.dumps(
+def test_event_aggregation_retries_invalid_structural_schema() -> None:
+    invalid = json.dumps(
         {
             "mentions": [
                 {
                     "mention_index": 0,
-                    "event_family": "commercial_offer",
-                    "action": "update",
-                    "candidate_event_id": candidate_id,
-                    "relation": "reports",
-                    "source_role": "responsible_official",
-                    "materiality": "corroboration_only",
-                    "canonical_anchors": {
-                        "shop": "mythic_shop",
-                        "market": "CN",
-                        "rotation_period": "2026-w32",
-                    },
-                    "evidence_excerpt": "国服神话商城轮换",
+                    "action": "attach",
+                    "event_family": "gameplay_balance",
+                    "evidence_excerpt": "缺少 event_id",
                 }
-            ],
-            "ignored_fragments": [],
+            ]
         },
         ensure_ascii=False,
     )
+    client, _ = _client_with_responses([invalid, invalid])
 
-
-def _mythic_cn_message(published: str | None, ingested: str) -> dict[str, object]:
-    return {
-        "title": "国服本周神话商城",
-        "content": "本周国服神话商城轮换",
-        "source": {
-            "connector_type": "baidu_tieba",
-            "published_at": published,
-            "ingested_at": ingested,
-        },
-        "editorial_granularity_guidance": [],
-    }
-
-
-def test_mythic_update_cross_market_candidate_is_rejected() -> None:
-    response = _mythic_update_response(99)
-    client, _ = _client_with_responses([response, response])
-
-    with pytest.raises(LLMAnalysisError, match="mythic shop update 只能命中相同"):
+    with pytest.raises(LLMAnalysisError, match="attach requires event_id"):
         asyncio.run(
             client.aggregate_events(
-                message=_mythic_cn_message(
-                    "2026-08-05T00:00:00+00:00", "2026-08-05T00:00:00+00:00"
-                ),
-                admission_decision="create_or_update",
-                family_hints=["commercial_offer"],
-                candidates=[_mythic_candidate()],
+                message={"title": "测试"},
+                possible_event_families=["gameplay_balance"],
+                candidates=[],
             )
         )
 
 
-def test_mythic_update_existing_only_wrong_identity_is_rejected() -> None:
-    response = _mythic_update_response(99)
-    client, _ = _client_with_responses([response, response])
+def test_event_aggregation_retries_attach_with_candidate_family_mismatch() -> None:
+    invalid = json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "action": "attach",
+                    "event_id": 17,
+                    "event_family": "player_activity",
+                    "relation": "reports",
+                    "source_role": "unknown",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "候选引用",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    client, _ = _client_with_responses([invalid, invalid])
 
-    with pytest.raises(LLMAnalysisError, match="mythic shop update 只能命中相同"):
+    with pytest.raises(LLMAnalysisError, match="event_family"):
         asyncio.run(
             client.aggregate_events(
-                message=_mythic_cn_message(
-                    "2026-08-05T00:00:00+00:00", "2026-08-05T00:00:00+00:00"
-                ),
-                admission_decision="update_existing_only",
-                family_hints=["commercial_offer"],
-                candidates=[_mythic_candidate()],
+                message={"title": "测试"},
+                possible_event_families=["gameplay_balance"],
+                candidates=[
+                    {
+                        "event_id": 17,
+                        "event_family": "gameplay_balance",
+                        "title": "候选",
+                    }
+                ],
             )
         )
 

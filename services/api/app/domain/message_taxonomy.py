@@ -436,7 +436,7 @@ TOPIC_RULES: Final = (
         "esports_schedule",
         "赛程",
         frozenset({"lol_esports"}),
-        "比赛日期、开赛时间、对阵安排、抽签和赛程变更。",
+        "比赛日期、比赛预告、首发阵容安排、开赛时间、对阵安排、抽签和赛程变更。",
     ),
     TopicRule(
         "esports_matches",

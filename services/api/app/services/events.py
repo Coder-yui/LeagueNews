@@ -28,7 +28,6 @@ from app.repositories.events import (
     get_event_for_update,
     get_normalized_item,
 )
-from app.services.event_metrics import refresh_event_importance
 
 
 class EventNotFoundError(ValueError):
@@ -78,12 +77,10 @@ def _validate_mention_values(
         raise EventInputError(f"unsupported event source role: {source_role}")
     if materiality not in EVENT_MATERIALITIES:
         raise EventInputError(f"unsupported event materiality: {materiality}")
-    if materiality != "material_update":
-        if domain_importance_snapshot is not None:
-            raise EventInputError("non-material mention cannot carry domain importance")
-        return
+    if materiality != "material_update" and domain_importance_snapshot is not None:
+        raise EventInputError("non-material mention cannot carry domain importance")
     if domain_importance_snapshot is None:
-        raise EventInputError("material mention requires domain importance snapshot")
+        return
     score = domain_importance_snapshot.get("score")
     profile = domain_importance_snapshot.get("profile")
     features = domain_importance_snapshot.get("features")
@@ -256,7 +253,6 @@ def create_event(
             )
             db.add(mention)
             db.flush()
-            refresh_event_importance(event, [mention])
             db.add(
                 EventRevision(
                     event_id=event.id,
@@ -381,7 +377,6 @@ def add_event_mention(
         mentions = list(event.mentions)
         if all(existing.id != mention.id for existing in mentions):
             mentions.append(mention)
-        refresh_event_importance(event, mentions)
         if materiality == "material_update":
             event.last_material_update_at = _later(event.last_material_update_at, observed_at)
             event.latest_update_message_id = item.id

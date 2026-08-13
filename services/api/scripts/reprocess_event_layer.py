@@ -60,7 +60,7 @@ async def _reprocess(item_ids: list[int]) -> Counter[str]:
                 raise RuntimeError(f"NormalizedItem disappeared during replay: {item_id}")
             try:
                 run = await aggregate_normalized_item(db, item)
-            except LLMAnalysisError as exc:
+            except (LLMAnalysisError, ValueError) as exc:
                 outcomes["failed"] += 1
                 print(
                     {"item_id": item_id, "outcome": "failed", "error": str(exc)},
@@ -82,13 +82,32 @@ async def main() -> None:
     )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--expected-database", default="lol_daily_intel")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="process at most this many published items, oldest first",
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="skip this many published items before processing",
+    )
     args = parser.parse_args()
     _validate_local_database(args.expected_database)
     item_ids = _published_item_ids()
+    if args.offset < 0:
+        parser.error("--offset must be non-negative")
+    item_ids = item_ids[args.offset :]
+    if args.limit is not None:
+        if args.limit < 1:
+            parser.error("--limit must be positive")
+        item_ids = item_ids[: args.limit]
     print(
         {
             "database": engine.url.database,
             "published_items": len(item_ids),
+            "offset": args.offset,
             "order": "oldest-to-newest by published_at/ingested_at",
             "model": settings.model_name,
             "apply": args.apply,

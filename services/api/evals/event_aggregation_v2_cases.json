@@ -1,0 +1,164 @@
+{
+  "version": "event-aggregation-eval-v2",
+  "source": "local lol_daily_intel NormalizedItem sample, labeled 2026-08-13",
+  "label_contract": {
+    "create": "first observation creates the logical event",
+    "attach": "observation joins the referenced logical event",
+    "ignore": "observation produces no EventMention"
+  },
+  "cases": [
+    {
+      "case_id": "weekly-free-champions-ignore",
+      "category": "ignore",
+      "items": [
+        {"normalized_item_id": 1722, "expected": []}
+      ],
+      "risks": ["missed_ignore", "unnecessary_create"],
+      "notes": "A recurring catalog update is not independently tracked by current editorial policy; this is an evaluation label, not an admission regex."
+    },
+    {
+      "case_id": "nasus-pbe-balance-corroboration",
+      "category": "attach",
+      "items": [
+        {"normalized_item_id": 1711, "expected": [{"action": "create", "event_key": "nasus-pbe-2026-07-31", "event_family": "gameplay_balance"}]},
+        {"normalized_item_id": 1719, "expected": [{"action": "attach", "event_key": "nasus-pbe-2026-07-31", "event_family": "gameplay_balance"}]}
+      ],
+      "risks": ["false_split", "missed_attach"],
+      "notes": "Two sources describe the same concrete Nasus PBE changes."
+    },
+    {
+      "case_id": "alistar-icon-original-and-repost",
+      "category": "repost",
+      "items": [
+        {"normalized_item_id": 1700, "expected": [{"action": "create", "event_key": "classic-alistar-icon-code", "event_family": "player_activity"}]},
+        {"normalized_item_id": 1742, "expected": [{"action": "attach", "event_key": "classic-alistar-icon-code", "event_family": "player_activity"}]}
+      ],
+      "risks": ["false_split", "unnecessary_create"],
+      "notes": "The repost should attach without being treated as responsible-official evidence."
+    },
+    {
+      "case_id": "same-lpl-match-across-sources",
+      "category": "attach",
+      "items": [
+        {"normalized_item_id": 1761, "expected": [{"action": "create", "event_key": "2026-lpl-stage3-we-blg-w2d3", "event_family": "esports_match"}]},
+        {"normalized_item_id": 1764, "expected": [{"action": "attach", "event_key": "2026-lpl-stage3-we-blg-w2d3", "event_family": "esports_match"}]},
+        {"normalized_item_id": 1765, "expected": [{"action": "attach", "event_key": "2026-lpl-stage3-we-blg-w2d3", "event_family": "esports_match"}]}
+      ],
+      "risks": ["false_split", "missed_attach"],
+      "notes": "Score formatting and article detail must not split one real match."
+    },
+    {
+      "case_id": "daily-results-and-schedule-roundup",
+      "category": "multi_mention",
+      "preexisting_event_keys": [
+        "2026-lpl-stage3-al-edg-w2d3",
+        "2026-lpl-stage3-we-blg-w2d3"
+      ],
+      "items": [
+        {
+          "normalized_item_id": 1783,
+          "expected": [
+            {"action": "attach", "event_key": "2026-lpl-stage3-al-edg-w2d3", "event_family": "esports_match"},
+            {"action": "attach", "event_key": "2026-lpl-stage3-we-blg-w2d3", "event_family": "esports_match"}
+          ]
+        }
+      ],
+      "risks": ["missed_event", "false_merge", "unnecessary_create"],
+      "notes": "Do not create a generic daily-summary Event; the attached image may also contain future fixtures requiring additional mentions when evidence is available."
+    },
+    {
+      "case_id": "blg-jdg-specific-fixture",
+      "category": "create",
+      "items": [
+        {"normalized_item_id": 1785, "expected": [{"action": "create", "event_key": "2026-lpl-stage3-blg-jdg-2026-08-01", "event_family": "esports_match"}]}
+      ],
+      "risks": ["missed_create", "wrong_attach"],
+      "notes": "A concrete match with its own lifecycle should not attach to another recent LPL match."
+    },
+    {
+      "case_id": "wbg-jungle-rumor-lifecycle",
+      "category": "rumor",
+      "items": [
+        {"normalized_item_id": 1786, "expected": [{"action": "create", "event_key": "wbg-jungle-search-2026-summer", "event_family": "roster_change"}]},
+        {"normalized_item_id": 1787, "expected": [{"action": "attach", "event_key": "wbg-jungle-search-2026-summer", "event_family": "roster_change"}]},
+        {"normalized_item_id": 1788, "expected": [{"action": "attach", "event_key": "wbg-jungle-search-2026-summer", "event_family": "roster_change"}]},
+        {"normalized_item_id": 1792, "expected": [{"action": "attach", "event_key": "wbg-jungle-search-2026-summer", "event_family": "roster_change"}]}
+      ],
+      "risks": ["false_split", "missed_attach"],
+      "notes": "Changing candidate names and added roster context remain updates to the same unresolved roster development."
+    },
+    {
+      "case_id": "tes-wbg-swap-speculation-ignore",
+      "category": "ignore",
+      "items": [
+        {"normalized_item_id": 1791, "expected": []}
+      ],
+      "risks": ["unnecessary_create", "wrong_attach"],
+      "notes": "The text explicitly says the clubs have no such plan; do not attach it as support for the WBG jungle search."
+    },
+    {
+      "case_id": "same-hotfix-across-official-and-community",
+      "category": "attach",
+      "items": [
+        {"normalized_item_id": 1759, "expected": [{"action": "create", "event_key": "lol-hotfix-2026-07-31", "event_family": "service_incident"}]},
+        {"normalized_item_id": 1760, "expected": [{"action": "attach", "event_key": "lol-hotfix-2026-07-31", "event_family": "service_incident"}]}
+      ],
+      "risks": ["false_split", "missed_attach"],
+      "notes": "The community copy adds prior-day fixes as facts but shares the July 31 hotfix lifecycle."
+    },
+    {
+      "case_id": "mythic-shop-market-and-day-separation",
+      "category": "recurring_offer",
+      "items": [
+        {"normalized_item_id": 1809, "expected": [{"action": "create", "event_key": "mythic-global-2026-07-31", "event_family": "commercial_offer"}]},
+        {"normalized_item_id": 1810, "expected": [{"action": "create", "event_key": "mythic-cn-2026-07-31", "event_family": "commercial_offer"}]},
+        {"normalized_item_id": 1811, "expected": [{"action": "create", "event_key": "mythic-global-2026-08-01", "event_family": "commercial_offer"}]},
+        {"normalized_item_id": 1812, "expected": [{"action": "create", "event_key": "mythic-cn-2026-08-01", "event_family": "commercial_offer"}]},
+        {"normalized_item_id": 1813, "expected": [{"action": "create", "event_key": "mythic-global-2026-08-02", "event_family": "commercial_offer"}]},
+        {"normalized_item_id": 1814, "expected": [{"action": "create", "event_key": "mythic-cn-2026-08-02", "event_family": "commercial_offer"}]}
+      ],
+      "risks": ["false_merge", "wrong_attach"],
+      "notes": "These samples explicitly describe daily rotations. Market/day separation is a semantic evaluation expectation, not connector or ISO-week Python logic."
+    },
+    {
+      "case_id": "tft-character-and-activity-announcement",
+      "category": "multi_mention",
+      "items": [
+        {
+          "normalized_item_id": 1755,
+          "expected": [
+            {"action": "create", "event_key": "tft-s18-ivern-release", "event_family": "gameplay_release"},
+            {"action": "create", "event_key": "tft-force-of-nature-2026-08-27", "event_family": "player_activity"}
+          ]
+        }
+      ],
+      "risks": ["false_merge", "missed_event"],
+      "notes": "The named activity has a distinct date and update path from the character release."
+    },
+    {
+      "case_id": "rumor-correction",
+      "category": "correction",
+      "preexisting_event_keys": ["bin-unreachable-rumor"],
+      "items": [
+        {"normalized_item_id": 1707, "expected": [{"action": "attach", "event_key": "bin-unreachable-rumor", "event_family": "roster_change", "relation": "corrects"}]}
+      ],
+      "risks": ["missed_attach", "wrong_relation", "unnecessary_create"],
+      "notes": "A correction remains part of the lifecycle of the rumor it corrects."
+    },
+    {
+      "case_id": "pbe-balance-and-bugfix-multi-event",
+      "category": "multi_mention",
+      "items": [
+        {
+          "normalized_item_id": 1706,
+          "expected": [
+            {"action": "create", "event_key": "tft-pbe-first-balance-pass", "event_family": "gameplay_balance"},
+            {"action": "create", "event_key": "tft-pbe-first-bugfix-pass", "event_family": "service_incident"}
+          ]
+        }
+      ],
+      "risks": ["false_merge", "missed_event"],
+      "notes": "Balance and bugfix batches can have independent follow-up lifecycles even when announced together."
+    }
+  ]
+}

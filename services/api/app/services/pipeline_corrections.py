@@ -9,8 +9,8 @@ from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun
 from app.schemas.pipeline import PipelineCorrectionCreate
-from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_publication import withdraw_raw_item_media
+from app.services.pipeline_queue import enqueue_pipeline_job
 from app.workflows.reviewed_pipeline import (
     IMPORTANCE_STAGE,
     MESSAGE_ANALYSIS_STAGE,

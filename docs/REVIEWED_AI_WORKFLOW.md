@@ -20,6 +20,10 @@ RawItem
 
 消息发布即为当前流程终点。
 
+发布成功后由现有 `PipelineJob` durable queue 交给 Pipeline Worker 负责 Event
+downstream；审核流程不等待 Event LLM。`PipelineCorrection` 在消息发布提交后完成，
+Event downstream 的失败只属于 PipelineJob/EventAggregationRun，不会把已经完成的消息运行回写为失败。
+
 需要完整处理的非中文消息通常依次进行四次 LLM 调用：相关性、整条翻译、产品与内容分析、
 消息类型/主题与重要性特征。中文消息无需翻译，OCR 是指定类型消息的条件分支，纯媒体、纯链接
 或提前结束的消息调用数更少。

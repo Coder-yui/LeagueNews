@@ -28,6 +28,10 @@ published NormalizedItem
 写入 membership 时同步刷新投影；时间相关的热度衰减由 Pipeline Worker 周期刷新。公开 GET API
 只读取投影，不提交数据库事务。
 
+Published `NormalizedItem` revisions enter Event aggregation through the existing
+`PipelineJob` queue. The Pipeline Worker is the single downstream owner; message
+approval does not synchronously call the Event LLM.
+
 `event_id` is the only Event identity. `canonical_anchors` are optional descriptive and recall
 metadata; they are not a parallel identity mechanism.
 
@@ -35,6 +39,9 @@ metadata; they are not a parallel identity mechanism.
 
 - Only the latest published item revision is aggregated.
 - A completed run is idempotent per item revision and aggregation policy version.
+- At most one `running` `EventAggregationRun` is allowed for the same
+  `normalized_item_id + normalized_item_revision`; the partial unique index fences
+  concurrent and stale workers without blocking a newer revision.
 - A mention is unique per item revision, mention index and aggregation policy version.
 - Attach can reference only an Event in the bounded candidate payload.
 - Candidate retrieval hard-gates explicit products and routed event families; entities and text

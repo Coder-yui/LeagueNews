@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from datetime import timedelta
 
 from sqlalchemy import or_, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -22,6 +21,7 @@ from app.services.pipeline_execution import (
     assert_execution_owned,
 )
 from app.services.event_metrics import refresh_stale_event_metrics
+from app.services.pipeline_queue import enqueue_pipeline_job
 from app.services.raw_item_versions import (
     is_latest_raw_item,
     latest_raw_item_condition,
@@ -36,43 +36,6 @@ from app.workflows.reviewed_pipeline import (
 
 def _worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
-
-
-def enqueue_pipeline_job(
-    db: Session,
-    *,
-    raw_item_id: int,
-    correction_id: int | None = None,
-    current_stage: str = "relevance",
-) -> PipelineJob | None:
-    if not settings.pipeline_automation_enabled:
-        return None
-    existing = db.scalar(
-        select(PipelineJob).where(
-            PipelineJob.raw_item_id == raw_item_id,
-            PipelineJob.status.in_(["queued", "running"]),
-        )
-    )
-    if existing is not None:
-        return existing
-    job = PipelineJob(
-        raw_item_id=raw_item_id,
-        correction_id=correction_id,
-        status="queued",
-        current_stage=current_stage,
-    )
-    try:
-        with db.begin_nested():
-            db.add(job)
-            db.flush()
-        return job
-    except IntegrityError:
-        return db.scalar(
-            select(PipelineJob).where(
-                PipelineJob.raw_item_id == raw_item_id,
-                PipelineJob.status.in_(["queued", "running"]),
-            )
-        )
 
 
 def enqueue_pending_raw_items(db: Session) -> list[PipelineJob]:
@@ -190,6 +153,9 @@ async def execute_pipeline_job(
     item = raw_item.normalized_item
     if item is None or item.publication_status != "published":
         raise RuntimeError("automatic item pipeline did not publish a normalized item")
+    job.current_stage = "event_aggregation"
+    assert_execution_owned(db, execution_guard)
+    db.commit()
     await publish_normalized_item_downstream(db, item)
 
 
@@ -321,7 +287,7 @@ async def process_next_job() -> bool:
             job.lease_token = None
             job.lease_expires_at = None
             job.worker_id = None
-            if job.correction_id:
+            if job.correction_id and job.current_stage != "event_aggregation":
                 correction = db.get(PipelineCorrection, job.correction_id)
                 if correction is not None:
                     correction.status = "completed"
@@ -347,7 +313,7 @@ async def process_next_job() -> bool:
             job.lease_token = None
             job.lease_expires_at = None
             job.worker_id = None
-            if job.correction_id:
+            if job.correction_id and job.current_stage != "event_aggregation":
                 correction = db.get(PipelineCorrection, job.correction_id)
                 if correction is not None:
                     correction.status = "failed"

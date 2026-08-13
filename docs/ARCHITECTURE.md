@@ -15,17 +15,18 @@ Source 调度或手工触发
   -> message_analysis
   -> importance
   -> NormalizedItem 发布
-  -> automatic event admission
+  -> Pipeline Worker durable downstream job
   -> optional single-call EventMention[] aggregation
   -> Event current projection + evidence
 ```
 
 当前运行时包含 Connector、共享 ingestion、RawItem 修订、媒体落盘、自动任务、人工审核、
 OCR、翻译、受控消息分类、实体/摘要提取、消息重要性算法、事件聚合、公开消息/事件页和管理台。
-消息处理自身以 NormalizedItem 为输出边界，事件 worker 只消费该发布结果。
+消息处理自身以 NormalizedItem 为输出边界，Pipeline Worker 只消费该发布结果。
 
 事件 V2 已实现：包含确定性准入/召回、单次多 mention 模型接口、原子 membership 应用，以及
-相互独立的重要性/可信度/热度投影。自动 worker 在 NormalizedItem 发布后调用它。
+相互独立的重要性/可信度/热度投影。Pipeline Worker 在 NormalizedItem 发布后消费 durable
+downstream job；事件失败不会回写已经成功的消息处理运行。
 事件列表、详情 API 和现有 Next.js 栈内的公开页面已经接入。
 总设计与当前字段映射见 [`EVENT_AGGREGATION.md`](EVENT_AGGREGATION.md)；事件继续位于
 NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段。
@@ -114,9 +115,9 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 | `event_aggregation_runs` | 准入、候选、调用次数、结构化决定和应用结果审计 |
 | `daily_reports` / `daily_report_items` | 日报当前投影与消息排序 |
 
-最新迁移为 `068_add_event_products_index.sql`。SQL migration 是生产数据库的
+最新迁移为 `069_fence_event_runs_by_revision.sql`。SQL migration 是生产数据库的
 唯一结构来源：新数据库和历史数据库都执行同一条有序 migration 链，不再使用 ORM `create_all()`
-初始化生产结构。不得绕过追加迁移直接修改。全新 001→068 初始化与旧 031→068 顺序升级已在
+初始化生产结构。不得绕过追加迁移直接修改。全新 001→069 初始化与旧 031→069 顺序升级已在
 可销毁 PostgreSQL 17 上验证。
 
 ## 验证

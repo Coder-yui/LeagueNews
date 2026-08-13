@@ -6,17 +6,18 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
+import app.services.automatic_pipeline as automatic_pipeline
 import app.services.pipeline_corrections as correction_service
-import app.workflows.reviewed_pipeline as reviewed_pipeline
 from app.core.database import Base
+from app.core.config import settings
 from app.models.event import EventAggregationRun
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import ProcessingRun, ReviewTask
-from app.schemas.pipeline import PipelineCorrectionCreate
 from app.schemas.event_aggregation import EventAggregationResult
+from app.schemas.pipeline import PipelineCorrectionCreate
 from app.schemas.workflow import ReviewRejection
 from app.services.automatic_pipeline import (
     _claim_next_job,
@@ -26,8 +27,8 @@ from app.services.automatic_pipeline import (
     execute_pipeline_job,
 )
 from app.services.pipeline_execution import PipelineExecutionGuard, PipelineLeaseLost
-from app.workflows.event_aggregation import aggregate_normalized_item
 from app.workflows.reviewed_pipeline import approve_review, reject_review
+from app.workflows.event_aggregation import aggregate_normalized_item
 
 
 @pytest.fixture
@@ -246,34 +247,75 @@ async def test_importance_correction_preserves_new_analysis_context(
 
 
 @pytest.mark.anyio
-async def test_manual_publish_runs_event_downstream_and_completes_correction(
+async def test_manual_publish_commits_message_and_queues_event_downstream(
     db: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = _published_item(db, suffix=" manual downstream")
     correction, review = _final_manual_review(db, item)
-    calls: list[tuple[int, int]] = []
+
+    result = await approve_review(db, review, note="确认修正")
+
+    assert result.status == "completed"
+    assert db.get(PipelineCorrection, correction.id).status == "completed"
+    job = db.scalar(
+        select(PipelineJob).where(PipelineJob.raw_item_id == item.raw_item_id)
+    )
+    assert job is not None
+    assert job.status == "queued"
+    assert job.current_stage == "event_aggregation"
+
+
+@pytest.mark.anyio
+async def test_manual_publish_queues_event_even_when_automatic_ingestion_is_disabled(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db, suffix=" automation disabled")
+    _correction, review = _final_manual_review(db, item)
+    monkeypatch.setattr(settings, "pipeline_automation_enabled", False)
+
+    await approve_review(db, review, note="确认修正")
+
+    job = db.scalar(
+        select(PipelineJob).where(PipelineJob.raw_item_id == item.raw_item_id)
+    )
+    assert job is not None
+    assert job.current_stage == "event_aggregation"
+
+
+@pytest.mark.anyio
+async def test_pipeline_worker_processes_manual_publish_event_downstream(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db, suffix=" worker downstream")
+    _correction, review = _final_manual_review(db, item)
 
     async def run_downstream(_db: Session, published: NormalizedItem):
-        calls.append((published.id, published.current_revision))
         return await aggregate_normalized_item(
             _db,
             published,
             llm_client=_EmptyEventClient(),
         )
 
-    monkeypatch.setattr(reviewed_pipeline, "publish_normalized_item_downstream", run_downstream)
+    monkeypatch.setattr(automatic_pipeline, "publish_normalized_item_downstream", run_downstream)
+    await approve_review(db, review, note="确认修正")
+    job = db.scalar(
+        select(PipelineJob).where(PipelineJob.raw_item_id == item.raw_item_id)
+    )
+    assert job is not None
 
-    result = await approve_review(db, review, note="确认修正")
+    await execute_pipeline_job(db, job)
 
-    assert result.status == "completed"
-    assert calls == [(item.id, 2)]
-    assert db.get(PipelineCorrection, correction.id).status == "completed"
-    assert db.scalar(select(EventAggregationRun).where(EventAggregationRun.normalized_item_id == item.id)) is not None
+    assert db.scalar(
+        select(EventAggregationRun).where(
+            EventAggregationRun.normalized_item_id == item.id,
+        )
+    ) is not None
 
 
 @pytest.mark.anyio
-async def test_manual_publish_failure_marks_correction_failed(
+async def test_event_failure_does_not_fail_published_message(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -283,18 +325,24 @@ async def test_manual_publish_failure_marks_correction_failed(
     async def fail_downstream(_db: Session, _published: NormalizedItem):
         raise RuntimeError("event downstream unavailable")
 
-    monkeypatch.setattr(reviewed_pipeline, "publish_normalized_item_downstream", fail_downstream)
+    monkeypatch.setattr(automatic_pipeline, "publish_normalized_item_downstream", fail_downstream)
+
+    await approve_review(db, review, note="确认修正")
+    job = db.scalar(
+        select(PipelineJob).where(PipelineJob.raw_item_id == item.raw_item_id)
+    )
+    assert job is not None
 
     with pytest.raises(RuntimeError, match="event downstream unavailable"):
-        await approve_review(db, review, note="确认修正")
+        await execute_pipeline_job(db, job)
 
-    failed_run = db.scalar(select(ProcessingRun).where(ProcessingRun.correction_id == correction.id))
-    failed_correction = db.get(PipelineCorrection, correction.id)
-    assert failed_run is not None
-    assert failed_run.status == "failed"
-    assert failed_correction is not None
-    assert failed_correction.status == "failed"
-    assert failed_correction.completed_at is not None
+    published_run = db.scalar(select(ProcessingRun).where(ProcessingRun.correction_id == correction.id))
+    completed_correction = db.get(PipelineCorrection, correction.id)
+    assert published_run is not None
+    assert published_run.status == "completed"
+    assert completed_correction is not None
+    assert completed_correction.status == "completed"
+    assert completed_correction.completed_at is not None
 
 
 def test_manual_rejection_cancels_correction(db: Session) -> None:

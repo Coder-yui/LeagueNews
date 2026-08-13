@@ -16,7 +16,7 @@ from app.services.daily_report_scheduler import (
 )
 
 
-def test_daily_report_becomes_due_at_end_of_shanghai_day() -> None:
+def test_daily_report_is_due_for_previous_date_at_shanghai_midnight() -> None:
     report_date = date(2026, 8, 13)
 
     assert scheduled_generation_at(report_date).isoformat() == "2026-08-14T00:00:00+08:00"
@@ -24,12 +24,7 @@ def test_daily_report_becomes_due_at_end_of_shanghai_day() -> None:
     assert due_report_date(datetime(2026, 8, 13, 16, 0, tzinfo=UTC)) == report_date
 
 
-def test_daily_report_does_not_generate_the_current_shanghai_date_before_midnight() -> None:
-    assert due_report_date(datetime(2026, 8, 13, 15, 59, 59, tzinfo=UTC)) != date(2026, 8, 13)
-    assert due_report_date(datetime(2026, 8, 13, 16, 0, tzinfo=UTC)) == date(2026, 8, 13)
-
-
-def test_due_daily_report_is_generated_once_after_noon() -> None:
+def test_due_daily_report_is_generated_once_after_shanghai_midnight() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as db:

@@ -35,9 +35,9 @@ from app.services.pipeline_execution import (
     PipelineExecutionGuard,
     assert_execution_owned,
 )
+from app.services.pipeline_queue import enqueue_pipeline_job
 from app.services.raw_item_versions import is_latest_raw_item
 from app.workflows.translate_item import build_translation
-from app.workflows.event_aggregation import publish_normalized_item_downstream
 from app.workflows.understand_media import (
     extraction_context,
     is_patch_preview,
@@ -402,12 +402,16 @@ async def _publish_approved_item(
             proposal,
             processing_run_id=run.id,
         )
-        await publish_normalized_item_downstream(db, item)
         _record_checkpoint(db, review, normalized_item_id=item.id)
         run.status = "completed"
         run.outcome = "approved"
         run.completed_at = completed_at
         _set_correction_terminal(db, run, status="completed", completed_at=completed_at)
+        enqueue_pipeline_job(
+            db,
+            raw_item_id=run.raw_item_id,
+            current_stage="event_aggregation",
+        )
         assert_execution_owned(db, execution_guard)
         db.commit()
     except Exception as exc:

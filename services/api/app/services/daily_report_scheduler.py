@@ -22,14 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def scheduled_generation_at(report_date: date) -> datetime:
-    generation_date = (
-        report_date + timedelta(days=1)
-        if settings.daily_report_generation_hour == 0
-        else report_date
-    )
     return datetime.combine(
-        generation_date,
-        time(hour=settings.daily_report_generation_hour),
+        report_date + timedelta(days=1),
+        time.min,
         tzinfo=DAILY_REPORT_TIMEZONE,
     )
 
@@ -41,12 +36,7 @@ def due_report_date(now: datetime | None = None) -> date | None:
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     local_now = current.astimezone(DAILY_REPORT_TIMEZONE)
-    if settings.daily_report_generation_hour == 0:
-        report_date = local_now.date() - timedelta(days=1)
-        if local_now < scheduled_generation_at(report_date):
-            return None
-        return report_date
-    report_date = local_now.date()
+    report_date = local_now.date() - timedelta(days=1)
     if local_now < scheduled_generation_at(report_date):
         return None
     return report_date

@@ -28,12 +28,13 @@ Scheduler 进程按 `Asia/Shanghai` 时区在每天次日 00:00 生成刚刚结�
 PostgreSQL advisory lock 和 `report_date` 唯一约束串行化。当天尚无已发布消息时不创建空日报；
 零点后一旦该日期有符合“当前、已发布、原创、重要性不低于 0.60”的消息，会在下一轮检查时生成；
 零点后 15 分钟内若有前一天晚到的符合条件消息，会自动重新生成。同一天仍可通过生成 API 手工覆盖。
+日报保存生成时的排序和栏目截取；如果后续消息修正后失去当前 eligibility，公开读取会隐藏该条目，
+但 V1 不自动补位或重排，需要通过管理台手工重新生成。
 人工退回的日报不会被自动任务重新发布，只有管理台“生成 / 重新生成”操作会恢复为 `published`。
 
 相关配置：
 
 - `DAILY_REPORT_AUTOMATION_ENABLED`：默认 `true`；
-- `DAILY_REPORT_GENERATION_HOUR`：北京时间生成小时，默认 `0`；零点生成前一自然日；
 - `DAILY_REPORT_GENERATION_GRACE_MINUTES`：零点后允许晚到消息触发自动重生成的分钟数，默认 `15`；
 - `DAILY_REPORT_SCHEDULER_POLL_SECONDS`：检查间隔，默认 `30` 秒。
 
@@ -44,4 +45,4 @@ PostgreSQL advisory lock 和 `report_date` 唯一约束串行化。当天尚无�
 V1 不包含 AI 日报总结、事件摘要或趋势分析、个性化推荐、推送、周报或新评分体系。自动生成复用
 现有 Scheduler 进程，不引入第二套后台任务基础设施。
 
-后续版本可以在不改变本 V1 精选规则的前提下增加定时生成、事件视图或摘要能力。
+后续版本可以在不改变本 V1 精选规则的前提下增加事件视图或摘要能力。

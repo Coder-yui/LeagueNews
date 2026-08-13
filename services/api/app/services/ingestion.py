@@ -12,13 +12,13 @@ from app.models.media_asset import MediaAsset
 from app.models.raw_item import RawItem
 from app.models.raw_item_source_payload import RawItemSourcePayload
 from app.models.source import Source
-from app.services.automatic_pipeline import enqueue_pipeline_job
 from app.services.media_repair import (
     MediaStorageProtocol,
     repair_raw_item_media,
     storage_digest,
 )
 from app.services.media_storage import MediaStorage
+from app.services.pipeline_queue import enqueue_pipeline_job
 from app.services.raw_item_revision_lifecycle import (
     supersede_previous_raw_revision,
 )

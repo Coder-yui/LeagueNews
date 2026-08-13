@@ -1,4 +1,6 @@
-from typing import Any
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
@@ -13,12 +15,15 @@ from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtrac
 from app.models.raw_item import RawItem
 from app.schemas.normalized_item import (
     NormalizedItemRead,
+    PublishedDayListRead,
     PublishedItemPageRead,
     PublishedItemRead,
 )
 from app.services.raw_item_versions import latest_normalized_item_condition
 
 router = APIRouter()
+
+DEFAULT_PUBLICATION_TIMEZONE = "Asia/Shanghai"
 
 
 @router.get("", response_model=list[NormalizedItemRead])
@@ -47,6 +52,57 @@ def _published_statement():
             .selectinload(MediaExtraction.media_asset),
         )
     )
+
+
+def _publication_time_column():
+    return func.coalesce(RawItem.published_at, RawItem.ingested_at)
+
+
+def _publication_timezone(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="unsupported timezone") from exc
+
+
+def _utc_day_window(publication_date: date, timezone_name: str) -> tuple[datetime, datetime]:
+    timezone = _publication_timezone(timezone_name)
+    start = datetime.combine(publication_date, datetime.min.time(), tzinfo=timezone)
+    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
+
+
+def _published_conditions(
+    db: Session,
+    *,
+    product: Product | None = None,
+    message_type: str | None = None,
+    featured: bool = False,
+    search: str | None = None,
+) -> list[Any]:
+    conditions: list[Any] = [
+        latest_normalized_item_condition(),
+        NormalizedItem.publication_status == "published",
+    ]
+    if message_type:
+        conditions.append(NormalizedItem.message_type == message_type)
+    if product:
+        conditions.append(json_array_contains(db, NormalizedItem.products, product))
+    if featured:
+        conditions.append(NormalizedItem.importance_score >= FEATURED_MESSAGE_MIN_IMPORTANCE)
+    if search:
+        search_value = search.strip()
+        if search_value.isdigit():
+            conditions.append(NormalizedItem.id == int(search_value))
+        elif search_value:
+            pattern = f"%{search_value}%"
+            conditions.append(
+                or_(
+                    NormalizedItem.normalized_title.ilike(pattern),
+                    NormalizedItem.translated_title.ilike(pattern),
+                    NormalizedItem.summary.ilike(pattern),
+                )
+            )
+    return conditions
 
 
 def _published_payload(item: NormalizedItem) -> dict[str, Any]:
@@ -154,6 +210,8 @@ def list_published_items_page(
     message_type: str | None = None,
     featured: bool = False,
     search: str | None = None,
+    published_date: Annotated[date | None, Query(alias="date")] = None,
+    timezone_name: Annotated[str, Query(alias="timezone")] = DEFAULT_PUBLICATION_TIMEZONE,
     sort_by: str = Query(
         default="time",
         pattern="^(time|importance|priority|intrinsic)$",
@@ -163,29 +221,17 @@ def list_published_items_page(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    conditions = [
-        latest_normalized_item_condition(),
-        NormalizedItem.publication_status == "published",
-    ]
-    if message_type:
-        conditions.append(NormalizedItem.message_type == message_type)
-    if product:
-        conditions.append(json_array_contains(db, NormalizedItem.products, product))
-    if featured:
-        conditions.append(NormalizedItem.importance_score >= FEATURED_MESSAGE_MIN_IMPORTANCE)
-    if search:
-        search_value = search.strip()
-        if search_value.isdigit():
-            conditions.append(NormalizedItem.id == int(search_value))
-        else:
-            pattern = f"%{search_value}%"
-            conditions.append(
-                or_(
-                    NormalizedItem.normalized_title.ilike(pattern),
-                    NormalizedItem.translated_title.ilike(pattern),
-                    NormalizedItem.summary.ilike(pattern),
-                )
-            )
+    conditions = _published_conditions(
+        db,
+        product=product,
+        message_type=message_type,
+        featured=featured,
+        search=search,
+    )
+    if published_date is not None:
+        start, end = _utc_day_window(published_date, timezone_name)
+        publication_time = _publication_time_column()
+        conditions.extend((publication_time >= start, publication_time < end))
     count_statement = (
         select(func.count(NormalizedItem.id)).join(NormalizedItem.raw_item).where(*conditions)
     )
@@ -211,6 +257,55 @@ def list_published_items_page(
         "message_type_options": list(MESSAGE_TYPE_ORDER),
         "topic_options": [rule.code for rule in TOPIC_RULES],
     }
+
+
+@router.get("/published-days", response_model=PublishedDayListRead)
+def list_published_days(
+    product: Product | None = None,
+    message_type: str | None = None,
+    featured: bool = False,
+    search: str | None = None,
+    timezone_name: Annotated[str, Query(alias="timezone")] = DEFAULT_PUBLICATION_TIMEZONE,
+    limit: int = Query(default=30, ge=1, le=365),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """List newest publication dates with counts in the requested civil timezone."""
+    timezone = _publication_timezone(timezone_name)
+    conditions = _published_conditions(
+        db,
+        product=product,
+        message_type=message_type,
+        featured=featured,
+        search=search,
+    )
+    publication_time = _publication_time_column()
+    timestamp_statement = (
+        select(publication_time)
+        .select_from(NormalizedItem)
+        .join(NormalizedItem.raw_item)
+        .where(*conditions)
+        .order_by(publication_time.desc(), NormalizedItem.id.desc())
+        .execution_options(yield_per=500)
+    )
+    timestamps = db.scalars(timestamp_statement)
+
+    days: list[dict[str, Any]] = []
+    for value in timestamps:
+        timestamp = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        local_date = timestamp.astimezone(timezone).date()
+        if days and days[-1]["date"] == local_date:
+            days[-1]["count"] += 1
+        elif len(days) >= limit:
+            break
+        else:
+            days.append(
+                {
+                    "date": local_date,
+                    "count": 1,
+                    "latest_published_at": timestamp,
+                }
+            )
+    return {"days": days, "timezone": timezone_name}
 
 
 @router.get("/{item_id}/published", response_model=PublishedItemRead)

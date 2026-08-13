@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -8,6 +8,7 @@ from app.api.routes.normalized_items import (
     _published_payload,
     _published_statement,
     list_normalized_items,
+    list_published_days,
     list_published_items,
     list_published_items_page,
 )
@@ -465,3 +466,92 @@ def test_published_page_filters_each_product_membership_and_supports_requested_s
             tft_only.id,
             pc_only.id,
         ]
+
+
+def test_published_days_and_date_filter_use_requested_civil_timezone() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Timezone source", connector_type="manual")
+        db.add(source)
+        db.flush()
+
+        def add_item(external_id: str, published_at: datetime | None, ingested_at: datetime) -> int:
+            raw = RawItem(
+                source_id=source.id,
+                external_id=external_id,
+                native_title=external_id,
+                content_blocks=[{"type": "paragraph", "text": external_id}],
+                published_at=published_at,
+                ingested_at=ingested_at,
+            )
+            db.add(raw)
+            db.flush()
+            item = NormalizedItem(
+                raw_item_id=raw.id,
+                normalized_title=external_id,
+                normalized_text=external_id,
+                summary=external_id,
+                entities=[],
+                products=["lol_pc"],
+                message_type="game_announcement",
+                topics=["gameplay"],
+                classification_version="message-taxonomy-v3",
+                importance_score=0.5,
+                target_language="zh-CN",
+                translated_title=external_id,
+                translated_content_blocks=[],
+                translation_status="not_required",
+                analysis_model="test",
+                analysis_version="test",
+            )
+            db.add(item)
+            db.flush()
+            return item.id
+
+        previous_day = add_item(
+            "before-shanghai-midnight",
+            datetime(2026, 8, 12, 15, 59, tzinfo=UTC),
+            datetime(2026, 8, 12, 16, 10, tzinfo=UTC),
+        )
+        start_of_day = add_item(
+            "at-shanghai-midnight",
+            datetime(2026, 8, 12, 16, 0, tzinfo=UTC),
+            datetime(2026, 8, 12, 16, 10, tzinfo=UTC),
+        )
+        fallback_to_ingestion = add_item(
+            "ingestion-fallback",
+            None,
+            datetime(2026, 8, 13, 2, 0, tzinfo=UTC),
+        )
+        next_day = add_item(
+            "next-shanghai-day",
+            datetime(2026, 8, 13, 16, 0, tzinfo=UTC),
+            datetime(2026, 8, 13, 16, 10, tzinfo=UTC),
+        )
+        db.commit()
+
+        day_list = list_published_days(timezone_name="Asia/Shanghai", limit=30, db=db)
+        august_13_page = list_published_items_page(
+            published_date=date(2026, 8, 13),
+            timezone_name="Asia/Shanghai",
+            sort_by="time",
+            sort="desc",
+            limit=100,
+            offset=0,
+            db=db,
+        )
+
+        assert [(day["date"], day["count"]) for day in day_list["days"]] == [
+            (date(2026, 8, 14), 1),
+            (date(2026, 8, 13), 2),
+            (date(2026, 8, 12), 1),
+        ]
+        assert day_list["timezone"] == "Asia/Shanghai"
+        assert august_13_page["total"] == 2
+        assert {item["id"] for item in august_13_page["items"]} == {
+            start_of_day,
+            fallback_to_ingestion,
+        }
+        assert previous_day not in {item["id"] for item in august_13_page["items"]}
+        assert next_day not in {item["id"] for item in august_13_page["items"]}

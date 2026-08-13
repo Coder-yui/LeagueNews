@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -96,3 +96,14 @@ class PublishedItemPageRead(BaseModel):
     product_options: list[str]
     message_type_options: list[str]
     topic_options: list[str]
+
+
+class PublishedDayRead(BaseModel):
+    date: date
+    count: int
+    latest_published_at: datetime
+
+
+class PublishedDayListRead(BaseModel):
+    days: list[PublishedDayRead]
+    timezone: str

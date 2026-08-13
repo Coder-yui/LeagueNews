@@ -1,4 +1,11 @@
-import type { DailyReport, EventDetail, EventPage, PublishedItem, PublishedItemPage } from "./types";
+import type {
+  DailyReport,
+  EventDetail,
+  EventPage,
+  PublishedDayList,
+  PublishedItem,
+  PublishedItemPage,
+} from "./types";
 import type { PublicSortBy, SortDirection } from "./public-list";
 
 export const apiUrl =
@@ -29,10 +36,12 @@ export async function getPublishedItemsPage(
   limit: number,
   offset: number,
   filters: {
+    date?: string;
     featured?: boolean;
     product?: string;
     sortBy: PublicSortBy;
     sort: SortDirection;
+    timezone?: string;
   },
 ): Promise<PublishedItemPage> {
   const params = new URLSearchParams({
@@ -41,12 +50,28 @@ export async function getPublishedItemsPage(
   });
   if (filters.featured) params.set("featured", "true");
   if (filters.product) params.set("product", filters.product);
+  if (filters.date) params.set("date", filters.date);
+  if (filters.timezone) params.set("timezone", filters.timezone);
   params.set("sort_by", filters.sortBy);
   params.set("sort", filters.sort);
   const response = await fetch(`${apiUrl}/normalized-items/published-page?${params}`, {
     next: { revalidate: 30 },
   });
   return requireJson<PublishedItemPage>(response);
+}
+
+export async function getPublishedDays(
+  limit = 30,
+  filters: { featured?: boolean; product?: string; timezone?: string } = {},
+): Promise<PublishedDayList> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (filters.featured) params.set("featured", "true");
+  if (filters.product) params.set("product", filters.product);
+  if (filters.timezone) params.set("timezone", filters.timezone);
+  const response = await fetch(`${apiUrl}/normalized-items/published-days?${params}`, {
+    next: { revalidate: 30 },
+  });
+  return requireJson<PublishedDayList>(response);
 }
 
 export async function getPublishedItem(id: number): Promise<PublishedItem | null> {

@@ -148,6 +148,17 @@ export type PublishedItemPage = {
   topic_options: string[];
 };
 
+export type PublishedDay = {
+  date: string;
+  count: number;
+  latest_published_at: string;
+};
+
+export type PublishedDayList = {
+  days: PublishedDay[];
+  timezone: string;
+};
+
 export type DailyReport = {
   id: number;
   report_date: string;

@@ -85,8 +85,10 @@ function MessageCard({ item, index }: { item: PublishedItem; index: number }) {
 
 export function MessageFeed({
   items,
+  startIndex = 0,
 }: {
   items: PublishedItem[];
+  startIndex?: number;
 }) {
   if (!items.length) {
     return (
@@ -101,7 +103,7 @@ export function MessageFeed({
         {items.map((item, index) => (
           <MessageCard
             item={item}
-            index={index}
+            index={startIndex + index}
             key={item.id}
           />
         ))}

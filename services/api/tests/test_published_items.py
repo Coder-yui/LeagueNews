@@ -355,3 +355,113 @@ def test_published_page_featured_filter_preserves_normal_list() -> None:
         assert all_items["total"] == 3
         assert featured_items["total"] == 2
         assert {item["importance_score"] for item in featured_items["items"]} == {0.75, 0.9}
+
+
+def test_published_page_filters_each_product_membership_and_supports_requested_sorts() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Product filter source", connector_type="manual")
+        db.add(source)
+        db.flush()
+
+        def add_item(
+            external_id: str,
+            products: list[str],
+            importance_score: float,
+            published_at: datetime,
+        ) -> NormalizedItem:
+            raw = RawItem(
+                source_id=source.id,
+                external_id=external_id,
+                native_title=external_id,
+                content_blocks=[{"type": "paragraph", "text": external_id}],
+                published_at=published_at,
+            )
+            db.add(raw)
+            db.flush()
+            item = NormalizedItem(
+                raw_item_id=raw.id,
+                normalized_title=external_id,
+                normalized_text=external_id,
+                summary=external_id,
+                entities=[],
+                products=products,
+                message_type="game_announcement",
+                topics=["gameplay"],
+                classification_version="message-taxonomy-v3",
+                importance_score=importance_score,
+                target_language="zh-CN",
+                translated_title=external_id,
+                translated_content_blocks=[],
+                translation_status="not_required",
+                analysis_model="test",
+                analysis_version="test",
+            )
+            db.add(item)
+            db.flush()
+            return item
+
+        pc_only = add_item(
+            "pc-only",
+            ["lol_pc"],
+            0.2,
+            datetime(2026, 8, 1, tzinfo=UTC),
+        )
+        tft_only = add_item(
+            "tft-only",
+            ["tft"],
+            0.5,
+            datetime(2026, 8, 2, tzinfo=UTC),
+        )
+        shared = add_item(
+            "shared",
+            ["lol_pc", "tft"],
+            0.9,
+            datetime(2026, 8, 3, tzinfo=UTC),
+        )
+        db.commit()
+
+        pc_page = list_published_items_page(
+            product="lol_pc",
+            sort_by="importance",
+            sort="asc",
+            limit=25,
+            offset=0,
+            db=db,
+        )
+        tft_page = list_published_items_page(
+            product="tft",
+            sort_by="importance",
+            sort="desc",
+            limit=25,
+            offset=0,
+            db=db,
+        )
+        oldest_first = list_published_items_page(
+            sort_by="time",
+            sort="asc",
+            limit=25,
+            offset=0,
+            db=db,
+        )
+        newest_first = list_published_items_page(
+            sort_by="time",
+            sort="desc",
+            limit=25,
+            offset=0,
+            db=db,
+        )
+
+        assert [item["id"] for item in pc_page["items"]] == [pc_only.id, shared.id]
+        assert [item["id"] for item in tft_page["items"]] == [shared.id, tft_only.id]
+        assert [item["id"] for item in oldest_first["items"]] == [
+            pc_only.id,
+            tft_only.id,
+            shared.id,
+        ]
+        assert [item["id"] for item in newest_first["items"]] == [
+            shared.id,
+            tft_only.id,
+            pc_only.id,
+        ]

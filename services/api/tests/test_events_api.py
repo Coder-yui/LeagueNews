@@ -146,6 +146,7 @@ def test_event_list_and_detail_present_current_projection_and_material_timeline(
                 heat_level=None,
                 search=None,
                 sort_by="latest",
+                sort="desc",
                 limit=25,
                 offset=0,
                 db=db,
@@ -226,6 +227,7 @@ def test_event_api_category_filter_is_server_side_and_counts_distinct_messages()
                 heat_level=None,
                 search=None,
                 sort_by="latest",
+                sort="desc",
                 limit=25,
                 offset=0,
                 db=db,
@@ -236,6 +238,94 @@ def test_event_api_category_filter_is_server_side_and_counts_distinct_messages()
         assert page.items[0].message_count == 1
         assert page.items[0].source_count == 1
         assert esports_event.id != pc_event.id
+
+
+def test_event_api_filters_each_product_membership_and_sorts_both_directions() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Event product filter source")
+        db.add(source)
+        db.flush()
+        pc_item = _item(db, source=source, external_id="event-pc", title="PC")
+        tft_item = _item(db, source=source, external_id="event-tft", title="TFT")
+        shared_item = _item(db, source=source, external_id="event-shared", title="Shared")
+        db.commit()
+
+        pc_event, _ = create_event(
+            db,
+            normalized_item_id=pc_item.id,
+            mention_index=0,
+            event_family="gameplay_release",
+            products=["lol_pc"],
+            canonical_anchors={"release_name": "event:pc"},
+            title="PC",
+            current_summary="PC",
+        )
+        tft_event, _ = create_event(
+            db,
+            normalized_item_id=tft_item.id,
+            mention_index=0,
+            event_family="gameplay_release",
+            products=["tft"],
+            canonical_anchors={"release_name": "event:tft"},
+            title="TFT",
+            current_summary="TFT",
+        )
+        shared_event, _ = create_event(
+            db,
+            normalized_item_id=shared_item.id,
+            mention_index=0,
+            event_family="gameplay_release",
+            products=["lol_pc", "tft"],
+            canonical_anchors={"release_name": "event:shared"},
+            title="Shared",
+            current_summary="Shared",
+        )
+        pc_event.importance_score = 0.2
+        pc_event.last_material_update_at = datetime(2026, 8, 1, tzinfo=UTC)
+        tft_event.importance_score = 0.5
+        tft_event.last_material_update_at = datetime(2026, 8, 2, tzinfo=UTC)
+        shared_event.importance_score = 0.9
+        shared_event.last_material_update_at = datetime(2026, 8, 3, tzinfo=UTC)
+        db.commit()
+
+        def event_page(*, product: str | None, sort_by: str, sort: str) -> EventPageRead:
+            return EventPageRead.model_validate(
+                list_events(
+                    product=product,
+                    category=None,
+                    event_family=None,
+                    lifecycle=None,
+                    credibility_level=None,
+                    importance_level=None,
+                    heat_level=None,
+                    search=None,
+                    sort_by=sort_by,
+                    sort=sort,
+                    limit=25,
+                    offset=0,
+                    db=db,
+                )
+            )
+
+        pc_page = event_page(product="lol_pc", sort_by="importance", sort="asc")
+        tft_page = event_page(product="tft", sort_by="importance", sort="desc")
+        oldest_first = event_page(product=None, sort_by="time", sort="asc")
+        newest_first = event_page(product=None, sort_by="time", sort="desc")
+
+        assert [event.id for event in pc_page.items] == [pc_event.id, shared_event.id]
+        assert [event.id for event in tft_page.items] == [shared_event.id, tft_event.id]
+        assert [event.id for event in oldest_first.items] == [
+            pc_event.id,
+            tft_event.id,
+            shared_event.id,
+        ]
+        assert [event.id for event in newest_first.items] == [
+            shared_event.id,
+            tft_event.id,
+            pc_event.id,
+        ]
 
 
 def test_official_denial_updates_credibility_and_lifecycle_without_deleting_event() -> None:

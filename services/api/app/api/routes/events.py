@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Text, and_, cast, func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.api.query_filters import json_array_contains
 from app.core.database import get_db
 from app.domain.event_types import (
     CREDIBILITY_LEVELS,
@@ -9,7 +10,7 @@ from app.domain.event_types import (
     EVENT_LIFECYCLES,
 )
 from app.domain.event_categories import EVENT_CATEGORIES
-from app.domain.message_taxonomy import PRODUCTS
+from app.domain.message_taxonomy import PRODUCTS, Product
 from app.models.event import Event
 from app.schemas.event import EventDetailRead, EventPageRead
 from app.services.event_presentation import (
@@ -27,39 +28,46 @@ _ESPORTS_FAMILIES = ("esports_match", "esports_schedule", "roster_change", "espo
 _ECOSYSTEM_FAMILIES = ("corporate_change", "platform_service", "universe_release", "media_release")
 
 
-def _contains_product(product: str):
-    return cast(Event.products, Text).like(f'%"{product}"%')
+def _contains_product(db: Session, product: str):
+    return json_array_contains(db, Event.products, product)
 
 
-def _category_condition(category: str):
+def _category_condition(db: Session, category: str):
     if category == "esports":
-        return or_(Event.event_family.in_(_ESPORTS_FAMILIES), _contains_product("lol_esports"))
+        return or_(
+            Event.event_family.in_(_ESPORTS_FAMILIES),
+            _contains_product(db, "lol_esports"),
+        )
     if category == "ecosystem":
         return or_(
             Event.event_family.in_(_ECOSYSTEM_FAMILIES),
-            _contains_product("riot_ecosystem"),
-            _contains_product("lol_universe"),
+            _contains_product(db, "riot_ecosystem"),
+            _contains_product(db, "lol_universe"),
         )
     excluded = and_(
         Event.event_family.not_in((*_ESPORTS_FAMILIES, *_ECOSYSTEM_FAMILIES)),
-        ~_contains_product("lol_esports"),
-        ~_contains_product("riot_ecosystem"),
-        ~_contains_product("lol_universe"),
+        ~_contains_product(db, "lol_esports"),
+        ~_contains_product(db, "riot_ecosystem"),
+        ~_contains_product(db, "lol_universe"),
     )
     if category == "lol_pc":
-        return and_(excluded, _contains_product("lol_pc"))
+        return and_(excluded, _contains_product(db, "lol_pc"))
     if category == "tft":
-        return and_(excluded, ~_contains_product("lol_pc"), _contains_product("tft"))
+        return and_(
+            excluded,
+            ~_contains_product(db, "lol_pc"),
+            _contains_product(db, "tft"),
+        )
     return and_(
         excluded,
-        ~_contains_product("lol_pc"),
-        ~_contains_product("tft"),
+        ~_contains_product(db, "lol_pc"),
+        ~_contains_product(db, "tft"),
     )
 
 
 @router.get("", response_model=EventPageRead)
 def list_events(
-    product: str | None = None,
+    product: Product | None = None,
     category: str | None = None,
     event_family: str | None = None,
     lifecycle: str | None = None,
@@ -67,7 +75,8 @@ def list_events(
     importance_level: str | None = None,
     heat_level: str | None = None,
     search: str | None = None,
-    sort_by: str = Query(default="latest", pattern="^(latest|importance|heat)$"),
+    sort_by: str = Query(default="time", pattern="^(time|latest|importance|heat)$"),
+    sort: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -80,11 +89,11 @@ def list_events(
     if credibility_level:
         conditions.append(Event.credibility_level == credibility_level)
     if product:
-        conditions.append(_contains_product(product))
+        conditions.append(_contains_product(db, product))
     if category:
         if category not in EVENT_CATEGORIES:
             raise HTTPException(status_code=400, detail="unsupported event category")
-        conditions.append(_category_condition(category))
+        conditions.append(_category_condition(db, category))
     if importance_level:
         ranges = {
             "low": Event.importance_score < 0.30,
@@ -114,19 +123,22 @@ def list_events(
                 or_(Event.title.ilike(pattern), Event.current_summary.ilike(pattern))
             )
     total = db.scalar(select(func.count(Event.id)).where(*conditions)) or 0
-    ordering = {
-        "latest": (Event.last_material_update_at.desc().nullslast(), Event.id.desc()),
-        "importance": (
-            Event.importance_score.desc(),
-            Event.last_material_update_at.desc().nullslast(),
-            Event.id.desc(),
-        ),
-        "heat": (
-            Event.heat_score.desc(),
-            Event.last_material_update_at.desc().nullslast(),
-            Event.id.desc(),
-        ),
+    time_column = func.coalesce(
+        Event.last_material_update_at,
+        Event.last_seen_at,
+        Event.created_at,
+    )
+    sort_column = {
+        "time": time_column,
+        "latest": time_column,
+        "importance": Event.importance_score,
+        "heat": Event.heat_score,
     }[sort_by]
+    ordering = (
+        (sort_column.asc(), time_column.asc(), Event.id.asc())
+        if sort == "asc"
+        else (sort_column.desc(), time_column.desc(), Event.id.desc())
+    )
     events = list(
         db.scalars(
             select(Event).where(*conditions).order_by(*ordering).offset(offset).limit(limit)

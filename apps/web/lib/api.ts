@@ -1,4 +1,5 @@
 import type { DailyReport, EventDetail, EventPage, PublishedItem, PublishedItemPage } from "./types";
+import type { PublicSortBy, SortDirection } from "./public-list";
 
 export const apiUrl =
   process.env.INTERNAL_API_URL ??
@@ -27,33 +28,25 @@ export async function adminApi<T>(path: string, options?: RequestInit): Promise<
 export async function getPublishedItemsPage(
   limit: number,
   offset: number,
-  featured = false,
+  filters: {
+    featured?: boolean;
+    product?: string;
+    sortBy: PublicSortBy;
+    sort: SortDirection;
+  },
 ): Promise<PublishedItemPage> {
   const params = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
   });
-  if (featured) params.set("featured", "true");
+  if (filters.featured) params.set("featured", "true");
+  if (filters.product) params.set("product", filters.product);
+  params.set("sort_by", filters.sortBy);
+  params.set("sort", filters.sort);
   const response = await fetch(`${apiUrl}/normalized-items/published-page?${params}`, {
     next: { revalidate: 30 },
   });
   return requireJson<PublishedItemPage>(response);
-}
-
-export async function getAllPublishedItems(featured = false): Promise<PublishedItemPage> {
-  const pageSize = 100;
-  const firstPage = await getPublishedItemsPage(pageSize, 0, featured);
-  const offsets = Array.from(
-    { length: Math.max(0, Math.ceil(firstPage.total / pageSize) - 1) },
-    (_, index) => (index + 1) * pageSize,
-  );
-  const remainingPages = await Promise.all(
-    offsets.map((offset) => getPublishedItemsPage(pageSize, offset, featured)),
-  );
-  return {
-    ...firstPage,
-    items: [firstPage, ...remainingPages].flatMap((page) => page.items),
-  };
 }
 
 export async function getPublishedItem(id: number): Promise<PublishedItem | null> {
@@ -72,9 +65,24 @@ export async function getDailyReport(reportDate: string): Promise<DailyReport | 
   return requireJson<DailyReport>(response);
 }
 
-export async function getEventsPage(category?: string): Promise<EventPage> {
-  const params = new URLSearchParams({ limit: "100" });
-  if (category && category !== "all") params.set("category", category);
+export async function getEventsPage(
+  limit: number,
+  offset: number,
+  filters: {
+    category?: string;
+    sortBy: PublicSortBy;
+    sort: SortDirection;
+  },
+): Promise<EventPage> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+    sort_by: filters.sortBy,
+    sort: filters.sort,
+  });
+  if (filters.category && filters.category !== "all") {
+    params.set("category", filters.category);
+  }
   const response = await fetch(`${apiUrl}/events?${params}`, {
     next: { revalidate: 30 },
   });

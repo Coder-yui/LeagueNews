@@ -1,7 +1,17 @@
 import Image from "next/image";
 import Link from "next/link";
 import { Activity, ArrowUpRight } from "lucide-react";
+import { PublicPagination, PublicSortControls } from "@/components/public-list-controls";
 import { getEventsPage } from "@/lib/api";
+import {
+  normalizePage,
+  normalizePublicSortBy,
+  normalizeSortDirection,
+  publicListHref,
+  type PublicSearchParams,
+} from "@/lib/public-list";
+
+const PAGE_SIZE = 25;
 
 const categoryTabs = [
   ["all", "全部"],
@@ -15,11 +25,31 @@ const categoryTabs = [
 export default async function EventsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ category?: string }>;
+  searchParams: Promise<{
+    category?: string;
+    sort_by?: string;
+    sort?: string;
+    page?: string;
+  }>;
 }) {
-  const { category = "all" } = await searchParams;
+  const params = await searchParams;
+  const category = params.category ?? "all";
   const activeCategory = categoryTabs.some(([value]) => value === category) ? category : "all";
-  const page = await getEventsPage(activeCategory);
+  const sortBy = normalizePublicSortBy(params.sort_by);
+  const sort = normalizeSortDirection(params.sort);
+  const pageNumber = normalizePage(params.page);
+  const offset = (pageNumber - 1) * PAGE_SIZE;
+  const currentParams: PublicSearchParams = {
+    category: activeCategory === "all" ? undefined : activeCategory,
+    sort_by: sortBy,
+    sort,
+    page: pageNumber > 1 ? String(pageNumber) : undefined,
+  };
+  const page = await getEventsPage(PAGE_SIZE, offset, {
+    category: activeCategory,
+    sortBy,
+    sort,
+  });
   return (
     <main>
       <header className="site-header">
@@ -44,14 +74,31 @@ export default async function EventsPage({
       <section className="messages-section">
         <nav className="event-category-tabs" aria-label="事件分类">
           {categoryTabs.map(([value, label]) => (
-            <Link className={activeCategory === value ? "active" : ""} href={value === "all" ? "/events" : `/events?category=${value}`} key={value}>
+            <Link
+              className={activeCategory === value ? "active" : ""}
+              href={publicListHref("/events", currentParams, {
+                category: value === "all" ? null : value,
+                page: null,
+              })}
+              aria-current={activeCategory === value ? "page" : undefined}
+              key={value}
+            >
               {label}
             </Link>
           ))}
         </nav>
+        <div className="public-list-toolbar events">
+          <span>{page.total} 个当前事件</span>
+          <PublicSortControls
+            pathname="/events"
+            searchParams={currentParams}
+            sortBy={sortBy}
+            sort={sort}
+          />
+        </div>
         <div className="section-heading">
           <div><span className="kicker">EVENT STREAM</span><h2>事件列表</h2></div>
-          <span>{page.total} 个当前事件</span>
+          <span>按{sortBy === "time" ? "更新时间" : "重要性"}{sort === "desc" ? "降序" : "升序"}</span>
         </div>
         {page.items.length === 0 ? (
           <div className="message-empty">目前还没有完成聚合的事件。</div>
@@ -59,7 +106,7 @@ export default async function EventsPage({
           <div className="message-list">
             {page.items.map((event, index) => (
               <article className="message-card event-card" key={event.id}>
-                <div className="message-card-index">{String(index + 1).padStart(2, "0")}</div>
+                <div className="message-card-index">{String(offset + index + 1).padStart(2, "0")}</div>
                 <div className="message-card-copy">
                   <div className="message-card-meta">
                     <span>#{event.id} · {event.event_family}</span>
@@ -96,6 +143,13 @@ export default async function EventsPage({
             ))}
           </div>
         )}
+        <PublicPagination
+          pathname="/events"
+          searchParams={currentParams}
+          page={pageNumber}
+          pageSize={PAGE_SIZE}
+          total={page.total}
+        />
       </section>
       <footer><span>LoL Daily Intel · Current events</span><span>Importance ≠ credibility ≠ heat</span></footer>
     </main>

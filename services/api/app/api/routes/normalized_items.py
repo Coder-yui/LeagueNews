@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.api.query_filters import json_array_contains
 from app.core.database import get_db
 from app.domain.importance import FEATURED_MESSAGE_MIN_IMPORTANCE
-from app.domain.message_taxonomy import MESSAGE_TYPE_ORDER, PRODUCTS, TOPIC_RULES
+from app.domain.message_taxonomy import MESSAGE_TYPE_ORDER, PRODUCTS, TOPIC_RULES, Product
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
 from app.models.raw_item import RawItem
@@ -149,10 +150,14 @@ def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 
 @router.get("/published-page", response_model=PublishedItemPageRead)
 def list_published_items_page(
+    product: Product | None = None,
     message_type: str | None = None,
     featured: bool = False,
     search: str | None = None,
-    sort_by: str = Query(default="time", pattern="^(time|priority|intrinsic)$"),
+    sort_by: str = Query(
+        default="time",
+        pattern="^(time|importance|priority|intrinsic)$",
+    ),
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -164,6 +169,8 @@ def list_published_items_page(
     ]
     if message_type:
         conditions.append(NormalizedItem.message_type == message_type)
+    if product:
+        conditions.append(json_array_contains(db, NormalizedItem.products, product))
     if featured:
         conditions.append(NormalizedItem.importance_score >= FEATURED_MESSAGE_MIN_IMPORTANCE)
     if search:
@@ -185,6 +192,7 @@ def list_published_items_page(
     total = db.scalar(count_statement) or 0
     sort_column = {
         "time": func.coalesce(RawItem.published_at, RawItem.ingested_at),
+        "importance": NormalizedItem.importance_score,
         "priority": NormalizedItem.priority_score,
         "intrinsic": NormalizedItem.importance_score,
     }[sort_by]

@@ -37,6 +37,7 @@ from app.services.pipeline_execution import (
 )
 from app.services.raw_item_versions import is_latest_raw_item
 from app.workflows.translate_item import build_translation
+from app.workflows.event_aggregation import publish_normalized_item_downstream
 from app.workflows.understand_media import (
     extraction_context,
     is_patch_preview,
@@ -394,18 +395,24 @@ async def _publish_approved_item(
     execution_guard: PipelineExecutionGuard | None,
 ) -> None:
     run = review.processing_run
-    item = _apply_normalized_item(
-        db,
-        run.raw_item,
-        proposal,
-        processing_run_id=run.id,
-    )
-    _record_checkpoint(db, review, normalized_item_id=item.id)
-    run.status = "completed"
-    run.outcome = "approved"
-    run.completed_at = completed_at
-    assert_execution_owned(db, execution_guard)
-    db.commit()
+    try:
+        item = _apply_normalized_item(
+            db,
+            run.raw_item,
+            proposal,
+            processing_run_id=run.id,
+        )
+        await publish_normalized_item_downstream(db, item)
+        _record_checkpoint(db, review, normalized_item_id=item.id)
+        run.status = "completed"
+        run.outcome = "approved"
+        run.completed_at = completed_at
+        _set_correction_terminal(db, run, status="completed", completed_at=completed_at)
+        assert_execution_owned(db, execution_guard)
+        db.commit()
+    except Exception as exc:
+        _mark_failed(db, run, exc, execution_guard=execution_guard)
+        raise
 
 
 def reject_review(
@@ -425,6 +432,7 @@ def reject_review(
     run.outcome = "review_rejected"
     run.current_stage = review.stage
     run.completed_at = now
+    _set_correction_terminal(db, run, status="cancelled", completed_at=now)
 
     if payload.feedback_type == "analysis_correction" and review.stage != RELEVANCE_STAGE:
         db.add(
@@ -1398,6 +1406,25 @@ def _require_pending_review(review: ReviewTask) -> None:
         raise ValueError(f"review task cannot be resolved from status={review.status}")
 
 
+def _set_correction_terminal(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    status: str,
+    completed_at: datetime,
+    error_message: str | None = None,
+) -> None:
+    if not run.correction_id:
+        return
+    correction = db.get(PipelineCorrection, run.correction_id)
+    if correction is None:
+        return
+    correction.status = status
+    correction.completed_at = completed_at
+    if error_message is not None:
+        correction.error_message = error_message
+
+
 def _mark_failed(
     db: Session,
     run: ProcessingRun,
@@ -1412,5 +1439,12 @@ def _mark_failed(
         failed.outcome = "system_error"
         failed.error_message = str(exc)[:4000]
         failed.completed_at = datetime.now(UTC)
+        _set_correction_terminal(
+            db,
+            failed,
+            status="failed",
+            completed_at=failed.completed_at,
+            error_message=failed.error_message,
+        )
         assert_execution_owned(db, execution_guard)
         db.commit()

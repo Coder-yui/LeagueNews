@@ -310,6 +310,7 @@ class EventAggregationRun(Base):
         Index(
             "uq_event_aggregation_runs_active_item",
             "normalized_item_id",
+            "normalized_item_revision",
             unique=True,
             postgresql_where=text("status = 'running'"),
             sqlite_where=text("status = 'running'"),

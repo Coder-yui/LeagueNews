@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, attributes
 
 import app.models  # noqa: F401
 from app.core.database import Base
@@ -17,6 +17,7 @@ from app.schemas.event_aggregation import EventAggregationResult
 from app.services.event_candidates import recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import create_event
+from app.repositories.events import current_event_mention_conditions
 from app.services.llm import LLMAnalysisError
 from app.workflows.event_aggregation import (
     STALE_RUNNING_RUN_AFTER,
@@ -704,6 +705,257 @@ def test_stale_running_run_reuses_persisted_decision_without_duplicate_membershi
         )
         assert db.scalar(select(func.count(Event.id))) == 1
         assert db.scalar(select(func.count(EventMention.id))) == 1
+
+
+def test_stale_previous_revision_run_does_not_block_current_revision() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="revision fencing")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="revision-fencing", title="旧版本公告")
+        old_run = EventAggregationRun(
+            normalized_item_id=item.id,
+            normalized_item_revision=1,
+            status="running",
+            current_stage="model_decision",
+            idempotency_key=(
+                f"{item.id}:1:event-aggregation-v6-lifecycle-cohesion"
+            ),
+        )
+        db.add(old_run)
+        db.commit()
+
+        with Session(engine, expire_on_commit=False) as correction_db:
+            current = correction_db.get(NormalizedItem, item.id)
+            assert current is not None
+            current.current_revision = 2
+            correction_db.commit()
+
+        with Session(engine, expire_on_commit=False) as current_db:
+            current = current_db.get(NormalizedItem, item.id)
+            assert current is not None
+            client = StaticClient(_result(_create_decision()))
+            current_run = _aggregate(current_db, current, client)
+
+            assert current_run.status == "completed"
+            assert current_run.normalized_item_revision == 2
+            assert client.calls == 1
+
+        stale = _aggregate(db, item, StaticClient(_result(_create_decision())))
+        assert stale.status == "completed"
+        assert stale.outcome == "ignored"
+        assert stale.normalized_item_revision == 1
+        assert db.scalar(select(func.count(EventMention.id))) == 1
+
+
+def test_superseded_worker_cannot_apply_old_revision_membership() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="superseded worker")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="superseded-worker", title="初始事件")
+        db.commit()
+        first = _aggregate(db, item, StaticClient(_result(_create_decision())))
+        event = db.scalar(select(Event))
+        assert event is not None
+        assert first.normalized_item_revision == 1
+        first.status = "running"
+        first.current_stage = "model_decision"
+        first.outcome = None
+        first.completed_at = None
+        db.commit()
+
+        with Session(engine, expire_on_commit=False) as correction_db:
+            current = correction_db.get(NormalizedItem, item.id)
+            assert current is not None
+            current.current_revision = 2
+            current.normalized_title = "修正后的事件"
+            correction_db.commit()
+
+        db.rollback()
+        attributes.set_committed_value(item, "current_revision", 1)
+        stale = _aggregate(db, item, StaticClient(_result(_create_decision())))
+
+        assert stale.status == "completed"
+        assert stale.outcome == "ignored"
+        assert db.scalar(select(func.count(EventMention.id))) == 1
+        assert db.scalar(select(EventMention).where(EventMention.normalized_item_revision == 2)) is None
+
+
+def test_current_event_projection_uses_only_revision_two_evidence() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="current revision evidence")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="current-evidence", title="初始事件")
+        db.commit()
+        _aggregate(db, item, StaticClient(_result(_create_decision())))
+        event_a = db.scalar(select(Event))
+        assert event_a is not None
+
+        with Session(engine, expire_on_commit=False) as correction_db:
+            current = correction_db.get(NormalizedItem, item.id)
+            assert current is not None
+            current.current_revision = 2
+            current.normalized_title = "修正为同一事件"
+            correction_db.commit()
+
+        db.refresh(item)
+        current = db.get(NormalizedItem, item.id)
+        assert current is not None
+        decision = {
+            "mention_index": 0,
+            "action": "attach",
+            "event_id": event_a.id,
+            "product": "lol_pc",
+            "event_family": "gameplay_balance",
+            "relation": "confirms",
+            "source_role": "known_leaker",
+            "materiality": "corroboration_only",
+            "evidence_excerpt": "修正后的同一事件证据",
+        }
+        second = _aggregate(db, current, StaticClient(_result(decision)))
+
+        assert second.outcome == "applied"
+        mentions = list(
+            db.scalars(
+                select(EventMention)
+                .where(EventMention.normalized_item_id == item.id)
+                .order_by(EventMention.normalized_item_revision)
+            )
+        )
+        assert [mention.normalized_item_revision for mention in mentions] == [1, 2]
+        assert db.scalar(
+            select(func.count(EventMention.id)).where(
+                EventMention.normalized_item_id == item.id,
+                EventMention.normalized_item_revision == 2,
+            )
+        ) == 1
+        current_event_ids = set(
+            db.scalars(
+                select(EventMention.event_id)
+                .join(EventMention.normalized_item)
+                .where(
+                    EventMention.normalized_item_id == item.id,
+                    *current_event_mention_conditions(),
+                )
+            )
+        )
+        assert current_event_ids == {event_a.id}
+
+
+def test_revision_two_can_attach_event_b_without_old_event_a_evidence() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="revision two event switch")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="event-switch", title="初始事件")
+        db.commit()
+        _aggregate(db, item, StaticClient(_result(_create_decision())))
+        event_a = db.scalar(select(Event))
+        assert event_a is not None
+        other_item = _item(db, source=source, external_id="event-b-seed", title="独立事件")
+        db.commit()
+        event_b, _ = create_event(
+            db,
+            normalized_item_id=other_item.id,
+            mention_index=0,
+            event_family="gameplay_balance",
+            products=["lol_pc"],
+            canonical_anchors={"name": "事件 B"},
+            title="事件 B",
+            current_summary="事件 B 摘要",
+            evidence_excerpt="事件 B",
+        )
+        db.commit()
+
+        with Session(engine, expire_on_commit=False) as correction_db:
+            current = correction_db.get(NormalizedItem, item.id)
+            assert current is not None
+            current.current_revision = 2
+            current.normalized_title = "改为事件 B"
+            correction_db.commit()
+        db.refresh(item)
+        decision = {
+            "mention_index": 0,
+            "action": "attach",
+            "event_id": event_b.id,
+            "product": "lol_pc",
+            "event_family": "gameplay_balance",
+            "relation": "confirms",
+            "source_role": "known_leaker",
+            "materiality": "material_update",
+            "evidence_excerpt": "改为事件 B 的证据",
+            "projection": {
+                "summary": "事件 B 的修正摘要",
+                "latest_development": "改为事件 B",
+            },
+        }
+
+        run = _aggregate(db, item, StaticClient(_result(decision)))
+
+        assert run.outcome == "applied"
+        current_event_ids = set(
+            db.scalars(
+                select(EventMention.event_id)
+                .join(EventMention.normalized_item)
+                .where(
+                    EventMention.normalized_item_id == item.id,
+                    *current_event_mention_conditions(),
+                )
+            )
+        )
+        assert current_event_ids == {event_b.id}
+        assert db.scalar(
+            select(EventMention).where(
+                EventMention.event_id == event_a.id,
+                EventMention.normalized_item_id == item.id,
+                EventMention.normalized_item_revision == 1,
+            )
+        ) is not None
+
+
+def test_revision_two_ignore_removes_old_event_from_current_projection() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="revision two ignore")
+        db.add(source)
+        db.flush()
+        item = _item(db, source=source, external_id="ignore-revision", title="初始事件")
+        db.commit()
+        _aggregate(db, item, StaticClient(_result(_create_decision())))
+        event = db.scalar(select(Event))
+        assert event is not None
+
+        with Session(engine, expire_on_commit=False) as correction_db:
+            current = correction_db.get(NormalizedItem, item.id)
+            assert current is not None
+            current.current_revision = 2
+            current.normalized_title = "修正为不进入事件"
+            correction_db.commit()
+        db.refresh(item)
+
+        run = _aggregate(db, item, StaticClient(_result()))
+
+        assert run.outcome == "ignored"
+        assert db.scalar(
+            select(EventMention).where(
+                EventMention.normalized_item_id == item.id,
+                EventMention.normalized_item_revision == 2,
+            )
+        ) is None
+        assert db.scalar(
+            select(EventMention.event_id)
+            .join(EventMention.normalized_item)
+            .where(
+                EventMention.normalized_item_id == item.id,
+                *current_event_mention_conditions(),
+            )
+        ) is None
 
 
 def test_cross_product_mentions_isolate_event_products() -> None:

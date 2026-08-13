@@ -47,6 +47,17 @@ def daily_report_section(products: tuple[str, ...] | list[str]) -> str:
     return "other"
 
 
+def daily_report_eligibility_conditions():
+    """Return the shared current-projection eligibility contract for V1 reports."""
+
+    return (
+        latest_normalized_item_condition(),
+        NormalizedItem.publication_status == "published",
+        NormalizedItem.content_form == "original",
+        NormalizedItem.importance_score >= DAILY_REPORT_MIN_IMPORTANCE,
+    )
+
+
 def select_daily_sections(
     candidates: list[DailyReportCandidate],
 ) -> dict[str, list[DailyReportCandidate]]:
@@ -95,8 +106,7 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
         select(NormalizedItem)
         .join(NormalizedItem.raw_item)
         .where(
-            latest_normalized_item_condition(),
-            NormalizedItem.publication_status == "published",
+            *daily_report_eligibility_conditions(),
             RawItem.published_at >= window_start,
             RawItem.published_at < window_end,
         )

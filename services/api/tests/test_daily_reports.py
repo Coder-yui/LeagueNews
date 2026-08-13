@@ -247,3 +247,53 @@ def test_daily_report_can_be_withdrawn_and_manually_regenerated() -> None:
         assert regenerated["id"] == created["id"]
         assert regenerated["status"] == "published"
         assert get_daily_report(date(2026, 8, 13), db)["status"] == "published"
+
+
+def test_daily_report_hides_an_item_that_is_no_longer_currently_eligible() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="Corrected daily report source")
+        db.add(source)
+        db.flush()
+        raw = RawItem(
+            source_id=source.id,
+            external_id="corrected-daily-report",
+            native_title="原始消息",
+            content_blocks=[{"type": "paragraph", "text": "原始消息"}],
+            published_at=datetime(2026, 8, 13, 1, 0, tzinfo=UTC),
+        )
+        db.add(raw)
+        db.flush()
+        item = NormalizedItem(
+            raw_item_id=raw.id,
+            normalized_title="原始消息",
+            normalized_text="原始消息",
+            summary="摘要",
+            products=["lol_pc"],
+            message_type="game_announcement",
+            topics=["gameplay"],
+            content_form="original",
+            importance_score=0.80,
+            analysis_model="test",
+            translation_status="not_required",
+        )
+        db.add(item)
+        db.commit()
+
+        create_daily_report(date(2026, 8, 13), db)
+        item.content_form = "repost"
+        item.importance_score = 0.45
+        item.current_revision = 2
+        db.commit()
+
+        payload = get_daily_report(date(2026, 8, 13), db)
+        summary = list_daily_reports(db)[0]
+
+        assert payload["sections"] == {
+            "lolpc": [],
+            "esports": [],
+            "tft": [],
+            "other": [],
+        }
+        assert summary["item_count"] == 0

@@ -32,6 +32,10 @@ from app.services.raw_item_versions import is_latest_raw_item
 STALE_RUNNING_RUN_AFTER = timedelta(seconds=settings.pipeline_worker_lease_seconds)
 
 
+class SupersededEventAggregationError(RuntimeError):
+    """The requested NormalizedItem revision is no longer the current projection."""
+
+
 def _run_key(item: NormalizedItem) -> str:
     return f"{item.id}:{item.current_revision}:{AGGREGATION_POLICY_VERSION}"
 
@@ -236,6 +240,47 @@ def _decision_from_draft(run: EventAggregationRun) -> EventAggregationResult | N
         return None
 
 
+def _lock_current_item_for_membership(
+    db: Session, item: NormalizedItem
+) -> NormalizedItem:
+    """Fence membership writes to the revision that is still publicly current."""
+
+    current = db.scalar(
+        select(NormalizedItem)
+        .where(NormalizedItem.id == item.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if current is None:
+        raise SupersededEventAggregationError("normalized item no longer exists")
+    if current.current_revision != item.current_revision:
+        raise SupersededEventAggregationError(
+            "normalized item revision was superseded before membership apply"
+        )
+    if current.publication_status != "published":
+        raise SupersededEventAggregationError(
+            "normalized item is no longer a published projection"
+        )
+    if not is_latest_raw_item(db, current.raw_item):
+        raise SupersededEventAggregationError(
+            "normalized item belongs to a superseded RawItem revision"
+        )
+    return current
+
+
+def _complete_superseded_run(
+    db: Session, run: EventAggregationRun
+) -> EventAggregationRun:
+    if run.status != "completed":
+        run.status = "completed"
+        run.outcome = "ignored"
+        run.error_message = "normalized item revision was superseded before membership apply"
+        run.completed_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(run)
+    return run
+
+
 def _complete_without_call(
     db: Session,
     run: EventAggregationRun,
@@ -377,6 +422,7 @@ def apply_membership_transaction(
 ) -> tuple[int, set[int]]:
     """Apply already-decided membership. The caller owns the surrounding transaction."""
 
+    item = _lock_current_item_for_membership(db, item)
     _validate_repost_actions(item, result)
     resolved_products = _validate_candidate_references(
         result, candidates, item_products=item.products
@@ -465,6 +511,15 @@ async def aggregate_normalized_item(
         raise ValueError("event aggregation requires the latest RawItem revision")
 
     run = _record_for_item(db, item)
+    current_revision = db.scalar(
+        select(NormalizedItem.current_revision).where(NormalizedItem.id == item.id)
+    )
+    if current_revision != item.current_revision:
+        if run is None:
+            raise SupersededEventAggregationError(
+                "event aggregation was requested for a superseded revision"
+            )
+        return _complete_superseded_run(db, run)
     if run is not None and run.status == "completed":
         return run
     if run is not None and run.status == "running":
@@ -583,6 +638,12 @@ async def aggregate_normalized_item(
         db.commit()
         db.refresh(run)
         return run
+    except SupersededEventAggregationError:
+        db.rollback()
+        superseded = db.get(EventAggregationRun, run.id)
+        if superseded is None:
+            raise
+        return _complete_superseded_run(db, superseded)
     except Exception as exc:
         db.rollback()
         failed = db.get(EventAggregationRun, run.id)
@@ -593,3 +654,18 @@ async def aggregate_normalized_item(
             failed.completed_at = datetime.now(UTC)
             db.commit()
         raise
+
+
+async def publish_normalized_item_downstream(
+    db: Session, item: NormalizedItem
+) -> EventAggregationRun | None:
+    """Run the shared post-publication contract and require a terminal result."""
+
+    if not settings.event_aggregation_enabled:
+        return None
+    run = await aggregate_normalized_item(db, item)
+    if run.status != "completed":
+        raise RuntimeError(
+            "normalized item publication has no completed event aggregation result"
+        )
+    return run

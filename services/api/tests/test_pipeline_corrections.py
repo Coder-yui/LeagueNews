@@ -7,13 +7,17 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 import app.services.pipeline_corrections as correction_service
+import app.workflows.reviewed_pipeline as reviewed_pipeline
 from app.core.database import Base
+from app.models.event import EventAggregationRun
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import ProcessingRun, ReviewTask
 from app.schemas.pipeline import PipelineCorrectionCreate
+from app.schemas.event_aggregation import EventAggregationResult
+from app.schemas.workflow import ReviewRejection
 from app.services.automatic_pipeline import (
     _claim_next_job,
     _heartbeat_job,
@@ -22,6 +26,8 @@ from app.services.automatic_pipeline import (
     execute_pipeline_job,
 )
 from app.services.pipeline_execution import PipelineExecutionGuard, PipelineLeaseLost
+from app.workflows.event_aggregation import aggregate_normalized_item
+from app.workflows.reviewed_pipeline import approve_review, reject_review
 
 
 @pytest.fixture
@@ -63,6 +69,76 @@ def _published_item(db: Session, *, suffix: str = "") -> NormalizedItem:
     db.add(item)
     db.commit()
     return item
+
+
+def _final_manual_review(db: Session, item: NormalizedItem) -> tuple[PipelineCorrection, ReviewTask]:
+    correction = PipelineCorrection(
+        raw_item_id=item.raw_item_id,
+        normalized_item_id=item.id,
+        restart_from_stage="importance",
+        resume_mode="manual",
+        reason="修正消息内容",
+        status="running",
+        started_at=datetime.now(UTC),
+    )
+    db.add(correction)
+    item.publication_status = "withdrawn"
+    db.flush()
+    run = ProcessingRun(
+        raw_item_id=item.raw_item_id,
+        workflow_type="item",
+        status="awaiting_review",
+        current_stage="importance",
+        execution_mode="manual",
+        correction_id=correction.id,
+        context={
+            "approved_translation_proposal": {
+                "normalized_text": "Correction target",
+                "translated_title": "修正后的消息",
+                "translated_text": "修正后的消息",
+                "translated_content_blocks": [
+                    {"type": "paragraph", "text": "修正后的消息"}
+                ],
+                "translation_status": "not_required",
+                "translation_model": "test",
+                "approved_media_extraction_ids": [],
+                "translated_media_extractions": [],
+            },
+            "approved_message_analysis_proposal": {
+                "title": "修正后的消息",
+                "summary": "修正后的摘要",
+                "entities": [],
+                "products": ["lol_pc"],
+                "content_form": "original",
+                "classification_version": "message-taxonomy-v3",
+            },
+        },
+    )
+    db.add(run)
+    db.flush()
+    review = ReviewTask(
+        processing_run_id=run.id,
+        stage="importance",
+        status="pending",
+        proposal={
+            "message_type": "game_announcement",
+            "topics": ["activities_rewards"],
+            "importance_score": 0.80,
+            "importance_dimensions": {},
+            "importance_policy_version": "test",
+            "importance_calculation": {},
+            "priority_score": 0.80,
+            "priority_calculation": {},
+        },
+    )
+    db.add(review)
+    db.commit()
+    return correction, review
+
+
+class _EmptyEventClient:
+    async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
+        return EventAggregationResult.model_validate({"mentions": []})
 
 
 @pytest.mark.anyio
@@ -167,6 +243,75 @@ async def test_importance_correction_preserves_new_analysis_context(
     assert resumed["approved_message_analysis_proposal"] == analysis
     assert "approved_fact_proposal" not in resumed
     assert "approved_classification_proposal" not in resumed
+
+
+@pytest.mark.anyio
+async def test_manual_publish_runs_event_downstream_and_completes_correction(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db, suffix=" manual downstream")
+    correction, review = _final_manual_review(db, item)
+    calls: list[tuple[int, int]] = []
+
+    async def run_downstream(_db: Session, published: NormalizedItem):
+        calls.append((published.id, published.current_revision))
+        return await aggregate_normalized_item(
+            _db,
+            published,
+            llm_client=_EmptyEventClient(),
+        )
+
+    monkeypatch.setattr(reviewed_pipeline, "publish_normalized_item_downstream", run_downstream)
+
+    result = await approve_review(db, review, note="确认修正")
+
+    assert result.status == "completed"
+    assert calls == [(item.id, 2)]
+    assert db.get(PipelineCorrection, correction.id).status == "completed"
+    assert db.scalar(select(EventAggregationRun).where(EventAggregationRun.normalized_item_id == item.id)) is not None
+
+
+@pytest.mark.anyio
+async def test_manual_publish_failure_marks_correction_failed(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db, suffix=" failed downstream")
+    correction, review = _final_manual_review(db, item)
+
+    async def fail_downstream(_db: Session, _published: NormalizedItem):
+        raise RuntimeError("event downstream unavailable")
+
+    monkeypatch.setattr(reviewed_pipeline, "publish_normalized_item_downstream", fail_downstream)
+
+    with pytest.raises(RuntimeError, match="event downstream unavailable"):
+        await approve_review(db, review, note="确认修正")
+
+    failed_run = db.scalar(select(ProcessingRun).where(ProcessingRun.correction_id == correction.id))
+    failed_correction = db.get(PipelineCorrection, correction.id)
+    assert failed_run is not None
+    assert failed_run.status == "failed"
+    assert failed_correction is not None
+    assert failed_correction.status == "failed"
+    assert failed_correction.completed_at is not None
+
+
+def test_manual_rejection_cancels_correction(db: Session) -> None:
+    item = _published_item(db, suffix=" rejected correction")
+    correction, review = _final_manual_review(db, item)
+
+    result = reject_review(
+        db,
+        review,
+        payload=ReviewRejection(
+            feedback_type="analysis_correction",
+            reason="人工拒绝本次修正",
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert db.get(PipelineCorrection, correction.id).status == "cancelled"
 
 
 def test_pipeline_job_enqueue_is_idempotent_per_active_raw_item(db: Session) -> None:

@@ -817,7 +817,7 @@ event_family 语义边界：
                     result,
                     "_llm_execution_metadata",
                     {
-                        "workflow_version": "reviewed-pipeline-v1",
+                        "workflow_version": "reviewed-pipeline-v2",
                         "prompt_name": prompt_spec.name,
                         "prompt_version": prompt_spec.version,
                         "prompt_hash": f"sha256:{prompt_hash}",
@@ -868,7 +868,7 @@ event_family 语义边界：
                 fallback_result,
                 "_llm_execution_metadata",
                 {
-                    "workflow_version": "reviewed-pipeline-v1",
+                    "workflow_version": "reviewed-pipeline-v2",
                     "prompt_name": prompt_spec.name,
                     "prompt_version": prompt_spec.version,
                     "prompt_hash": f"sha256:{prompt_hash}",

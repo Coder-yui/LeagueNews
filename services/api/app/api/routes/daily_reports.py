@@ -10,8 +10,10 @@ from app.core.database import get_db
 from app.models.daily_report import DailyReport
 from app.models.normalized_item import NormalizedItem
 from app.schemas.daily_report import DailyReportRead, DailyReportSummaryRead
-from app.services.raw_item_versions import latest_normalized_item_condition
-from app.services.daily_reports import generate_daily_report
+from app.services.daily_reports import (
+    daily_report_eligibility_conditions,
+    generate_daily_report,
+)
 
 router = APIRouter()
 
@@ -22,8 +24,7 @@ def _daily_report_payload(db: Session, report: DailyReport) -> dict[str, Any]:
     if message_ids:
         statement = _published_statement().where(
             NormalizedItem.id.in_(message_ids),
-            latest_normalized_item_condition(),
-            NormalizedItem.publication_status == "published",
+            *daily_report_eligibility_conditions(),
         )
         messages = {item.id: _published_payload(item) for item in db.scalars(statement)}
     sections: dict[str, list[dict[str, Any]]] = {
@@ -57,15 +58,26 @@ def _load_report(db: Session, report_date: date) -> DailyReport:
     return report
 
 
-def _daily_report_summary(report: DailyReport) -> dict[str, Any]:
+def _daily_report_summary(
+    report: DailyReport,
+    *,
+    visible_item_ids: set[int] | None = None,
+) -> dict[str, Any]:
     section_counts = {"lolpc": 0, "esports": 0, "tft": 0, "other": 0}
     for item in report.items:
+        if visible_item_ids is not None and item.normalized_item_id not in visible_item_ids:
+            continue
         section_counts[item.section] += 1
+    item_count = (
+        len(report.items)
+        if visible_item_ids is None
+        else sum(item.normalized_item_id in visible_item_ids for item in report.items)
+    )
     return {
         "id": report.id,
         "report_date": report.report_date,
         "status": report.status,
-        "item_count": len(report.items),
+        "item_count": item_count,
         "section_counts": section_counts,
         "created_at": report.created_at,
         "updated_at": report.updated_at,
@@ -74,13 +86,35 @@ def _daily_report_summary(report: DailyReport) -> dict[str, Any]:
 
 @router.get("/daily", response_model=list[DailyReportSummaryRead])
 def list_daily_reports(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    reports = db.scalars(
+    reports = list(db.scalars(
         select(DailyReport)
         .options(selectinload(DailyReport.items))
         .order_by(DailyReport.report_date.desc())
         .limit(90)
-    )
-    return [_daily_report_summary(report) for report in reports]
+    ))
+    item_ids = {
+        item.normalized_item_id
+        for report in reports
+        if report.status == "published"
+        for item in report.items
+    }
+    visible_item_ids = set()
+    if item_ids:
+        visible_item_ids = set(
+            db.scalars(
+                select(NormalizedItem.id).where(
+                    NormalizedItem.id.in_(item_ids),
+                    *daily_report_eligibility_conditions(),
+                )
+            )
+        )
+    return [
+        _daily_report_summary(
+            report,
+            visible_item_ids=visible_item_ids if report.status == "published" else None,
+        )
+        for report in reports
+    ]
 
 
 @router.get("/daily/{report_date}", response_model=DailyReportRead)

@@ -137,7 +137,7 @@ Cookie 文件属于账号凭据。不要打印内容、提交 Git 或长期放�
 - `pipeline-worker` 只接收数据库、媒体、LLM 和自身租约配置，不挂载 X/微博 Cookie 或
   浏览器 Profile。
 - `collection-scheduler` 接收数据库、媒体和平台采集凭据，不接收 LLM API Key；同一进程还托管
-  独立的日报定时任务，默认按北京时间每天 12:00 生成当天日报。
+  独立的日报定时任务，默认按北京时间次日 00:00 生成刚结束日期的日报。
 - `migrate` 只接收数据库、媒体路径和迁移目录。
 - `api` 暂时同时保留 LLM 与 Connector 凭据，因为当前管理 API 仍同步支持人工 AI 流程和
   手工 Connector 运行。以后把手工采集改为持久化 collection request、由 Scheduler 执行后，

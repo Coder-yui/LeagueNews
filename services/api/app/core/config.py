@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     collection_scheduler_lease_minutes: int = 30
     collection_scheduler_heartbeat_seconds: int = 60
     daily_report_automation_enabled: bool = True
-    daily_report_generation_hour: int = 12
+    daily_report_generation_hour: int = 0
+    daily_report_generation_grace_minutes: int = 15
     daily_report_scheduler_poll_seconds: float = 30.0
 
     model_config = SettingsConfigDict(env_file=("../../.env", ".env"), extra="ignore")
@@ -92,6 +93,8 @@ class Settings(BaseSettings):
             )
         if not 0 <= self.daily_report_generation_hour <= 23:
             raise ValueError("daily_report_generation_hour must be between 0 and 23")
+        if self.daily_report_generation_grace_minutes < 0:
+            raise ValueError("daily_report_generation_grace_minutes cannot be negative")
         if self.daily_report_scheduler_poll_seconds <= 0:
             raise ValueError("daily_report_scheduler_poll_seconds must be greater than 0")
         return self

@@ -62,9 +62,10 @@ def test_invalid_event_metrics_refresh_configuration_fails_at_startup() -> None:
 
 
 def test_invalid_daily_report_scheduler_configuration_fails_at_startup() -> None:
-    for hour, poll_seconds in ((-1, 30), (24, 30), (12, 0)):
+    for hour, grace_minutes, poll_seconds in ((-1, 15, 30), (24, 15, 30), (0, -1, 30), (0, 15, 0)):
         with pytest.raises(ValidationError):
             Settings(
                 daily_report_generation_hour=hour,
+                daily_report_generation_grace_minutes=grace_minutes,
                 daily_report_scheduler_poll_seconds=poll_seconds,
             )

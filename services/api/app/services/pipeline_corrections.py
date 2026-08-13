@@ -124,6 +124,12 @@ def _supersede_active_work(db: Session, *, raw_item_id: int) -> None:
         run.status = "superseded"
         run.outcome = "correction_requested"
         run.completed_at = now
+        if run.correction_id:
+            previous_correction = db.get(PipelineCorrection, run.correction_id)
+            if previous_correction is not None:
+                previous_correction.status = "cancelled"
+                previous_correction.completed_at = now
+                previous_correction.error_message = "superseded by a newer correction"
         for review in run.reviews:
             if review.status == "pending":
                 review.status = "superseded"
@@ -197,6 +203,7 @@ async def create_and_start_correction(
         correction = db.get(PipelineCorrection, correction.id)
         correction.status = "failed"
         correction.error_message = str(exc)
+        correction.completed_at = datetime.now(UTC)
         if payload.resume_mode == "automatic":
             job = enqueue_pipeline_job(
                 db,
@@ -286,6 +293,7 @@ async def recover_failed_job(
         correction = db.get(PipelineCorrection, correction.id)
         correction.status = "failed"
         correction.error_message = str(exc)
+        correction.completed_at = datetime.now(UTC)
         if payload.resume_mode == "automatic":
             failed_job = enqueue_pipeline_job(
                 db,

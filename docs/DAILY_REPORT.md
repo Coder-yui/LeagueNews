@@ -22,16 +22,19 @@
 
 ## 自动生成
 
-Scheduler 进程按 `Asia/Shanghai` 时区每天 12:00 生成当天日报。调度状态由
-`daily_reports.updated_at` 持久化判断；进程在 12:00 后启动时会补生成，重复实例通过同一日期的
+Scheduler 进程按 `Asia/Shanghai` 时区在每天次日 00:00 生成刚刚结束日期的日报。
+例如 8 月 1 日日报在北京时间 8 月 2 日 00:00 生成。调度状态由
+`daily_reports.updated_at` 持久化判断；进程在零点后启动时会补生成，重复实例通过同一日期的
 PostgreSQL advisory lock 和 `report_date` 唯一约束串行化。当天尚无已发布消息时不创建空日报；
-12:00 后一旦有消息完成发布，会在下一轮检查时补生成。同一天仍可通过生成 API 手工覆盖。
+零点后一旦该日期有符合“当前、已发布、原创、重要性不低于 0.60”的消息，会在下一轮检查时生成；
+零点后 15 分钟内若有前一天晚到的符合条件消息，会自动重新生成。同一天仍可通过生成 API 手工覆盖。
 人工退回的日报不会被自动任务重新发布，只有管理台“生成 / 重新生成”操作会恢复为 `published`。
 
 相关配置：
 
 - `DAILY_REPORT_AUTOMATION_ENABLED`：默认 `true`；
-- `DAILY_REPORT_GENERATION_HOUR`：北京时间小时，默认 `12`；
+- `DAILY_REPORT_GENERATION_HOUR`：北京时间生成小时，默认 `0`；零点生成前一自然日；
+- `DAILY_REPORT_GENERATION_GRACE_MINUTES`：零点后允许晚到消息触发自动重生成的分钟数，默认 `15`；
 - `DAILY_REPORT_SCHEDULER_POLL_SECONDS`：检查间隔，默认 `30` 秒。
 
 前端页面为 `/daily`，消息卡片复用消息流组件，仍可进入原消息详情。

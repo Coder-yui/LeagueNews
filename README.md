@@ -119,7 +119,7 @@ pnpm build:web
 ## 文档入口
 
 - [完整文档导航](docs/README.md)
-- [消息处理 v1 里程碑](docs/MESSAGE_PROCESSING_V1_MILESTONE.md)
+- [消息处理 v1 里程碑](docs/history/message-processing-v1/MESSAGE_PROCESSING_V1_MILESTONE.md)
 - [当前架构](docs/ARCHITECTURE.md)
 - [本地运行](docs/LOCAL_RUNBOOK.md)
 - [Connector 操作与排障](docs/CONNECTOR_OPERATIONS_GUIDE.md)

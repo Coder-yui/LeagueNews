@@ -284,6 +284,7 @@ async def recover_failed_job(
             job.completed_at = datetime.now(UTC)
         else:
             job.status = "queued"
+            job.attempts = 0
             job.error_message = None
             job.completed_at = None
             job.worker_id = None

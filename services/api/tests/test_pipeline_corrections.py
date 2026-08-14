@@ -528,6 +528,41 @@ async def test_failed_event_job_recovery_requeues_without_message_correction(
 
 
 @pytest.mark.anyio
+async def test_manual_recover_resets_exhausted_event_job_attempts(db: Session) -> None:
+    item = _published_item(db, suffix=" exhausted event retry")
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="failed",
+        current_stage="event_aggregation",
+        attempts=automatic_pipeline.settings.pipeline_worker_max_attempts,
+        error_message="event downstream unavailable",
+        completed_at=datetime.now(UTC),
+    )
+    db.add(job)
+    db.commit()
+
+    recovered = await recover_failed_job(
+        db,
+        job_id=job.id,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="importance",
+            resume_mode="manual",
+            reason="人工重试事件聚合",
+        ),
+    )
+
+    assert recovered.id == job.id
+    assert job.status == "queued"
+    assert job.attempts == 0
+
+    claimed = _claim_next_job(db, worker_id="manual-recovery-test")
+    assert claimed is not None
+    assert claimed.id == job.id
+    assert claimed.status == "running"
+    assert claimed.attempts == 1
+
+
+@pytest.mark.anyio
 async def test_manual_recover_rejects_job_already_scheduled_for_retry(db: Session) -> None:
     item = _published_item(db, suffix=" manual retry conflict")
     next_attempt_at = datetime.now(UTC) + timedelta(minutes=5)

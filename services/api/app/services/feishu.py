@@ -61,8 +61,8 @@ class FeishuBotClient:
 
     @staticmethod
     def signature(timestamp: str, secret: str) -> str:
-        message = f"{timestamp}\n{secret}".encode()
-        digest = hmac.new(secret.encode(), message, hashlib.sha256).digest()
+        string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
+        digest = hmac.new(string_to_sign, digestmod=hashlib.sha256).digest()
         return base64.b64encode(digest).decode()
 
     @property

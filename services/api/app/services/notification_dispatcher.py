@@ -25,6 +25,19 @@ def _worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+def validate_dispatcher_configuration() -> None:
+    missing: list[str] = []
+    if settings.feishu_featured_push_enabled and not settings.feishu_featured_webhook_url.strip():
+        missing.append("FEISHU_FEATURED_WEBHOOK_URL")
+    if settings.feishu_alert_push_enabled and not settings.feishu_alert_webhook_url.strip():
+        missing.append("FEISHU_ALERT_WEBHOOK_URL")
+    if missing:
+        raise ValueError(
+            "Feishu notification dispatcher configuration is incomplete; missing: "
+            + ", ".join(missing)
+        )
+
+
 def _enabled_targets() -> set[str]:
     targets: set[str] = set()
     if settings.feishu_featured_push_enabled and settings.feishu_featured_webhook_url.strip():
@@ -141,6 +154,7 @@ def _client_for(notification: NotificationOutbox) -> FeishuBotClient:
 
 
 async def process_next_notification() -> bool:
+    validate_dispatcher_configuration()
     with SessionLocal() as db:
         notification = claim_next_notification(db, worker_id=_worker_id())
         if notification is None:

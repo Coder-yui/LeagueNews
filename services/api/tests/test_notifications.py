@@ -17,7 +17,9 @@ from app.models.notification import NotificationOutbox
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.models.workflow import ProcessingRun
 from app.services.feishu import FeishuBotClient, FeishuDeliveryError
+from app.services.notification_dispatcher import validate_dispatcher_configuration
 from app.services.notifications import (
     classify_collection_error,
     enqueue_collection_failure,
@@ -191,6 +193,90 @@ def test_pipeline_failure_payload_is_alert_only_and_stage_specific(
     assert "OCR" in card["card"]["elements"][0]["text"]["content"]
 
 
+def test_pipeline_failure_prefers_processing_run_stage_for_normal_processing(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "feishu_alert_push_enabled", True)
+    source = Source(name="Processing stage source", connector_type="manual")
+    db.add(source)
+    db.flush()
+    raw = RawItem(
+        source_id=source.id,
+        native_title="Raw title",
+        canonical_url="https://example.com/raw",
+        content_blocks=[{"type": "paragraph", "text": "raw"}],
+    )
+    db.add(raw)
+    db.flush()
+    processing_run = ProcessingRun(
+        raw_item_id=raw.id,
+        workflow_type="item",
+        status="failed",
+        current_stage="message_analysis",
+        execution_mode="automatic",
+    )
+    db.add(processing_run)
+    db.flush()
+    job = PipelineJob(
+        raw_item_id=raw.id,
+        processing_run_id=processing_run.id,
+        status="failed",
+        current_stage="importance",
+        error_message="message analysis failed",
+        completed_at=datetime.now(UTC),
+    )
+    db.add(job)
+    db.commit()
+
+    assert enqueue_pipeline_failure(db, job=job, raw_item=raw) is True
+    notification = db.scalar(select(NotificationOutbox))
+    assert notification is not None
+    assert notification.payload["stage"] == "message_analysis"
+
+
+def test_event_aggregation_failure_keeps_pipeline_job_stage(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "feishu_alert_push_enabled", True)
+    source = Source(name="Event stage source", connector_type="manual")
+    db.add(source)
+    db.flush()
+    raw = RawItem(
+        source_id=source.id,
+        native_title="Raw title",
+        canonical_url="https://example.com/raw",
+        content_blocks=[{"type": "paragraph", "text": "raw"}],
+    )
+    db.add(raw)
+    db.flush()
+    processing_run = ProcessingRun(
+        raw_item_id=raw.id,
+        workflow_type="item",
+        status="failed",
+        current_stage="importance",
+        execution_mode="automatic",
+    )
+    db.add(processing_run)
+    db.flush()
+    job = PipelineJob(
+        raw_item_id=raw.id,
+        processing_run_id=processing_run.id,
+        status="failed",
+        current_stage="event_aggregation",
+        error_message="event aggregation failed",
+        completed_at=datetime.now(UTC),
+    )
+    db.add(job)
+    db.commit()
+
+    assert enqueue_pipeline_failure(db, job=job, raw_item=raw) is True
+    notification = db.scalar(select(NotificationOutbox))
+    assert notification is not None
+    assert notification.payload["stage"] == "event_aggregation"
+
+
 @pytest.mark.parametrize(
     ("stage", "label"),
     (
@@ -246,6 +332,17 @@ def test_claim_lease_recovery_and_target_isolation(
     assert recovered is not None
     assert recovered.lease_token != first_token
     assert dispatcher.claim_next_notification(db, enabled_targets={"alert"}) is not None
+
+
+def test_dispatcher_boundary_rejects_missing_enabled_webhook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "feishu_featured_push_enabled", True)
+    monkeypatch.setattr(settings, "feishu_featured_webhook_url", "")
+    monkeypatch.setattr(settings, "feishu_alert_push_enabled", False)
+
+    with pytest.raises(ValueError, match="FEISHU_FEATURED_WEBHOOK_URL"):
+        validate_dispatcher_configuration()
 
 
 @pytest.mark.anyio
@@ -335,3 +432,10 @@ def test_feishu_signature_does_not_expose_webhook_secret() -> None:
     signature = FeishuBotClient.signature("1710000000", "bot-secret")
     assert signature
     assert "bot-secret" not in signature
+
+
+def test_feishu_signature_matches_official_deterministic_vector() -> None:
+    assert (
+        FeishuBotClient.signature("1599360473", "demo")
+        == "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8="
+    )

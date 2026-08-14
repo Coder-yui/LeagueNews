@@ -66,6 +66,11 @@ dispatcher 使用 PostgreSQL `FOR UPDATE SKIP LOCKED` claim，状态为 `sending
 并按 30 秒、2 分钟、10 分钟、30 分钟的指数退避序列重试。dispatcher 发送失败只更新 outbox 和日志，
 不会再产生“飞书发送失败”的飞书告警，因此不会递归。
 
+通知投递语义是 at-least-once：enqueue 的唯一 `dedupe_key`、同一 outbox 记录的正常 retry，以及并发
+worker 的 lease claim 都提供幂等保护；但如果飞书已经成功接收请求，进程恰好在数据库将记录标记为
+`sent` 之前崩溃，lease recovery 可能再次发送同一条通知，存在极小概率重复。系统不为此引入
+exactly-once 所需的复杂外部协调机制。
+
 ## 环境变量
 
 ```text
@@ -83,8 +88,10 @@ FEISHU_ALERT_COOLDOWN_MINUTES=60
 PUBLIC_ORIGIN=https://news.example.com
 ```
 
-`FEISHU_*_PUSH_ENABLED=true` 时必须同时配置对应 webhook URL；secret 在飞书机器人开启签名校验
-时填写，否则留空。两个 URL 和 secret 必须完全分开，不能把精选机器人地址配置到告警变量，反之亦然。
+`FEISHU_*_PUSH_ENABLED=true` 只表示 producer 允许写入对应 outbox；API 和 pipeline-worker 不需要
+webhook URL 或 secret。真正运行 dispatcher 的 collection-scheduler 必须为启用的目标提供对应 webhook
+URL，否则会在 dispatcher 边界清晰报错。secret 在飞书机器人开启签名校验时填写，否则留空。两个
+URL 和 secret 必须完全分开，不能把精选机器人地址配置到告警变量，反之亦然。
 
 API 和 pipeline-worker 只需要 `PUBLIC_ORIGIN` 与两个 enabled flag；只有 collection-scheduler 获得
 两个 webhook URL、secret 和 dispatcher 参数。`.env.example`、`.env.preview.example`、

@@ -70,17 +70,12 @@ def test_invalid_daily_report_scheduler_configuration_fails_at_startup() -> None
             )
 
 
-def test_enabled_feishu_bot_requires_its_webhook() -> None:
-    with pytest.raises(ValidationError):
-        Settings(feishu_featured_push_enabled=True, feishu_featured_webhook_url="")
-    with pytest.raises(ValidationError):
-        Settings(feishu_alert_push_enabled=True, feishu_alert_webhook_url="")
-
+def test_producer_settings_allow_enabled_feishu_without_webhooks() -> None:
     configured = Settings(
         feishu_featured_push_enabled=True,
-        feishu_featured_webhook_url="https://example.com/featured",
+        feishu_featured_webhook_url="",
         feishu_alert_push_enabled=True,
-        feishu_alert_webhook_url="https://example.com/alert",
+        feishu_alert_webhook_url="",
     )
     assert configured.feishu_featured_push_enabled is True
     assert configured.feishu_alert_push_enabled is True

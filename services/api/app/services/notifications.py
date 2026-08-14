@@ -23,6 +23,7 @@ from app.models.notification import NotificationOutbox
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.models.workflow import ProcessingRun
 
 
 logger = logging.getLogger(__name__)
@@ -263,8 +264,13 @@ def enqueue_pipeline_failure(
     if not settings.feishu_alert_push_enabled:
         return False
     source = raw_item.source if raw_item is not None else None
+    stage = job.current_stage
+    if stage != "event_aggregation" and job.processing_run_id is not None:
+        processing_run = db.get(ProcessingRun, job.processing_run_id)
+        if processing_run is not None:
+            stage = processing_run.current_stage
     payload = {
-        "stage": job.current_stage,
+        "stage": stage,
         "raw_item_id": job.raw_item_id,
         "pipeline_job_id": job.id,
         "processing_run_id": job.processing_run_id,

@@ -116,14 +116,6 @@ class Settings(BaseSettings):
             raise ValueError("feishu_notification_lease_seconds must be greater than 0")
         if self.feishu_alert_cooldown_minutes <= 0:
             raise ValueError("feishu_alert_cooldown_minutes must be greater than 0")
-        if self.feishu_featured_push_enabled and not self.feishu_featured_webhook_url.strip():
-            raise ValueError(
-                "feishu_featured_webhook_url must be set when featured Feishu push is enabled"
-            )
-        if self.feishu_alert_push_enabled and not self.feishu_alert_webhook_url.strip():
-            raise ValueError(
-                "feishu_alert_webhook_url must be set when alert Feishu push is enabled"
-            )
         if not self.mcp_auth_header.strip() or any(char.isspace() for char in self.mcp_auth_header):
             raise ValueError("mcp_auth_header must be a non-empty HTTP header name")
         if self.mcp_production and self.mcp_enabled:

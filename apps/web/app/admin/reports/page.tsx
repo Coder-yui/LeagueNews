@@ -50,6 +50,7 @@ export default function AdminReportsPage() {
   };
 
   const withdraw = async (date: string) => {
+    if (!window.confirm(`确认退回 ${date} 的公开日报？日报记录会保留，但公开页面将不再展示。`)) return;
     setBusy(`withdraw:${date}`);
     setError(null);
     try {
@@ -102,7 +103,7 @@ export default function AdminReportsPage() {
                   <td>{new Date(report.updated_at).toLocaleString("zh-CN")}</td>
                   <td><div className="admin-row-actions">
                     {report.status === "published" && <Link href={`/daily?date=${report.report_date}`} target="_blank">查看</Link>}
-                    <button type="button" disabled={busy !== null} onClick={() => void generate(report.report_date)}>重新生成</button>
+                    <button type="button" disabled={busy !== null} onClick={() => { if (window.confirm(`确认按当前消息与事件状态重新生成 ${report.report_date} 的日报？`)) void generate(report.report_date); }}>重新生成</button>
                     {report.status === "published" && <button className="danger" type="button" disabled={busy !== null} onClick={() => void withdraw(report.report_date)}>退回</button>}
                   </div></td>
                 </tr>

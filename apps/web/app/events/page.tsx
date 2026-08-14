@@ -1,157 +1,95 @@
-import Image from "next/image";
+import { Search } from "lucide-react";
 import Link from "next/link";
-import { Activity, ArrowUpRight } from "lucide-react";
+import { EventCard } from "@/components/event-card";
 import { PublicPagination, PublicSortControls } from "@/components/public-list-controls";
+import { PublicShell } from "@/components/public-shell";
 import { getEventsPage } from "@/lib/api";
 import {
+  normalizeEventSortBy,
   normalizePage,
-  normalizePublicSortBy,
   normalizeSortDirection,
   publicListHref,
   type PublicSearchParams,
 } from "@/lib/public-list";
+import { publicLabel } from "@/lib/public-labels";
 
-const PAGE_SIZE = 25;
+const PAGE_SIZE = 18;
+const categories = ["esports", "lol_pc", "tft", "other_products", "ecosystem"];
+const products = ["lol_pc", "tft", "lol_esports", "lol_universe", "other_lol_product", "riot_ecosystem"];
+const families = ["gameplay_balance", "gameplay_release", "cosmetic_release", "player_activity", "commercial_offer", "service_incident", "security_enforcement", "esports_match", "esports_schedule", "roster_change", "esports_rules", "universe_release", "media_release", "corporate_change", "platform_service", "other_named_development"];
+const lifecycles = ["unconfirmed", "developing", "confirmed", "disputed", "denied", "resolved", "stale"];
+const credibilityLevels = ["unverified", "plausible", "corroborated", "officially_confirmed", "disputed", "denied"];
+const importanceLevels = ["critical", "high", "medium", "low"];
+const heatLevels = ["surging", "hot", "active", "emerging", "cold"];
 
-const categoryTabs = [
-  ["all", "全部"],
-  ["esports", "电竞"],
-  ["lol_pc", "LOL PC"],
-  ["tft", "云顶"],
-  ["other_products", "其他产品"],
-  ["ecosystem", "生态"],
-] as const;
+function accepted(value: string | undefined, options: string[]) {
+  return value && options.includes(value) ? value : undefined;
+}
 
-export default async function EventsPage({
-  searchParams,
-}: {
-  searchParams: Promise<{
-    category?: string;
-    sort_by?: string;
-    sort?: string;
-    page?: string;
-  }>;
-}) {
+export default async function EventsPage({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
   const params = await searchParams;
-  const category = params.category ?? "all";
-  const activeCategory = categoryTabs.some(([value]) => value === category) ? category : "all";
-  const sortBy = normalizePublicSortBy(params.sort_by);
+  const category = accepted(params.category, categories);
+  const product = accepted(params.product, products);
+  const eventFamily = accepted(params.event_family, families);
+  const lifecycle = accepted(params.lifecycle, lifecycles);
+  const credibilityLevel = accepted(params.credibility_level, credibilityLevels);
+  const importanceLevel = accepted(params.importance_level, importanceLevels);
+  const heatLevel = accepted(params.heat_level, heatLevels);
+  const search = params.search?.trim() || undefined;
+  const sortBy = normalizeEventSortBy(params.sort_by);
   const sort = normalizeSortDirection(params.sort);
   const pageNumber = normalizePage(params.page);
   const offset = (pageNumber - 1) * PAGE_SIZE;
   const currentParams: PublicSearchParams = {
-    category: activeCategory === "all" ? undefined : activeCategory,
-    sort_by: sortBy,
-    sort,
+    category, product, event_family: eventFamily, lifecycle,
+    credibility_level: credibilityLevel, importance_level: importanceLevel,
+    heat_level: heatLevel, search, sort_by: sortBy, sort,
     page: pageNumber > 1 ? String(pageNumber) : undefined,
   };
-  const page = await getEventsPage(PAGE_SIZE, offset, {
-    category: activeCategory,
-    sortBy,
-    sort,
-  });
+  const page = await getEventsPage(PAGE_SIZE, offset, { category, product, eventFamily, lifecycle, credibilityLevel, importanceLevel, heatLevel, search, sortBy, sort });
+  const returnTo = publicListHref("/events", currentParams, {});
+
   return (
-    <main>
-      <header className="site-header">
-        <Link className="brand" href="/">
-          <span className="brand-mark">LD</span>
-          <span>LoL Daily Intel</span>
-        </Link>
-        <nav aria-label="主要导航">
-          <Link href="/">消息</Link>
-          <Link className="active" href="/events">事件</Link>
-          <Link href="/admin">处理台</Link>
-        </nav>
-        <div className="live-state"><span /> Event projection</div>
-      </header>
-
-      <section className="hero event-hero">
-        <div className="eyebrow"><Activity size={15} /> CURRENT EVENTS</div>
-        <h1>正在发生的事，<br /><em>而不只是消息。</em></h1>
-        <p>事件摘要只随实质进展更新；重要性、可信度与热度分别计算。</p>
+    <PublicShell className="events-page">
+      <section className="event-page-hero">
+        <div className="public-frame">
+          <p className="ln-eyebrow"><i /> Developing Record</p>
+          <h1>从单条消息，<br />看见事情的走向。</h1>
+          <p>同一进展被聚合为持续更新的事件。重要性、可信度与热度分别表达，不互相替代。</p>
+        </div>
       </section>
 
-      <section className="messages-section">
+      <section className="event-workspace public-frame">
         <nav className="event-category-tabs" aria-label="事件分类">
-          {categoryTabs.map(([value, label]) => (
-            <Link
-              className={activeCategory === value ? "active" : ""}
-              href={publicListHref("/events", currentParams, {
-                category: value === "all" ? null : value,
-                page: null,
-              })}
-              aria-current={activeCategory === value ? "page" : undefined}
-              key={value}
-            >
-              {label}
-            </Link>
-          ))}
+          <Link className={!category ? "active" : ""} href={publicListHref("/events", currentParams, { category: null, page: null })}>全部事件</Link>
+          {categories.map((value) => <Link className={category === value ? "active" : ""} href={publicListHref("/events", currentParams, { category: value, page: null })} key={value}>{publicLabel(value)}</Link>)}
         </nav>
-        <div className="public-list-toolbar events">
-          <span>{page.total} 个当前事件</span>
-          <PublicSortControls
-            pathname="/events"
-            searchParams={currentParams}
-            sortBy={sortBy}
-            sort={sort}
-          />
+
+        <form className="public-filter-panel event-filters" action="/events" method="get">
+          <label className="public-search-field"><span>搜索事件</span><div><Search size={15} /><input name="search" defaultValue={search} placeholder="标题或当前摘要" /></div></label>
+          <label><span>产品</span><select name="product" defaultValue={product ?? ""}><option value="">全部产品</option>{products.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
+          <label><span>事件族</span><select name="event_family" defaultValue={eventFamily ?? ""}><option value="">全部事件族</option>{families.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
+          <label><span>阶段</span><select name="lifecycle" defaultValue={lifecycle ?? ""}><option value="">全部阶段</option>{lifecycles.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
+          <details className="public-advanced-filters" open={Boolean(credibilityLevel || importanceLevel || heatLevel)}>
+            <summary>高级筛选{credibilityLevel || importanceLevel || heatLevel ? " · 已应用" : ""}</summary>
+            <div>
+              <label><span>可信度</span><select name="credibility_level" defaultValue={credibilityLevel ?? ""}><option value="">全部可信度</option>{credibilityLevels.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
+              <label><span>重要性</span><select name="importance_level" defaultValue={importanceLevel ?? ""}><option value="">全部重要性</option>{importanceLevels.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
+              <label><span>热度</span><select name="heat_level" defaultValue={heatLevel ?? ""}><option value="">全部热度</option>{heatLevels.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
+            </div>
+          </details>
+          {category && <input type="hidden" name="category" value={category} />}
+          <input type="hidden" name="sort_by" value={sortBy} /><input type="hidden" name="sort" value={sort} />
+          <div className="public-filter-actions"><button type="submit">应用筛选</button><Link href="/events">清除</Link></div>
+        </form>
+
+        <div className="public-list-head">
+          <div><span>{page.total} 个结果</span><strong>公开事件记录</strong></div>
+          <PublicSortControls pathname="/events" searchParams={currentParams} sortBy={sortBy} sort={sort} includeHeat />
         </div>
-        <div className="section-heading">
-          <div><span className="kicker">EVENT STREAM</span><h2>事件列表</h2></div>
-          <span>按{sortBy === "time" ? "更新时间" : "重要性"}{sort === "desc" ? "降序" : "升序"}</span>
-        </div>
-        {page.items.length === 0 ? (
-          <div className="message-empty">目前还没有完成聚合的事件。</div>
-        ) : (
-          <div className="message-list">
-            {page.items.map((event, index) => (
-              <article className="message-card event-card" key={event.id}>
-                <div className="message-card-index">{String(offset + index + 1).padStart(2, "0")}</div>
-                <div className="message-card-copy">
-                  <div className="message-card-meta">
-                    <span>#{event.id} · {event.event_family}</span>
-                    <span>{event.lifecycle_status}</span>
-                    {event.primary_source && <span>主要来源 {event.primary_source.source_name}</span>}
-                  </div>
-                  <Link className="message-card-title" href={`/events/${event.id}`}>
-                    <h3>{event.title}</h3>
-                  </Link>
-                  <p>{event.current_summary}</p>
-                  <div className="message-card-footer">
-                    <span className="importance-badge">重要性 {Math.round(event.importance_score * 100)}</span>
-                    <span className="topic-badge">可信度 {event.credibility_level}</span>
-                    <span className="topic-badge">热度 {Math.round(event.heat_score * 100)}</span>
-                    <span className="entity">{event.source_count} 家信源报道 · {event.message_count} 条消息</span>
-                  </div>
-                  <Link className="message-card-link" href={`/events/${event.id}`}>
-                    查看事件详情 <ArrowUpRight size={14} />
-                  </Link>
-                </div>
-                {event.best_media_url && (
-                  <Link className="message-card-image" href={`/events/${event.id}`} tabIndex={-1}>
-                    <Image
-                      src={event.best_media_url}
-                      alt={event.title}
-                      width={520}
-                      height={360}
-                      sizes="(max-width: 760px) 100vw, 320px"
-                      unoptimized
-                    />
-                  </Link>
-                )}
-              </article>
-            ))}
-          </div>
-        )}
-        <PublicPagination
-          pathname="/events"
-          searchParams={currentParams}
-          page={pageNumber}
-          pageSize={PAGE_SIZE}
-          total={page.total}
-        />
+        {page.items.length > 0 ? <div className="event-card-grid">{page.items.map((event) => <EventCard event={event} returnTo={returnTo} key={event.id} />)}</div> : <div className="message-empty">当前条件下没有公开事件。</div>}
+        <PublicPagination pathname="/events" searchParams={currentParams} page={pageNumber} pageSize={PAGE_SIZE} total={page.total} />
       </section>
-      <footer><span>LoL Daily Intel · Current events</span><span>Importance ≠ credibility ≠ heat</span></footer>
-    </main>
+    </PublicShell>
   );
 }

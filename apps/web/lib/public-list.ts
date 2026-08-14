@@ -1,9 +1,15 @@
 export type PublicSortBy = "time" | "importance";
+export type EventSortBy = PublicSortBy | "heat";
 export type SortDirection = "asc" | "desc";
 export type PublicSearchParams = Record<string, string | undefined>;
 
 export function normalizePublicSortBy(value: string | undefined): PublicSortBy {
   return value === "importance" ? "importance" : "time";
+}
+
+export function normalizeEventSortBy(value: string | undefined): EventSortBy {
+  if (value === "importance" || value === "heat") return value;
+  return "time";
 }
 
 export function normalizeSortDirection(value: string | undefined): SortDirection {

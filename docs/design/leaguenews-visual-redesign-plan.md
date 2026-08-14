@@ -1,12 +1,14 @@
 # LeagueNews Visual Redesign Plan
 
-> 文档状态：Phase 2 设计方案
+> 文档状态：已实施并作为持续视觉维护基线
 >
-> 研究与审查日期：2026-08-13
+> 初次研究与审查日期：2026-08-13
+>
+> 最近复核：2026-08-14（纳入公开列表分页/排序/产品筛选、按自然日浏览能力、日报自动化与管理页）
 >
 > 设计输入：当前 `apps/web` 前端、公开 API 展示契约、事件/日报产品文档，以及 [`universe-visual-study.md`](universe-visual-study.md)
 >
-> 本文边界：定义视觉、信息架构、交互与实施顺序；本阶段不修改 UI、不改变消息/事件/日报业务规则、不重构后端或数据库
+> 边界：本文先定义视觉、信息架构、交互与实施顺序，并在第 18 节记录实际落地；整个实施不改变消息/事件/日报业务规则，不重构后端或数据库
 
 ## 1. Executive Summary
 
@@ -32,7 +34,7 @@ LeagueNews 必须同时坚持以下产品原则：
 5. **公共阅读端与管理台分工**：公共端采用克制的深色编辑体验；管理台保持高密度、长时间可操作的浅色 Operator 模式。
 6. **每个增量阶段都可运行**：先统一基础和导航，再逐类替换内容组件，避免一次性推倒重来。
 
-本次审查还确认：前端目前不只是视觉不统一，也存在资讯网站逻辑缺口。公共导航在不同页面不一致，移动端导航被直接隐藏；主页同时承担首页和消息列表，却把全量统计写成“今日概览”；Lead Story 实际只是最新一条；公共列表没有搜索、排序、分页；日报有日期参数却没有日期浏览；事件详情已有相关消息数据但没有展示；消息详情无法保留来自事件或日报的上下文。这些应作为视觉升级的一部分修正，但不能借机更改业务算法。
+复核后的前端已经补上了部分资讯产品基础：消息流有产品筛选、精选范围、时间/重要性排序与 URL 分页；事件流有分类、时间/重要性排序与 URL 分页；主页统计和 Lead 标签也会随当前页与排序说明真实语义。仍需解决的是：公共导航在不同页面不一致，移动端导航被直接隐藏；主页继续同时承担首页和消息列表；公共列表尚无搜索、消息类型与日期浏览 UI；日报有日期参数但没有日期导航，且自动化语义尚未反映到公共空状态；事件详情已有相关消息数据但没有展示；消息详情无法保留来自事件或日报的上下文。这些应作为视觉升级的一部分修正，但不能借机更改业务算法。
 
 ## 2. Product & Frontend Audit
 
@@ -58,6 +60,7 @@ LeagueNews 必须同时坚持以下产品原则：
 | `/admin/pipeline` | 流水线状态、筛选、展开详情、处理/重试/审核入口 |
 | `/admin/messages` | 已发布消息管理、列表/审核对照视图、筛选与分页 |
 | `/admin/messages/[id]` | 单条消息原文、译文、重要性依据和重跑操作 |
+| `/admin/reports` | 日报生成/重新生成、发布状态、栏目计数、公开预览与退回 |
 | `/admin/reviews` | 待审队列与消息/OCR 审核 Dialog |
 | `/admin/collection` | Source、采集计划、运行日志 |
 | `/admin/system` | 失败任务、Corrections 和恢复操作 |
@@ -101,7 +104,9 @@ Event 不是 Message 的大卡版本。它拥有：
 
 日报是现有已发布消息在固定上海自然日内，按既有原创、重要性、事件去重和栏目上限规则生成的精选目录。它不是 AI 写作的日报文章，也不包含趋势分析或新摘要。
 
-当前页面仅把四组 `MessageFeed` 纵向拼接。日期可以通过查询参数传入，但没有日期控件；空状态要求用户调用生成接口，暴露了内部操作逻辑；四个栏目没有形成 Digest 的阅读节奏。
+当前页面仅把四组 `MessageFeed` 纵向拼接。日期可以通过查询参数传入，但没有日期控件；空状态仍要求用户调用生成接口，既暴露内部操作逻辑，也没有反映“日报在次日零点自动生成、可被运营退回”的新事实；四个栏目没有形成 Digest 的阅读节奏。
+
+后端现已明确日报的发布生命周期：Scheduler 按 `Asia/Shanghai` 在次日 00:00 生成刚结束日期的报告，零点后有补生成和有限晚到重生成；管理端可以手工生成、重新生成或退回；公开读取只返回 `published` 报告。视觉方案必须区分“这一天没有公开日报”和“后台具体为何没有”，公共页面不应泄露 withdrawn 状态或运营动作。
 
 #### Source 与信任信息
 
@@ -113,14 +118,15 @@ Source 是具体账号或站点，可靠性是 Source 属性，不等于某个�
 
 ### 2.3 当前组件盘点
 
-公共端只有两个真正抽出的核心组件：
+公共端目前抽出了三组可复用能力：
 
 - `MessageFeed / MessageCard`：被首页和日报复用；
 - `MessageDetail`：含内容块、双语切换、图片与 Patch 提取表。
+- `PublicSortControls / PublicPagination` 与 `lib/public-list.ts`：维护时间/重要性排序、页码归一化和查询参数；已被消息流与事件流复用。
 
 Header、Navigation、Footer、Hero、Section heading、Event Card、Event Detail 都直接写在页面中，造成文案、导航项、active 状态和结构不一致。
 
-管理台组件较完整：`AdminLayout`、`SideNav`、`PaginationControls`、`PipelineJobRow`、`PipelineStageBar`、`ReviewCard`、`CollectionScheduleEditor` 等。已有 Dialog、表格、筛选、移动抽屉与操作反馈，但不同开发阶段的样式同时堆在全局样式表中。
+管理台组件较完整：`AdminLayout`、`SideNav`、`PaginationControls`、`PipelineJobRow`、`PipelineStageBar`、`ReviewCard`、`CollectionScheduleEditor` 等。新增 `/admin/reports` 后，日报发布也成为明确的运营工作流。已有 Dialog、表格、筛选、移动抽屉与操作反馈，但不同开发阶段的样式同时堆在全局样式表中。
 
 ### 2.4 当前 Design System 审计
 
@@ -469,7 +475,7 @@ Easing 使用自然的 `ease-out` 进入与 `ease-in` 离开；不引入弹簧�
 
 ```text
 /                         首页：今日入口、优先阅读、事件进展、最新消息、日报入口
-/messages                 高密度消息列表
+/messages                 高密度消息列表；可按上海自然日浏览
 /messages/[id]            消息详情
 /events                   事件列表
 /events/[id]              事件详情
@@ -509,6 +515,8 @@ Easing 使用自然的 `ease-out` 进入与 `ease-in` 离开；不引入弹簧�
 | Original / Repost | 否 | 内容形式标记，不做按钮；需要筛选时再升级为 Filter Link |
 | 时间 | 否 | 使用 `<time>`，可在 title/辅助文本显示绝对时间 |
 | Filter / Sort | 是 | 改写 URL 查询参数，Back/Forward 可恢复 |
+| Message Date | 是 | 进入固定 `Asia/Shanghai` 自然日的消息归档，显示当日消息数；不能暗示该日已有日报 |
+| Daily Report Date | 是 | 只导航到可公开报告或明确的指定日期空状态；不显示 withdrawn 运营状态 |
 | Timeline / Evidence 中的消息 | 是 | 进入消息详情，并保留“来自 Event #id”的返回上下文 |
 | 外部来源 | 是 | 新标签页、外链图标、清晰文字，不只放小图标 |
 
@@ -516,7 +524,7 @@ Easing 使用自然的 `ease-out` 进入与 `ease-in` 离开；不引入弹簧�
 
 ### 11.4 URL、返回与页面切换
 
-- 列表的 `q / type / featured / sort / page / category / date` 均进入 URL；
+- 列表的 `q / type / product / featured / sort_by / sort / page / category / date` 均进入 URL；
 - 筛选时重置页码，浏览器前进/后退恢复原条件；
 - 从列表进入详情时保存同源 `returnTo` 上下文，必须限制为站内相对 URL；
 - 消息详情的返回文案随来源变化：`返回消息列表`、`返回 8 月 13 日日报`、`返回事件：…`；
@@ -528,16 +536,20 @@ Easing 使用自然的 `ease-out` 进入与 `ease-in` 离开；不引入弹簧�
 
 ### 11.5 搜索、筛选与分页边界
 
-Message API 当前已支持：`message_type`、`featured`、`search`、`sort_by=time|priority|intrinsic`、`sort=asc|desc`、`limit/offset`。第一版公共消息筛选只使用这些已存在能力。
+Message API 当前已支持：`product`、`message_type`、`featured`、`search`、`date`、`timezone`、`sort_by=time|importance|priority|intrinsic`、`sort=asc|desc`、`limit/offset`。另有 `published-days` 返回指定民用时区内最近有消息的日期、消息数与最后发布时间。公共前端已经使用 Product、Featured、时间/重要性排序和 25 条 URL 分页；尚未使用搜索、消息类型与日期能力。
 
-Event API 当前已支持：category、product、event family、lifecycle、credibility level、importance level、heat level、search、sort 和 pagination。UI 可采用：
+第一版消息归档应把 `Asia/Shanghai` 固定为产品显示时区，不向普通用户暴露任意 timezone 控件。`published-days` 用于建立“有内容的日期”索引和数量提示，`date` 用于取得某一自然日的分页消息；日期切换必须保留仍适用的 Product / Featured / Sort 条件并重置页码。
+
+Event API 当前已支持：category、product、event family、lifecycle、credibility level、importance level、heat level、search、`time/latest/importance/heat` 排序、方向与 pagination。公共前端已经使用 Category、时间/重要性排序和 25 条 URL 分页；高级条件、搜索与热度排序仍未进入 UI。目标 UI 可采用：
 
 - 一级：Category Tabs；
 - 二级：搜索 + `最新进展 / 重要性 / 热度`排序；
 - 高级 Disclosure：产品、事件族、生命周期、可信度等；
 - Active Filter Summary：显示并可逐个清除。
 
-公共消息流不再一次性拉取全部数据。建议每页 20–25 条，使用带 URL 状态的上一页/下一页与页码摘要。当前不采用 Infinite Scroll；它会损害返回定位、页尾导航和事件/消息间往返。移动端也优先保持相同分页语义，而不是做另一套不可分享的“加载更多”。
+公共消息流和事件流已经不再一次性拉取全部数据，并采用 25 条/页的上一页、下一页与页码摘要。视觉升级应保留 `publicListHref`、参数归一化和跨筛选重置页码的现有行为，在其上增加搜索、消息类型、日期与 Event 高级筛选；不把已正确工作的 URL 状态重新写成组件私有状态。
+
+当前仍不采用 Infinite Scroll；它会损害返回定位、页尾导航和事件/消息间往返。移动端也保持相同分页语义，而不是做另一套不可分享的“加载更多”。
 
 ### 11.6 信息层级规则
 
@@ -568,13 +580,13 @@ Event API 当前已支持：category、product、event family、lifecycle、cred
 ### 12.1 `/` 首页
 
 **Current**  
-同一页包含超大 Hero、全量统计、最新一条蓝色 Lead、完整消息流、处理链路和来源数量。所谓“今日概览”实际使用全量结果；Lead 是 `items[0]`，没有独立策展语义。
+同一页包含超大 Hero、当前筛选/本页统计、当前页第一条蓝色 Lead、带 Product / Featured / Sort / Pagination 的消息流、处理链路和来源数量。Lead 会准确标为最新、最早、最高重要性或“第 N 页首条”，不再假装独立编辑 Headline。
 
 **Problem**  
-首页与消息列表职责混淆；四个强视觉块同时竞争；技术处理链比产品内容更突出；“每日简报”“今日概览”“最新消息”“已审核消息”语义混杂；抓取全量消息不可扩展。
+首页与消息列表职责仍然混淆；四个强视觉块同时竞争；技术处理链比产品内容更突出；Hero 仍称“每日简报”，但主体其实是可筛选消息流；切换到后续页时仍重复 Hero、统计与 Lead，列表浏览成本偏高。
 
 **Target**  
-首页成为 45/55 的编辑入口：一个真实可解释的“当前优先阅读/最新消息”主模块、2–4 个当前事件进展、最新消息短列表和当日日报入口。移除全量假今日统计；只展示可以由现有数据准确计算的数字。
+首页成为 45/55 的编辑入口：一个真实可解释的“当前优先阅读/最新消息”主模块、2–4 个当前事件进展、最新消息短列表和“最新已发布日报”入口。移除不必要的列表页统计；只展示可以由现有数据准确计算的数字，不把尚未结束的当天承诺为已有日报。
 
 **Universe Inspiration**  
 学习 Feature 的面积、位置、图像与上下文，而不是蓝色大块和超大 TOP 水印。
@@ -591,10 +603,10 @@ Hero 高度受控，首屏至少露出下一组内容。若没有合适媒体，
 ### 12.2 `/messages` 消息列表（目标新增路由）
 
 **Current**  
-实际列表位于 `/`。All / Featured 两个筛选；一次加载全部消息；卡片显示大量标签、重复详情 CTA 和 220–320px 图片。
+实际列表仍位于 `/`，但已经有 Product Tabs、All / Featured、时间/重要性升降序、25 条 URL 分页和连续序号。卡片仍显示大量标签、重复详情 CTA 和 220–320px 图片；搜索、消息类型和日期归档尚未接入。
 
 **Problem**  
-没有搜索、排序、分页和结果状态；卡片元数据顺序偏系统化；产品分类缺失；Topic/Entity 数量不受控；标题和 CTA 重复；返回详情会丢失筛选和滚动上下文。
+已有控件解决了基础排序与分页，但 Toolbar 仍偏功能堆叠，缺少搜索、消息类型与日期入口；Product 只在 Tabs 上表达，单张 Message Card 仍看不到产品归属；卡片元数据顺序偏系统化，Topic/Entity 数量不受控；标题和 CTA 重复；返回详情会丢失筛选和滚动上下文。
 
 **Target**  
 15/85 的高密度流。紧凑页头、URL 驱动的搜索/类型/精选/排序、结果数与分页；卡片以标题和摘要为核心，固定图像比例，可快速比较。
@@ -609,7 +621,7 @@ Hero 高度受控，首屏至少露出下一组内容。若没有合适媒体，
 标题、摘要、时间、来源、内容形式、重要性、Topic/Entity 与结构化媒体提示。
 
 **Change**  
-显示 Product；控制 Topic/Entity 数量；降低 ID 权重；移除重复 CTA；实现现有 API 已支持的搜索、排序和分页；保留查询状态。
+保留并重新视觉组织现有 Product / Featured / Sort / Pagination 与 `publicListHref`；显示 Card Product；控制 Topic/Entity 数量；降低 ID 权重；移除重复 CTA；接入 API 已支持的搜索、消息类型和 `published-days` 日期归档；保留全部查询状态。
 
 ### 12.3 `/messages/[id]` 消息详情
 
@@ -637,10 +649,10 @@ Hero 高度受控，首屏至少露出下一组内容。若没有合适媒体，
 ### 12.4 `/events` 事件列表
 
 **Current**  
-Category Tabs + 与 Message 相同的列表卡；显示标题、当前摘要、三个指标、来源/消息数、主要来源和可选图片；固定加载最多 100 条。
+Category Tabs + 时间/重要性升降序 + 25 条 URL 分页，并继续使用与 Message 相同的列表卡；显示标题、当前摘要、三个指标、来源/消息数、主要来源和可选图片。
 
 **Problem**  
-Event 看起来只是“更复杂的 Message”；没有搜索、排序、分页和现有高级筛选；未显示最后实质更新；指标被多个 Badge 平铺，层级不足。
+Event 看起来仍只是“更复杂的 Message”；已有排序与分页，但没有搜索、热度排序和 API 已支持的高级筛选；未显示最后实质更新；指标被多个 Badge 平铺，层级不足。
 
 **Target**  
 30/70 的“当前事件记录”。Event Card 使用独立结构：状态/类别、标题与当前摘要、最新进展时间、三指标窄 Rail、覆盖与主要来源。支持 URL 驱动筛选和排序。
@@ -655,7 +667,7 @@ Event 看起来只是“更复杂的 Message”；没有搜索、排序、分页
 既有 Category 映射、三个独立指标、覆盖、主要来源和当前摘要。
 
 **Change**  
-建立 EventCard；显示最后实质更新；接入现有 API 的搜索/排序/分页与高级筛选；生命周期使用明确中文标签；减少无语义 Badge。
+建立 EventCard；显示最后实质更新；保留现有 Category / Sort / Pagination URL 行为，在其上接入搜索、热度排序与高级筛选；生命周期使用明确中文标签；减少无语义 Badge。
 
 ### 12.5 `/events/[id]` 事件详情
 
@@ -683,13 +695,13 @@ Event 看起来只是“更复杂的 Message”；没有搜索、排序、分页
 ### 12.6 `/daily` 日报
 
 **Current**  
-日期 Hero + 四个重复 MessageFeed；URL 可传 date 但没有控件；空状态让用户调用生成接口。
+日期 Hero + 四个重复 MessageFeed；URL 可传 date 但没有控件。后端现在会在次日零点自动生成刚结束日期的日报，管理台也能退回/重新生成，但公共空状态仍让用户调用生成接口。页面默认今天，因此在一天尚未结束时通常会落入空状态。
 
 **Problem**  
-不像一份日报，只像四组筛选结果；无法浏览前后日期；栏目序号在每组重置；没有阅读完成感；公开文案泄漏内部操作。
+不像一份日报，只像四组筛选结果；默认日期与“次日生成上一日”的生命周期不匹配；无法浏览前后日期；栏目序号在每组重置；没有阅读完成感；公开文案泄漏内部操作，也无法区分尚未生成、无合格消息或已被退回。
 
 **Target**  
-40/60 的 Editorial Digest。日期是主索引，提供上一日/下一日/回到今日与可访问日期输入；从既有条目中选择当天最高优先条目做版式 Lead，随后按四个栏目形成稳定编号与紧凑条目。
+40/60 的 Editorial Digest。默认入口应指向最近一个可公开阅读的已完成日报，而不是未结束的今天；日期是主索引，提供上一份/下一份、日期输入和回到最新日报。从既有条目中选择当天最高优先条目做版式 Lead，随后按四个栏目形成稳定编号与紧凑条目。
 
 **Universe Inspiration**  
 学习章节开场、编辑尺度和安静的长页面节奏。
@@ -701,7 +713,7 @@ Event 看起来只是“更复杂的 Message”；没有搜索、排序、分页
 上海自然日、现有栏目和上限、既有日报选取/去重规则、消息详情链接。
 
 **Change**  
-加入日期导航；建立 DailyLead / DigestRow 视觉变体；统一全页编号或按栏目明确编号；空状态改为“当日暂无已发布日报”并提供其他日期/最新消息入口；返回消息时保留日报上下文。
+加入与发布生命周期一致的日期导航；建立 DailyLead / DigestRow 视觉变体；统一全页编号或按栏目明确编号；空状态统一为“当日暂无公开日报”，不向公共用户区分后台原因，并提供最新日报/同日消息入口；返回消息时保留日报上下文。
 
 ### 12.7 `/admin/pipeline`
 
@@ -772,7 +784,37 @@ Operator Light 下以结构线和标题层级表达档案感；内容仍按原�
 **Change**  
 增加页内目录/Sticky Action Summary；统一 Metadata 顺序；明确普通、重跑和危险动作层级；不把内部 Breakdown 伪装成公共内容。
 
-### 12.10 `/admin/reviews`
+### 12.10 `/admin/reports`
+
+**Current**
+
+新增的日报管理页提供上海自然日日期输入、手工生成/重新生成、最近 90 天日报记录、published/withdrawn 状态、总条目与栏目计数、公开预览和退回操作。生成或退回后会重新拉取列表。
+
+**Problem**
+
+它已经形成必要运营闭环，但“生成”“重新生成”“退回”影响不同，当前都集中在行尾小按钮中；全局 `busy` 会同时禁用所有行却没有指出具体受影响记录；退回没有确认和结果解释；published/withdrawn 使用 success/danger 容易把“主动撤下”误读为系统故障。
+
+**Target**
+
+Operator Light 下的 Editorial Output 工作区：页首解释自动生成时点与人工覆盖边界；生成区是明确主任务；记录表把“发布状态、可见条目、栏目构成、最后变更、操作”分层。退回采用中性的 Unpublished/Withdrawn 状态与带确认的高影响动作，失败才使用 Danger。
+
+**Universe Inspiration**
+
+学习按日期归档、正式记录与版本状态的秩序，不加入 Lore 装饰。
+
+**LeagueNews Adaptation**
+
+日报是可发布投影而非文章 CMS。视觉必须说明重新生成会按当前消息和事件状态覆盖同日内容，退回只撤下公开投影且不会被自动任务重新发布。
+
+**Keep**
+
+日期输入、生成/重新生成、最近记录、栏目计数、公开预览、退回及后端现有自动化与幂等规则。
+
+**Change**
+
+使用行级 Busy/结果反馈；区分 Published、Withdrawn 与 Error；退回增加确认并在完成后保留该行位置；明确“自动生成 / 人工覆盖 / 公开查看”三种动作；不修改日报选取、调度或发布规则。
+
+### 12.11 `/admin/reviews`
 
 **Current**  
 待审队列行显示阶段进度，点击按钮打开全屏级 Dialog，内部按普通消息审核或 OCR 审核切换。
@@ -795,7 +837,7 @@ Review 是高风险操作，动效与品牌气氛必须后退。保留清楚的�
 **Change**  
 提高字号、减少框中框、明确主/次/危险动作；验收 Focus Trap、焦点返回、未保存关闭提示和移动可操作性。
 
-### 12.11 `/admin/collection`
+### 12.12 `/admin/collection`
 
 **Current**  
 Source 与采集日志分 Tab；Source 表格可编辑计划，Schedule Editor 以 Dialog 展示。
@@ -818,7 +860,7 @@ Source 可有首字母/平台图标，但不伪造徽记；状态优先于装饰
 **Change**  
 统一状态/时间/动作列，强化可点击按钮而非整卡；完善 Dialog 焦点与保存反馈。
 
-### 12.12 `/admin/system`
+### 12.13 `/admin/system`
 
 **Current**  
 展示 PipelineJob 运行/等待/完成/失败指标、失败任务表、重试操作与 Corrections 表和分页。
@@ -841,7 +883,7 @@ Source 可有首字母/平台图标，但不伪造徽记；状态优先于装饰
 **Change**  
 统一异常状态与操作层级；改善错误展开；页面源码可维护性应另开小范围纯重排任务，不能与视觉行为改动混成一次提交。
 
-### 12.13 `/admin/system/ocr`
+### 12.14 `/admin/system/ocr`
 
 **Current**  
 左侧选择测试图片和参数，右侧展示原图、叠图、历史结果、置信度、结构化 JSON 和激活生产配置操作。
@@ -864,7 +906,7 @@ Source 可有首字母/平台图标，但不伪造徽记；状态优先于装饰
 **Change**  
 建立风险清楚的 Action 层级、工作区最小宽度、移动降级和更稳定的图像对照；不在视觉阶段调整 OCR 算法或默认参数。
 
-### 12.14 `/admin/system/knowledge`
+### 12.15 `/admin/system/knowledge`
 
 **Current**  
 通过 Rules / Terms Tabs 创建、查看并激活/停用稳定规则与术语，采用表单和记录列表。
@@ -908,8 +950,10 @@ Rules / Terms 信息结构、创建、激活、停用和全部现有字段。
 | Original / Repost | 小型边框 Badge | 稳定内容形式标签；Original 可稍强，Repost 中性；不暗示真假 |
 | Source | 名称 + reliability 长句 | 来源名称、时间、外链分工；可靠性放辅助层；不与事件可信度混淆 |
 | Product Category | 公共 Message 缺失 | 每条只显示一个主 Category Accent/标签，多产品明确说明 |
-| Filters | Message 仅 All/Featured；Event 仅 Category | URL 驱动；核心筛选常显，高级筛选 Disclosure；显示 Active Filters 和清除 |
-| Pagination | 仅管理台有 | 公共列表采用 URL 分页；保留过滤/返回状态；暂不使用 Infinite Scroll |
+| Filters | Message 已有 Product/Featured，Event 已有 Category；都缺搜索与高级/日期入口 | 保留 URL 驱动基础；核心筛选常显，高级筛选 Disclosure；显示 Active Filters 和清除 |
+| Sort & Pagination | 公共消息/事件已有共享时间/重要性排序、25 条 URL 分页 | 保留现有 helper 与参数语义；统一视觉、焦点和返回定位；Event 增加热度排序；暂不使用 Infinite Scroll |
+| Date Archive | API 已有上海自然日筛选和 `published-days`，公共 UI 未使用 | 消息流提供有内容日期索引与数量；日报使用独立的已发布报告导航，不能把“有消息”等同“有日报” |
+| Admin Daily Reports | 新页已有生成、重新生成、记录、预览与退回 | Editorial Output 工作区；行级反馈、状态语义、退回确认与自动/人工边界说明 |
 | Buttons | 全局样式和管理台多种局部样式 | Text Link / Secondary / Primary / Danger 四级；公共 Primary 稀少，避免金色实心泛滥 |
 | Modal / Dialog | 只在管理台，视觉可用但规则分散 | 统一 Scrim、Header、Action、Focus Trap、Esc、焦点返回和移动 Sheet 规则 |
 | Mobile Navigation | 公共端缺失，管理台已有抽屉 | 公共共享抽屉；管理台保留独立抽屉；触控目标至少 44px |
@@ -1030,21 +1074,23 @@ Active 状态错误；移动 Drawer 的焦点/滚动锁；详情页旧返回链�
 ### Phase C — Message Stream & Message Detail
 
 **范围**  
-在不改变根首页的前提下新增 `/messages` 作为完整列表；重做 Message Card 信息层级；接入现有公开 API 的搜索、消息类型、精选、排序和分页；升级详情返回上下文与阅读样式。
+在不改变根首页的前提下新增 `/messages` 作为完整列表；迁移并保留现有 Product / Featured / Sort / Pagination；重做 Message Card 信息层级；接入公开 API 已具备但 UI 尚未使用的搜索、消息类型、自然日筛选和日期索引；升级详情返回上下文与阅读样式。
 
 **涉及文件**  
-`apps/web/app/page.tsx`、新增 `apps/web/app/messages/page.tsx`、`apps/web/app/messages/[id]/page.tsx`、`components/message-feed.tsx`、`components/message-detail.tsx`、`lib/api.ts`、`globals.css`。
+`apps/web/app/page.tsx`、新增 `apps/web/app/messages/page.tsx`、`apps/web/app/messages/[id]/page.tsx`、`components/message-feed.tsx`、`components/message-detail.tsx`、`components/public-list-controls.tsx`、`lib/public-list.ts`、`lib/api.ts`、`globals.css`。
 
 **涉及组件**  
-MessageList、MessageCard、MessageFilters、Pagination、Provenance、LanguageToggle、ContentBlocks。
+MessageList、MessageCard、MessageFilters、DateArchive、PublicSortControls、PublicPagination、Provenance、LanguageToggle、ContentBlocks。
 
 **风险**  
-实施时需要重新核对公开 API 契约；offset/query 映射错误；返回上下文开放重定向风险；Topic/Entity 过长。
+迁移根路径现有查询时丢失书签语义；`date/timezone` 与 offset/query 映射错误；返回上下文开放重定向风险；Topic/Entity 过长；把消息发布日期索引误当成日报可用日期。
 
 **验收标准**
 
-- `/messages` 首屏不抓取全量数据；
-- 搜索/筛选/排序/页码可分享并支持 Back/Forward；
+- `/messages` 保持当前 25 条分页，不退回全量抓取；
+- Product / Featured / Sort / Page 行为与当前根路径兼容；
+- 搜索/类型/日期/排序/页码可分享并支持 Back/Forward；
+- 日期按 `Asia/Shanghai` 解释，日期索引数量与筛选结果一致；
 - Product、Type、Source、Time、Form、Importance 不混淆；
 - 无图、长标题、多 Topic/Entity、中英切换与 Patch 表均通过响应式检查；
 - 从消息列表返回时恢复原 URL 条件；
@@ -1062,7 +1108,7 @@ MessageList、MessageCard、MessageFilters、Pagination、Provenance、LanguageT
 HomepageHero、PriorityFeature、EventUpdateStrip/Grid、LatestMessages、DailyEntry、MethodologyNote。
 
 **风险**  
-把算法排序误写成人工编辑；多个 API 请求影响首屏；没有媒体时构图失效；日报不存在时入口语义不准确。
+把算法排序误写成人工编辑；多个 API 请求影响首屏；没有媒体时构图失效；自动日报在次日生成，首页若把当天报告称为“今日日报”会产生错误承诺。
 
 **验收标准**
 
@@ -1075,7 +1121,7 @@ HomepageHero、PriorityFeature、EventUpdateStrip/Grid、LatestMessages、DailyE
 ### Phase E — Event Experience
 
 **范围**  
-建立独立 EventCard、完整列表筛选/排序/分页和事件专题详情；展示已存在但当前遗漏的字段与 `related_messages`。
+建立独立 EventCard；保留当前 Category / Sort / Pagination，补充搜索、热度排序和高级筛选；升级事件专题详情，展示已存在但当前遗漏的字段与 `related_messages`。
 
 **涉及文件**  
 `apps/web/app/events/page.tsx`、`apps/web/app/events/[id]/page.tsx`、`lib/api.ts`、`lib/types.ts`（仅在核对契约确有需要时）、新增事件展示组件、`globals.css`。
@@ -1090,7 +1136,8 @@ EventFilters、EventCard、MetricRail、EventHero、CurrentState、Timeline、Ev
 
 - Event 与 Message 不再同构；
 - 最后实质更新、主要来源、三个指标和覆盖语义清楚；
-- 现有 Event API 所支持的主要筛选可通过 URL 使用；
+- 当前 Category / Sort / Pagination 查询链接保持兼容；
+- Event API 所支持的主要高级筛选可通过 URL 使用；
 - 详情展示 Timeline、Evidence 和 Related Messages，并有独立空状态；
 - denied/corrected 等状态仍展示而非被视觉隐藏；
 - 不更改事件聚合、可信度、热度或重要性算法。
@@ -1098,44 +1145,45 @@ EventFilters、EventCard、MetricRail、EventHero、CurrentState、Timeline、Ev
 ### Phase F — Daily Report
 
 **范围**  
-建立日期导航、DailyLead 与 DigestRow，改善空状态与从日报到消息再返回的路径。
+让公共日报的默认日期与次日自动生成生命周期一致；建立已发布报告导航、DailyLead 与 DigestRow，改善空状态与从日报到消息再返回的路径。消息 `published-days` 只能作为同日消息入口，不能替代公开日报日期目录。
 
 **涉及文件**  
-`apps/web/app/daily/page.tsx`、`components/message-feed.tsx` 或新增日报专用展示组件、`lib/api.ts`、`globals.css`。
+`apps/web/app/daily/page.tsx`、`components/message-feed.tsx` 或新增日报专用展示组件、`lib/api.ts`、`lib/types.ts`、`globals.css`。若产品要求“上一份/下一份已发布日报”，需先提供只返回 published 记录的公共日期契约；不能直接把管理端 withdrawn 列表暴露给公共端。
 
 **涉及组件**  
 DateNavigator、DailyHeader、DailyLead、DigestSection、DigestRow、DailyEmptyState。
 
 **风险**  
-视觉 Lead 被误解为新增选取算法；未来日期/时区边界；同一 MessageCard 变体条件过多。
+视觉 Lead 被误解为新增选取算法；今天/上一完整日/最新已发布报告混淆；公开端误读管理列表而泄露 withdrawn 状态；同一 MessageCard 变体条件过多。
 
 **验收标准**
 
 - 日期一律按 Asia/Shanghai 表达；
-- 上一日/下一日/今日和直接日期输入可用；
-- 空报告不暴露生成 API；
+- 上一份/下一份、最新日报和直接日期输入语义清楚；
+- 直接访问未来、未生成或 withdrawn 日期都使用同一公共空状态，不暴露后台原因或生成 API；
 - Lead 只来自已选日报条目，不改变栏目与选取规则；
 - 消息详情能返回原日报日期。
 
 ### Phase G — Admin Alignment
 
 **范围**  
-将管理台映射到 Operator Light token，统一页面头、表单、表格、状态、分页、Dialog 和空/错/加载状态；按页面小批替换，不改变操作逻辑。
+将管理台映射到 Operator Light token，统一页面头、表单、表格、状态、分页、Dialog 和空/错/加载状态；把新增日报管理纳入内容运营模块；按页面小批替换，不改变操作逻辑。
 
 **涉及文件**  
 `apps/web/app/admin/**`、`components/admin/**`、`globals.css` 中 Admin 区域。
 
 **涉及组件**  
-AdminLayout、SideNav、Filters、Table、PaginationControls、PipelineStageBar、ReviewDialog、ScheduleEditor、各类 Status Badge。
+AdminLayout、SideNav、Filters、Table、PaginationControls、PipelineStageBar、ReviewDialog、ScheduleEditor、DailyReportManagement、各类 Status Badge。
 
 **风险**  
-管理台功能面广；现有 CSS 新旧规则重叠；小屏 OCR 工作台；Review Dialog 焦点与未保存状态。
+管理台功能面广；现有 CSS 新旧规则重叠；小屏 OCR 工作台；Review Dialog 焦点与未保存状态；日报退回/重新生成属于高影响运营动作，行级 Busy、确认与失败恢复必须准确。
 
 **验收标准**
 
 - 每次只改一个管理模块并保持其他模块可运行；
 - 关键正文/控件文字原则上不低于 12px；
-- 表格、筛选、展开、审核、重试、采集计划、OCR 和知识维护行为不变；
+- 表格、筛选、展开、审核、重试、采集计划、日报生成/退回、OCR 和知识维护行为不变；
+- `/admin/reports` 清楚区分 Published、Withdrawn 与 Error，并提供行级反馈和退回确认；
 - Dialog 具备 Focus Trap、Esc、焦点返回和清晰的主/危险动作；
 - 状态色不依赖颜色单独表达。
 
@@ -1171,6 +1219,7 @@ AdminLayout、SideNav、Filters、Table、PaginationControls、PipelineStageBar�
 - Source reliability 计算；
 - Event 准入、聚合、粒度、生命周期、可信度、热度和重要性算法；
 - Daily Report 的日期窗口、原创限制、重要性阈值、事件去重、栏目和条目上限；
+- 日报次日自动生成、补生成/晚到重生成、人工退回后不被自动重发、手工重新生成恢复 published 等生命周期规则；
 - RawItem 不可变证据、发布投影与修订历史；
 - 数据库模型与迁移；
 - 管理台现有审核、恢复、采集、OCR、规则/术语操作。
@@ -1182,6 +1231,7 @@ AdminLayout、SideNav、Filters、Table、PaginationControls、PipelineStageBar�
 - Entity / Topic 的公共聚合页和可靠筛选；
 - 人工编辑的首页 Headline；
 - 日报总结、趋势、观点或跨日分析；
+- 面向公共端的完整“已发布日报日期目录”；当前实现只在 Next.js 服务端读取日报摘要并选择首个 `published` 日期，不向浏览器或页面暴露 withdrawn 记录。若后续提供月份归档、上一份/下一份精确跳转，应先增加只含公开报告的公共契约；
 - 个性化、收藏、已读状态、通知与账户功能。
 
 在这些契约不存在时，设计必须使用诚实的静态标签、现有排序和外部来源链接，不做假入口。
@@ -1211,3 +1261,88 @@ AdminLayout、SideNav、Filters、Table、PaginationControls、PipelineStageBar�
 如果答案依赖 Hover、猜测 Badge 是否可点、把最新误认成精选、或者必须先理解内部 Pipeline，设计就没有完成。
 
 LeagueNews 的品牌感最终不应来自“像 Riot”，而应来自一组持续重复的决策：**把当前事实放在前面，把证据放在可追溯的位置，把装饰留给结构转折，把图片校准为环境而非壁纸，并让 Message、Event、Daily 各自拥有清楚的阅读承诺。**
+
+## 18. Implementation Record — 2026-08-14
+
+本轮已按照本文 Phase A–H 连续完成首个系统性视觉版本。实现没有修改后端业务逻辑、数据模型、消息分类、重要性、事件聚合、可信度、热度或日报选取规则。
+
+### 18.1 已落地的系统基础
+
+- 公共端采用 Reader Dark：蓝黑画布、暖白正文、克制的黄铜强调、青色外链与焦点语义；管理台继续采用 Operator Light。
+- Display 使用合法系统 Serif 回退栈，Body / UI 使用 Sans Serif 回退栈；不依赖 Riot 专属字体或网络字体下载。
+- 公共布局统一为 `PublicShell / SiteHeader / SiteFooter`，桌面和移动端共用同一导航信息架构。
+- Section Title、Message Card、Event Card、信息标签、指标、筛选、分页、日期导航和装饰线建立了统一视觉语法。
+- 公共内容默认直角和细线分层；只有后台高密度控件保留少量小圆角。公共端没有使用大面积阴影、玻璃卡或 RPG HUD。
+- 全局支持 `prefers-reduced-motion`；Hover 只使用轻量亮度、边线和图片微缩放。
+
+### 18.2 页面与资讯逻辑
+
+| 页面 | 已实施结果 |
+|---|---|
+| `/` | 独立编辑首页：当前优先阅读、正在发展的事件、最新消息、最新已发布日报；不再兼任完整消息列表。 |
+| `/messages` | 新增高密度消息归档，接入搜索、产品、消息类型、精选、上海自然日、排序、URL 分页与结果数。 |
+| `/messages/[id]` | 重排标题、来源、内容形式、可信度、产品、Topic、Entity、语言与原始来源；支持安全的站内返回上下文。 |
+| `/events` | 独立 Event Card；接入 Category、产品、事件族、生命周期、可信度、重要性、热度、搜索、热度排序和分页；次级指标使用 Disclosure。 |
+| `/events/[id]` | 形成 Current Summary → Metrics → Latest Development → Facts → Timeline → Evidence → Related Messages 的专题阅读顺序。 |
+| `/daily` | 默认最近的 `published` 日报；支持日期输入、前后自然日与返回最新日报；最高重要性条目只作为版式 Lead，不改变日报选取。 |
+| `/admin/**` | 统一到浅色操作 token、Serif 页面标题、克制的品牌标记、直角化操作控件；保留现有高密度表格与移动抽屉。 |
+| `/admin/reports` | 保留生成、重新生成、查看、退回工作流；为重新生成和退回增加明确确认，不改变 API 行为。 |
+
+### 18.3 点击、状态与页面切换
+
+- 主导航只包含首页、消息、事件、日报；管理台作为 Utility 入口。
+- 卡片标题、图片和明确文字 CTA 进入详情；Badge、指标和普通 Metadata 默认不可点击，不制造假入口。
+- Message / Event 列表筛选和排序全部进入 URL；详情页只接受安全站内相对 `from`，避免开放重定向。
+- 从首页、消息筛选结果、日报或事件进入消息详情时，返回文案和目标随来源变化。
+- 所有外部来源使用明确文字、外链图标、新标签页与 `rel="noreferrer"`。
+- 公共日报空状态只说明“没有公开日报”，不泄露 withdrawn 或运营原因。
+
+### 18.4 新增后端能力的方案修正
+
+本轮复核后，方案已纳入以下实际能力：
+
+- Message：`product / message_type / featured / search / date / timezone / sort_by / sort / pagination`；
+- Message 日期索引：`published-days`；
+- Event：Category、Product、Event Family、Lifecycle、Credibility、Importance、Heat、Search、Heat Sort 与 Pagination；
+- Event Detail：`best_media_url`、Timeline、Evidence 与 `related_messages`；
+- Daily：日报摘要列表、published / withdrawn 生命周期、自动生成语义和管理页。
+
+为了兼容尚未重启到最新路由表的本地 API 进程，`published-days` 返回 404 时消息页会退化为没有日期快捷索引，但搜索、日期输入、筛选和消息列表仍可工作。该降级不改变 API，也不会伪造日期数据。
+
+### 18.5 实际文件边界
+
+新增公共组件：
+
+- `apps/web/components/public-shell.tsx`
+- `apps/web/components/site-header.tsx`
+- `apps/web/components/site-footer.tsx`
+- `apps/web/components/section-title.tsx`
+- `apps/web/components/event-card.tsx`
+- `apps/web/lib/public-labels.ts`
+- `apps/web/app/messages/page.tsx`
+
+主要迁移文件：
+
+- `apps/web/app/page.tsx`
+- `apps/web/app/events/page.tsx`
+- `apps/web/app/events/[id]/page.tsx`
+- `apps/web/app/daily/page.tsx`
+- `apps/web/app/messages/[id]/page.tsx`
+- `apps/web/components/message-feed.tsx`
+- `apps/web/components/message-detail.tsx`
+- `apps/web/components/public-list-controls.tsx`
+- `apps/web/lib/api.ts`
+- `apps/web/lib/public-list.ts`
+- `apps/web/app/globals.css`
+
+### 18.6 验收记录
+
+- `pnpm lint:web`：通过；
+- `pnpm build:web`：通过，新增 `/messages` 正常进入生产路由清单；
+- 使用真实本地 API 数据检查首页、消息列表、消息详情、事件列表、事件详情、日报和日报管理；
+- 桌面默认视口完成逐页截图检查；
+- 390 × 844 检查公共导航、首页、消息筛选、事件筛选、日报阅读与管理台；
+- 无图 Lead、日报空日期、事件无图 Hero、旧 API 缺少 `published-days` 等降级状态保持可读；
+- 管理台表格在窄屏采用横向滚动，不压缩为不可读的多行字符列。
+
+后续视觉调整应以本文 Token、页面承诺和交互规则为约束做增量优化，而不是重新合并首页与消息流，或用更多装饰替代信息层级。

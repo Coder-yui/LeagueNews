@@ -2,38 +2,31 @@ import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { MessageDetail } from "@/components/message-detail";
+import { PublicShell } from "@/components/public-shell";
 import { getPublishedItem } from "@/lib/api";
 
 export default async function MessagePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ from?: string; fromLabel?: string }>;
 }) {
   const { id } = await params;
+  const query = await searchParams;
   const itemId = Number(id);
   if (!Number.isInteger(itemId) || itemId < 1) notFound();
   const item = await getPublishedItem(itemId);
   if (!item) notFound();
+  const safeReturn = query.from?.startsWith("/") && !query.from.startsWith("//") ? query.from : "/messages";
+  const returnLabel = query.fromLabel?.slice(0, 30) || "返回消息列表";
 
   return (
-    <main className="message-page">
-      <header className="site-header">
-        <Link className="brand" href="/">
-          <span className="brand-mark">LD</span>
-          <span>LoL Daily Intel</span>
-        </Link>
-        <nav aria-label="主要导航">
-          <Link className="active" href="/">消息</Link>
-          <Link href="/events">事件</Link>
-          <Link href="/admin">处理台</Link>
-        </nav>
-        <div className="live-state"><span /> Reviewed</div>
-      </header>
-      <Link className="message-back" href="/">
-        <ArrowLeft size={15} /> 返回消息列表
-      </Link>
-      <MessageDetail item={item} />
-      <footer><span>LoL Daily Intel · Reviewed message</span><span>Raw → AI → Human review</span></footer>
-    </main>
+    <PublicShell className="message-page">
+      <div className="public-frame message-detail-frame">
+        <Link className="message-back" href={safeReturn}><ArrowLeft size={15} /> {returnLabel}</Link>
+        <MessageDetail item={item} />
+      </div>
+    </PublicShell>
   );
 }

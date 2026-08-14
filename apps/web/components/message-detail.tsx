@@ -8,6 +8,8 @@ import {
   Languages,
 } from "lucide-react";
 import { contentFormLabel } from "@/lib/content-form-labels";
+import { importanceLevel } from "@/lib/importance-labels";
+import { formatPublicTime, publicLabel } from "@/lib/public-labels";
 import type {
   ContentBlock,
   PublishedItem,
@@ -170,18 +172,20 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
       : item.original_content_blocks;
   const title =
     view === "translated" && canTranslate
-      ? item.translated_title ?? item.title
-      : item.original_title ?? item.title;
+      ? item.translated_title || item.title
+      : item.original_title || item.title;
 
   return (
     <article className="message-detail">
       <header className="message-detail-head">
         <div className="message-detail-kicker">
-          <span>#{item.id} · {item.message_type}</span>
-          <span>重要性 {Math.round(item.importance_score * 100)}</span>
-          {item.topics.map((topic) => (
+          <span>{publicLabel(item.products[0] ?? "unknown")}</span>
+          <span>{publicLabel(item.message_type)}</span>
+          <span className={`importance-badge ${importanceLevel(item.importance_score)}`}>重要性 {Math.round(item.importance_score * 100)}</span>
+          {item.products.slice(1).map((product) => <span key={product}>{publicLabel(product)}</span>)}
+          {item.topics.slice(0, 3).map((topic) => (
             <span className="topic-badge" key={topic}>
-              主题 {topic}
+              {publicLabel(topic)}
             </span>
           ))}
         </div>
@@ -198,7 +202,7 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
             {item.author && <span>· {item.author}</span>}
             {item.published_at && (
               <time dateTime={item.published_at}>
-                {new Date(item.published_at).toLocaleString("zh-CN")}
+                {formatPublicTime(item.published_at)}
               </time>
             )}
           </div>
@@ -225,6 +229,12 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
             >
               原始内容
             </button>
+          </div>
+        )}
+        {item.entities.length > 0 && (
+          <div className="message-entity-index" aria-label="相关实体">
+            <span>相关对象</span>
+            {item.entities.map((entity, index) => <b key={`${entity.canonical_id ?? entity.name}-${index}`}>{entity.display_name ?? entity.name ?? entity.canonical_name}</b>)}
           </div>
         )}
       </header>

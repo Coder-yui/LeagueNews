@@ -2,12 +2,12 @@ import Link from "next/link";
 import {
   publicListHref,
   type PublicSearchParams,
-  type PublicSortBy,
+  type EventSortBy,
   type SortDirection,
 } from "@/lib/public-list";
 
-const sortOptions: Array<{
-  sortBy: PublicSortBy;
+const messageSortOptions: Array<{
+  sortBy: EventSortBy;
   sort: SortDirection;
   label: string;
 }> = [
@@ -22,12 +22,17 @@ export function PublicSortControls({
   searchParams,
   sortBy,
   sort,
+  includeHeat = false,
 }: {
   pathname: string;
   searchParams: PublicSearchParams;
-  sortBy: PublicSortBy;
+  sortBy: EventSortBy;
   sort: SortDirection;
+  includeHeat?: boolean;
 }) {
+  const sortOptions = includeHeat
+    ? [...messageSortOptions, { sortBy: "heat" as const, sort: "desc" as const, label: "热度 ↓" }]
+    : messageSortOptions;
   return (
     <nav className="public-sort-controls" aria-label="列表排序">
       <span>排序</span>

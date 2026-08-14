@@ -1,12 +1,13 @@
 import type {
   DailyReport,
+  DailyReportSummary,
   EventDetail,
   EventPage,
   PublishedDayList,
   PublishedItem,
   PublishedItemPage,
 } from "./types";
-import type { PublicSortBy, SortDirection } from "./public-list";
+import type { EventSortBy, PublicSortBy, SortDirection } from "./public-list";
 
 export const apiUrl =
   process.env.INTERNAL_API_URL ??
@@ -39,6 +40,8 @@ export async function getPublishedItemsPage(
     date?: string;
     featured?: boolean;
     product?: string;
+    messageType?: string;
+    search?: string;
     sortBy: PublicSortBy;
     sort: SortDirection;
     timezone?: string;
@@ -50,6 +53,8 @@ export async function getPublishedItemsPage(
   });
   if (filters.featured) params.set("featured", "true");
   if (filters.product) params.set("product", filters.product);
+  if (filters.messageType) params.set("message_type", filters.messageType);
+  if (filters.search) params.set("search", filters.search);
   if (filters.date) params.set("date", filters.date);
   if (filters.timezone) params.set("timezone", filters.timezone);
   params.set("sort_by", filters.sortBy);
@@ -62,15 +67,18 @@ export async function getPublishedItemsPage(
 
 export async function getPublishedDays(
   limit = 30,
-  filters: { featured?: boolean; product?: string; timezone?: string } = {},
+  filters: { featured?: boolean; product?: string; messageType?: string; search?: string; timezone?: string } = {},
 ): Promise<PublishedDayList> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (filters.featured) params.set("featured", "true");
   if (filters.product) params.set("product", filters.product);
+  if (filters.messageType) params.set("message_type", filters.messageType);
+  if (filters.search) params.set("search", filters.search);
   if (filters.timezone) params.set("timezone", filters.timezone);
   const response = await fetch(`${apiUrl}/normalized-items/published-days?${params}`, {
     next: { revalidate: 30 },
   });
+  if (response.status === 404) return { days: [], timezone: filters.timezone ?? "Asia/Shanghai" };
   return requireJson<PublishedDayList>(response);
 }
 
@@ -90,12 +98,25 @@ export async function getDailyReport(reportDate: string): Promise<DailyReport | 
   return requireJson<DailyReport>(response);
 }
 
+export async function getDailyReports(): Promise<DailyReportSummary[]> {
+  const response = await fetch(`${apiUrl}/reports/daily`, { cache: "no-store" });
+  if (response.status === 404) return [];
+  return requireJson<DailyReportSummary[]>(response);
+}
+
 export async function getEventsPage(
   limit: number,
   offset: number,
   filters: {
     category?: string;
-    sortBy: PublicSortBy;
+    product?: string;
+    eventFamily?: string;
+    lifecycle?: string;
+    credibilityLevel?: string;
+    importanceLevel?: string;
+    heatLevel?: string;
+    search?: string;
+    sortBy: EventSortBy;
     sort: SortDirection;
   },
 ): Promise<EventPage> {
@@ -108,6 +129,13 @@ export async function getEventsPage(
   if (filters.category && filters.category !== "all") {
     params.set("category", filters.category);
   }
+  if (filters.product) params.set("product", filters.product);
+  if (filters.eventFamily) params.set("event_family", filters.eventFamily);
+  if (filters.lifecycle) params.set("lifecycle", filters.lifecycle);
+  if (filters.credibilityLevel) params.set("credibility_level", filters.credibilityLevel);
+  if (filters.importanceLevel) params.set("importance_level", filters.importanceLevel);
+  if (filters.heatLevel) params.set("heat_level", filters.heatLevel);
+  if (filters.search) params.set("search", filters.search);
   const response = await fetch(`${apiUrl}/events?${params}`, {
     next: { revalidate: 30 },
   });

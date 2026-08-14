@@ -305,14 +305,17 @@ Invoke-RestMethod `
 ```bash
 services/api/.venv/bin/python services/api/scripts/bulk_collect_raw_items.py \
   --since 2026-08-01T00:00:00+08:00 \
+  --until 2026-08-14T18:00:00+08:00 \
   --limit 10 \
-  --batch-delay 30 \
-  --source-delay 30 \
-  --error-delay 60 \
+  --batch-delay 75 --batch-delay-jitter 30 \
+  --source-delay 120 --source-delay-jitter 60 \
+  --error-delay 180 --error-delay-jitter 60 \
   --max-retries 3
 ```
 
-脚本只选择 active Source，并排除 `x_twitter` 和 `manual`。如需在代理可用时单独回补 X，
+脚本只选择 active Source，并排除 `x_twitter` 和 `manual`。`--until` 是可选的、包含边界的
+事件发布时间上限；启用它时，缺少发布时间或超出时间窗的候选不会写入 RawItem，报告会单独
+统计。如需在代理可用时单独回补 X，
 显式加上 `--include-x --connector-type x_twitter`，并使用独立的状态、报告和日志文件。每次批次会先完成平台抓取和
 共享 ingestion，再原子更新状态 JSON 和 Markdown 报告；调用 ingestion 时显式设置
 `enqueue_downstream=False`，因此本任务不会创建 `pipeline_jobs`，也不会触发下游处理。
@@ -324,8 +327,9 @@ services/api/.venv/bin/python services/api/scripts/bulk_collect_raw_items.py \
 - `bulk_collect_raw_items_20260801.log`：后台标准输出和错误。
 
 进程中断、代理断开或单批重试耗尽后，直接用相同命令重新运行即可。已完成 Source 会跳过，
-未完成 Source 从最近一次成功批次的 cursor 继续。默认批次串行执行并等待 30 秒，网络错误
-按 60 秒、120 秒递增等待；不要在同一状态文件上同时启动两个实例。
+未完成 Source 从最近一次成功批次的 cursor 继续。`--*-delay-jitter` 会让每次等待在基准值
+上下随机波动，适合长时间的外网采集；网络错误仍会按重试次数递增等待。不要在同一状态文件上
+同时启动两个实例。
 
 X 批量示例（与非 X 批次使用同一 `since`，但状态文件独立）：
 

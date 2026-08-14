@@ -85,6 +85,7 @@ class ConnectorRequest:
     since: datetime | None
     options: dict[str, object]
     cursor: dict[str, Any] | None = None
+    historical: bool = False
 
 
 PlatformRecordT = TypeVar("PlatformRecordT")
@@ -95,6 +96,7 @@ class FetchBatch(Generic[PlatformRecordT], Sequence[PlatformRecordT]):
     records: list[PlatformRecordT]
     truncated: bool = False
     skipped_ids: tuple[str, ...] = ()
+    next_cursor: dict[str, Any] | None = None
 
     def __len__(self) -> int:
         return len(self.records)
@@ -145,16 +147,21 @@ class BaseConnector(ABC, Generic[PlatformRecordT]):
         skipped_ids = fetched.skipped_ids
         items = [self.map_record(record) for record in records]
         cursor_used = dict(request.cursor or {})
-        return CandidateBatch(
-            items=items,
-            truncated=truncated,
-            cursor_used=cursor_used,
-            next_cursor=_advance_cursor(
+        next_cursor = (
+            dict(fetched.next_cursor)
+            if fetched.next_cursor is not None
+            else _advance_cursor(
                 cursor_used,
                 items,
                 truncated=truncated,
                 skipped_ids=skipped_ids,
-            ),
+            )
+        )
+        return CandidateBatch(
+            items=items,
+            truncated=truncated,
+            cursor_used=cursor_used,
+            next_cursor=next_cursor,
         )
 
     @abstractmethod

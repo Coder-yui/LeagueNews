@@ -65,48 +65,20 @@ class XTwitterConnector(BaseConnector[object]):
             user = await api.user_by_login(username)
             if user is None:
                 raise XConnectorCollectionError(f"X user was not found: @{username}")
-            records: list[object] = []
-            pending_ids = {
-                str(value)
-                for value in (request.cursor or {}).get("pending_ids", [])
-            }
-            scan_limit = max(limit + len(pending_ids) + 1, limit + 1)
-            scanned = 0
-            reached_boundary = False
-            tweets = api.user_tweets(user.id, limit=scan_limit)
-            try:
-                async for tweet in tweets:
-                    scanned += 1
-                    tweet_id = clean_text(_attr(tweet, "id_str", "id"))
-                    published_at = _attr(tweet, "date")
-                    if isinstance(since, datetime) and isinstance(published_at, datetime):
-                        if published_at < since:
-                            reached_boundary = True
-                            break
-                    if tweet_id in pending_ids:
-                        continue
-                    records.append(tweet)
-                    if len(records) > limit:
-                        break
-            finally:
-                close = getattr(tweets, "aclose", None)
-                if close is not None:
-                    await close()
-            ordered = sorted(
-                records,
-                key=lambda record: (
-                    _attr(record, "date")
-                    if isinstance(_attr(record, "date"), datetime)
-                    else datetime.min.replace(tzinfo=UTC)
-                ),
-                reverse=True,
-            )
-            return FetchBatch(
-                records=ordered[:limit],
-                truncated=(
-                    len(ordered) > limit
-                    or (scanned >= scan_limit and not reached_boundary)
-                ),
+            if request.historical:
+                return await self._fetch_historical_batch(
+                    api,
+                    user_id=user.id,
+                    since=since,
+                    cursor=request.cursor,
+                    limit=limit,
+                )
+            return await self._fetch_recent_batch(
+                api,
+                user_id=user.id,
+                since=since,
+                cursor=request.cursor,
+                limit=limit,
             )
         except XConnectorConfigurationError:
             raise
@@ -118,6 +90,110 @@ class XTwitterConnector(BaseConnector[object]):
         finally:
             for suffix in ("", "-shm", "-wal"):
                 Path(f"{db_path}{suffix}").unlink(missing_ok=True)
+
+    async def _fetch_tweet_page(
+        self,
+        api: object,
+        *,
+        user_id: int,
+        cursor: str | None,
+        limit: int,
+    ) -> tuple[list[object], str | None]:
+        from twscrape.models import parse_tweets
+
+        variables: dict[str, object] = {"count": limit}
+        if cursor:
+            variables["cursor"] = cursor
+        responses = api.user_tweets_raw(user_id, limit=1, kv=variables)
+        try:
+            response = await anext(responses)
+        except StopAsyncIteration:
+            return [], None
+        finally:
+            close = getattr(responses, "aclose", None)
+            if close is not None:
+                await close()
+        payload = response.json()
+        return list(parse_tweets(response)), _bottom_cursor(payload)
+
+    async def _fetch_historical_batch(
+        self,
+        api: object,
+        *,
+        user_id: int,
+        since: datetime | None,
+        cursor: dict[str, Any] | None,
+        limit: int,
+    ) -> FetchBatch[object]:
+        page_cursor = _pagination_cursor(cursor)
+        records, next_page_cursor = await self._fetch_tweet_page(
+            api,
+            user_id=user_id,
+            cursor=page_cursor,
+            limit=limit,
+        )
+        reached_boundary = False
+        in_range_records: list[object] = []
+        for tweet in records:
+            published_at = _attr(tweet, "date")
+            if isinstance(since, datetime) and isinstance(published_at, datetime):
+                if published_at < since:
+                    reached_boundary = True
+                    break
+            in_range_records.append(tweet)
+        return FetchBatch(
+            records=_ordered_tweets(in_range_records),
+            truncated=bool(next_page_cursor) and not reached_boundary,
+            next_cursor={
+                "version": 2,
+                "x_pagination_cursor": None if reached_boundary else next_page_cursor,
+            },
+        )
+
+    async def _fetch_recent_batch(
+        self,
+        api: object,
+        *,
+        user_id: int,
+        since: datetime | None,
+        cursor: dict[str, Any] | None,
+        limit: int,
+    ) -> FetchBatch[object]:
+        pending_ids = {
+            str(value)
+            for value in (cursor or {}).get("pending_ids", [])
+        }
+        scan_limit = max(limit + len(pending_ids) + 1, limit + 1)
+        scanned = 0
+        reached_boundary = False
+        records: list[object] = []
+        tweets = api.user_tweets(user_id, limit=scan_limit)
+        try:
+            async for tweet in tweets:
+                scanned += 1
+                tweet_id = clean_text(_attr(tweet, "id_str", "id"))
+                published_at = _attr(tweet, "date")
+                if isinstance(since, datetime) and isinstance(published_at, datetime):
+                    if published_at < since:
+                        reached_boundary = True
+                        break
+                if tweet_id in pending_ids:
+                    continue
+                records.append(tweet)
+                if len(records) > limit:
+                    break
+        finally:
+            close = getattr(tweets, "aclose", None)
+            if close is not None:
+                await close()
+        ordered = _ordered_tweets(records)
+        return FetchBatch(
+            records=ordered[:limit],
+            truncated=(
+                len(ordered) > limit
+                or (scanned >= scan_limit and not reached_boundary)
+            ),
+        )
 
     def map_record(self, record: object) -> RawItemCandidate:
         return self.map_tweet(record)
@@ -269,6 +345,37 @@ def _load_cookie_string(path: Path) -> str:
             "X cookie file must contain non-empty auth_token and ct0 cookies"
         )
     return "; ".join(f"{key}={value}" for key, value in cookies.items())
+
+
+def _pagination_cursor(cursor: dict[str, Any] | None) -> str | None:
+    value = (cursor or {}).get("x_pagination_cursor")
+    return value if isinstance(value, str) and value else None
+
+
+def _bottom_cursor(value: object) -> str | None:
+    if isinstance(value, dict):
+        if value.get("cursorType") == "Bottom" and isinstance(value.get("value"), str):
+            return value["value"]
+        for nested in value.values():
+            if found := _bottom_cursor(nested):
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            if found := _bottom_cursor(nested):
+                return found
+    return None
+
+
+def _ordered_tweets(records: list[object]) -> list[object]:
+    return sorted(
+        records,
+        key=lambda record: (
+            _attr(record, "date")
+            if isinstance(_attr(record, "date"), datetime)
+            else datetime.min.replace(tzinfo=UTC)
+        ),
+        reverse=True,
+    )
 
 
 def _attr(value: object, *names: str) -> object:

@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,14 +40,31 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _parse_since(value: str) -> datetime:
+def _parse_datetime_argument(value: str, *, option: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
-        raise ValueError(f"invalid --since datetime: {value!r}") from exc
+        raise ValueError(f"invalid {option} datetime: {value!r}") from exc
     if parsed.utcoffset() is None:
-        raise ValueError("--since must include a timezone offset")
+        raise ValueError(f"{option} must include a timezone offset")
     return parsed
+
+
+def _in_time_range(
+    published_at: datetime | None,
+    *,
+    since: datetime,
+    until: datetime | None,
+) -> bool:
+    if published_at is None:
+        return False
+    return published_at >= since and (until is None or published_at <= until)
+
+
+def _jittered_delay(base_seconds: float, jitter_seconds: float) -> float:
+    if jitter_seconds <= 0:
+        return base_seconds
+    return max(0.0, random.uniform(base_seconds - jitter_seconds, base_seconds + jitter_seconds))
 
 
 def _safe_text(value: object, limit: int = 2000) -> str:
@@ -65,6 +83,8 @@ def _source_state(source: Source) -> dict[str, Any]:
         "created": 0,
         "revised": 0,
         "skipped": 0,
+        "filtered_out_of_range": 0,
+        "filtered_missing_published_at": 0,
         "retry_count": 0,
         "errors": [],
         "last_error": None,
@@ -100,7 +120,16 @@ def _report_markdown(state: dict[str, Any]) -> str:
     source_states = list(state.get("sources", {}).values())
     totals = {
         key: sum(int(source.get(key, 0) or 0) for source in source_states)
-        for key in ("batches", "discovered", "created", "revised", "skipped", "retry_count")
+        for key in (
+            "batches",
+            "discovered",
+            "created",
+            "revised",
+            "skipped",
+            "filtered_out_of_range",
+            "filtered_missing_published_at",
+            "retry_count",
+        )
     }
     statuses: dict[str, int] = {}
     for source in source_states:
@@ -113,6 +142,8 @@ def _report_markdown(state: dict[str, Any]) -> str:
         "",
         f"- 状态：`{status_text}`",
         f"- 采集起点：`{state.get('since', '')}`",
+        f"- 采集终点：`{state.get('until') or '未限制'}`",
+        f"- 限速策略：`{json.dumps(state.get('delay_policy', {}), sort_keys=True)}`",
         f"- 任务开始：`{state.get('started_at', '')}`",
         f"- 最近更新：`{state.get('updated_at', '')}`",
         f"- 任务结束：`{state.get('finished_at') or '尚未结束'}`",
@@ -122,8 +153,8 @@ def _report_markdown(state: dict[str, Any]) -> str:
         "",
         "## 信源明细",
         "",
-        "| Source ID | 信源 | Connector | 状态 | 批次 | 发现 | 新建 | 修订 | 跳过 | 重试 | 最近错误 |",
-        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| Source ID | 信源 | Connector | 状态 | 批次 | 发现 | 新建 | 修订 | 去重跳过 | 范围外 | 缺发布时间 | 重试 | 最近错误 |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for source in sorted(source_states, key=lambda item: int(item.get("source_id", 0))):
         lines.append(
@@ -140,6 +171,8 @@ def _report_markdown(state: dict[str, Any]) -> str:
                     "created",
                     "revised",
                     "skipped",
+                    "filtered_out_of_range",
+                    "filtered_missing_published_at",
                     "retry_count",
                     "last_error",
                 )
@@ -157,6 +190,8 @@ def _report_markdown(state: dict[str, Any]) -> str:
             f"- 新建 RawItem：`{totals['created']}`",
             f"- 修订 RawItem：`{totals['revised']}`",
             f"- 去重跳过：`{totals['skipped']}`",
+            f"- 时间范围外候选：`{totals['filtered_out_of_range']}`",
+            f"- 缺少发布时间而未入库的候选：`{totals['filtered_missing_published_at']}`",
             f"- 网络重试：`{totals['retry_count']}`",
             f"- 失败信源：`{len(failed)}`",
             "",
@@ -179,6 +214,7 @@ def _load_state(
     state_file: Path,
     *,
     since: str,
+    until: str | None,
     sources: list[Source],
     limit: int,
     included_connector_types: list[str],
@@ -191,6 +227,11 @@ def _load_state(
         if state.get("since") != since:
             raise RuntimeError(
                 f"state file since={state.get('since')!r} does not match --since={since!r}; "
+                "choose another --state-file"
+            )
+        if state.get("until") != until:
+            raise RuntimeError(
+                f"state file until={state.get('until')!r} does not match --until={until!r}; "
                 "choose another --state-file"
             )
         if not isinstance(state.get("sources"), dict):
@@ -214,6 +255,7 @@ def _load_state(
         "version": 1,
         "status": "running",
         "since": since,
+        "until": until,
         "limit": limit,
         "included_connector_types": included_connector_types,
         "excluded_connector_types": excluded_connector_types,
@@ -262,9 +304,12 @@ async def _collect_source(
     source_state: dict[str, Any],
     *,
     since: datetime,
+    until: datetime | None,
     limit: int,
     batch_delay: float,
+    batch_delay_jitter: float,
     error_delay: float,
+    error_delay_jitter: float,
     max_retries: int,
     state: dict[str, Any],
     state_file: Path,
@@ -297,12 +342,28 @@ async def _collect_source(
                         since=since,
                         options={},
                         cursor=cursor,
+                        historical=True,
                     )
                     batch = await connector.collect(request)
+                    in_range_items = [
+                        item
+                        for item in batch
+                        if _in_time_range(item.published_at, since=since, until=until)
+                    ]
+                    source_state["filtered_missing_published_at"] = int(
+                        source_state.get("filtered_missing_published_at", 0)
+                    ) + sum(item.published_at is None for item in batch)
+                    source_state["filtered_out_of_range"] = int(
+                        source_state.get("filtered_out_of_range", 0)
+                    ) + sum(
+                        item.published_at is not None
+                        and not _in_time_range(item.published_at, since=since, until=until)
+                        for item in batch
+                    )
                     result = await ingest_connector_items(
                         db,
                         source=source,
-                        items=list(batch),
+                        items=in_range_items,
                         enqueue_downstream=False,
                     )
                 source_state["batches"] = int(source_state.get("batches", 0)) + 1
@@ -324,7 +385,8 @@ async def _collect_source(
                 _save_state(state, state_file, report_file)
                 print(
                     f"source={source_id} batch={source_state['batches']} "
-                    f"discovered={len(batch)} created={len(result.created)} "
+                    f"discovered={len(batch)} eligible={len(in_range_items)} "
+                    f"created={len(result.created)} "
                     f"revised={len(result.revised)} skipped={len(result.skipped)} "
                     f"truncated={batch.truncated}",
                     flush=True,
@@ -334,7 +396,7 @@ async def _collect_source(
                     source_state["finished_at"] = _now()
                     _save_state(state, state_file, report_file)
                     return
-                await asyncio.sleep(batch_delay)
+                await asyncio.sleep(_jittered_delay(batch_delay, batch_delay_jitter))
                 break
             except Exception as exc:
                 last_error = exc
@@ -345,7 +407,9 @@ async def _collect_source(
                 source_state["errors"] = errors[-5:]
                 _save_state(state, state_file, report_file)
                 if attempt < max_retries:
-                    wait_seconds = error_delay * attempt
+                    wait_seconds = (
+                        _jittered_delay(error_delay, error_delay_jitter) * attempt
+                    )
                     print(
                         f"source={source_id} attempt={attempt} failed; retrying in "
                         f"{wait_seconds:g}s: {_safe_text(exc)}",
@@ -366,7 +430,14 @@ async def _collect_source(
 
 
 async def _run(args: argparse.Namespace) -> None:
-    since = _parse_since(args.since)
+    since = _parse_datetime_argument(args.since, option="--since")
+    until = (
+        _parse_datetime_argument(args.until, option="--until")
+        if args.until
+        else None
+    )
+    if until is not None and until < since:
+        raise ValueError("--until must be greater than or equal to --since")
     selected_ids = set(args.source_id) if args.source_id else None
     connector_types = set(args.connector_type or []) or None
     if connector_types and MANUAL_CONNECTOR in connector_types:
@@ -389,6 +460,7 @@ async def _run(args: argparse.Namespace) -> None:
     state = _load_state(
         state_file,
         since=since.isoformat(),
+        until=until.isoformat() if until else None,
         sources=sources,
         limit=args.limit,
         included_connector_types=sorted({source.connector_type for source in sources}),
@@ -396,11 +468,20 @@ async def _run(args: argparse.Namespace) -> None:
             {MANUAL_CONNECTOR} | ({X_CONNECTOR} if not args.include_x else set())
         ),
     )
+    state["delay_policy"] = {
+        "batch_delay_seconds": args.batch_delay,
+        "batch_delay_jitter_seconds": args.batch_delay_jitter,
+        "source_delay_seconds": args.source_delay,
+        "source_delay_jitter_seconds": args.source_delay_jitter,
+        "error_delay_seconds": args.error_delay,
+        "error_delay_jitter_seconds": args.error_delay_jitter,
+    }
     state["status"] = "running"
     state["finished_at"] = None
     _save_state(state, state_file, report_file)
     print(
         f"starting raw-only collection: sources={len(sources)} since={since.isoformat()} "
+        f"until={until.isoformat() if until else 'unbounded'} "
         f"limit={args.limit} state={state_file} report={report_file}",
         flush=True,
     )
@@ -415,9 +496,12 @@ async def _run(args: argparse.Namespace) -> None:
                 source.id,
                 source_state,
                 since=since,
+                until=until,
                 limit=args.limit,
                 batch_delay=args.batch_delay,
+                batch_delay_jitter=args.batch_delay_jitter,
                 error_delay=args.error_delay,
+                error_delay_jitter=args.error_delay_jitter,
                 max_retries=args.max_retries,
                 state=state,
                 state_file=state_file,
@@ -430,7 +514,9 @@ async def _run(args: argparse.Namespace) -> None:
             _save_state(state, state_file, report_file)
             print(f"source={source.id} setup failed: {_safe_text(exc)}", flush=True)
         if index < len(sources) - 1:
-            await asyncio.sleep(args.source_delay)
+            await asyncio.sleep(
+                _jittered_delay(args.source_delay, args.source_delay_jitter)
+            )
 
     failed = any(source.get("status") == "failed" for source in state["sources"].values())
     state["status"] = "completed_with_failures" if failed else "completed"
@@ -444,10 +530,32 @@ def main() -> None:
         description="Collect historical connector data into RawItems only, with resumable cursors."
     )
     parser.add_argument("--since", default=DEFAULT_SINCE)
+    parser.add_argument(
+        "--until",
+        help="inclusive event-time end bound; requires a timezone offset",
+    )
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--batch-delay", type=float, default=30.0)
+    parser.add_argument(
+        "--batch-delay-jitter",
+        type=float,
+        default=0.0,
+        help="randomly vary each batch delay by this many seconds",
+    )
     parser.add_argument("--source-delay", type=float, default=30.0)
+    parser.add_argument(
+        "--source-delay-jitter",
+        type=float,
+        default=0.0,
+        help="randomly vary each source delay by this many seconds",
+    )
     parser.add_argument("--error-delay", type=float, default=60.0)
+    parser.add_argument(
+        "--error-delay-jitter",
+        type=float,
+        default=0.0,
+        help="randomly vary each retry backoff by this many seconds before backoff multiplication",
+    )
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--source-id", type=int, action="append")
     parser.add_argument(
@@ -473,8 +581,11 @@ def main() -> None:
     args = parser.parse_args()
     args.limit = min(max(args.limit, 1), 50)
     args.batch_delay = max(args.batch_delay, 0.0)
+    args.batch_delay_jitter = max(args.batch_delay_jitter, 0.0)
     args.source_delay = max(args.source_delay, 0.0)
+    args.source_delay_jitter = max(args.source_delay_jitter, 0.0)
     args.error_delay = max(args.error_delay, 1.0)
+    args.error_delay_jitter = max(args.error_delay_jitter, 0.0)
     args.max_retries = min(max(args.max_retries, 1), 10)
     try:
         asyncio.run(_run(args))

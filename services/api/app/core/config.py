@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     daily_report_automation_enabled: bool = True
     daily_report_generation_grace_minutes: int = 15
     daily_report_scheduler_poll_seconds: float = 30.0
+    mcp_enabled: bool = True
+    mcp_service_token: str = ""
+    mcp_auth_header: str = "X-MCP-Service-Token"
+    mcp_allowed_hosts: str = ""
+    mcp_allowed_origins: str = ""
 
     model_config = SettingsConfigDict(env_file=("../../.env", ".env"), extra="ignore")
 
@@ -94,6 +99,8 @@ class Settings(BaseSettings):
             raise ValueError("daily_report_generation_grace_minutes cannot be negative")
         if self.daily_report_scheduler_poll_seconds <= 0:
             raise ValueError("daily_report_scheduler_poll_seconds must be greater than 0")
+        if not self.mcp_auth_header.strip() or any(char.isspace() for char in self.mcp_auth_header):
+            raise ValueError("mcp_auth_header must be a non-empty HTTP header name")
         return self
 
     @property

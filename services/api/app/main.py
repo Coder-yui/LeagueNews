@@ -14,6 +14,7 @@ from app.api.errors import (
 )
 from app.api.router import api_router
 from app.core.config import settings
+from app.mcp.server import mcp_http_app, mcp_runtime
 from app.services.llm import LLMAnalysisError, LLMConfigurationError
 from app.services.media_ocr import OCRProcessingError
 import app.models  # noqa: F401
@@ -21,7 +22,12 @@ import app.models  # noqa: F401
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    yield
+    if not settings.mcp_enabled:
+        yield
+        return
+    mcp_runtime.prepare_for_lifespan()
+    async with mcp_runtime.server.session_manager.run():
+        yield
 
 
 app = FastAPI(
@@ -38,6 +44,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Mcp-Session-Id"],
 )
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
@@ -45,3 +52,6 @@ app.add_exception_handler(LLMConfigurationError, llm_configuration_exception_han
 app.add_exception_handler(LLMAnalysisError, llm_analysis_exception_handler)
 app.add_exception_handler(OCRProcessingError, ocr_processing_exception_handler)
 app.include_router(api_router, prefix=settings.api_v1_prefix)
+if settings.mcp_enabled:
+    # Keep the existing FastAPI routes first; the SDK app owns only /mcp.
+    app.mount("/", mcp_http_app, name="mcp")

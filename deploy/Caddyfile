@@ -25,6 +25,11 @@
 		reverse_proxy api:8000
 	}
 
+	@mcp path /mcp /mcp/*
+	handle @mcp {
+		reverse_proxy api:8000
+	}
+
 	@privateMedia path /media/private/*
 	respond @privateMedia 404
 

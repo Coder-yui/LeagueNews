@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "mcp>=2,<3",
   "openai>=1.60,<3",
   "onnxruntime>=1.22,<2",
   "opencv-python>=4.11,<5.1",
@@ -25,6 +26,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "mcp[cli]>=2,<3",
   "pytest>=8.3,<9",
   "ruff>=0.9,<1",
 ]

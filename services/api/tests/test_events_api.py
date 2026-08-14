@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -232,21 +234,13 @@ def test_superseded_normalized_item_revision_is_removed_from_current_event_proje
                 db=db,
             )
         )
-        old_detail = EventDetailRead.model_validate(get_event(old_event.id, db))
         new_detail = EventDetailRead.model_validate(get_event(new_event.id, db))
 
         assert page.total == 1
         assert [event.id for event in page.items] == [new_event.id]
-        assert old_detail.lifecycle_status == "stale"
-        assert old_detail.message_count == 0
-        assert old_detail.evidence == []
-        assert old_detail.timeline == []
-        assert old_detail.references == {
-            "origin_message_id": None,
-            "primary_source_message_id": None,
-            "latest_update_message_id": None,
-            "best_media_message_id": None,
-        }
+        with pytest.raises(HTTPException) as error:
+            get_event(old_event.id, db)
+        assert error.value.status_code == 404
         assert new_detail.title == "事件 B"
         assert new_detail.message_count == 1
         assert len(new_detail.evidence) == 1

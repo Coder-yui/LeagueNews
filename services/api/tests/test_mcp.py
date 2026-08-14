@@ -42,12 +42,12 @@ def mcp_database(monkeypatch: pytest.MonkeyPatch):
         raw = RawItem(
             source_id=source.id,
             external_id="mcp-faker",
-            native_title="Faker update",
-            author_name="Faker",
+            native_title="Public roster note",
+            author_name="AuthorRecallTerm",
             canonical_url="https://example.com/faker",
             published_at=datetime(2026, 8, 14, 1, tzinfo=UTC),
             content_blocks=[
-                {"type": "paragraph", "text": "Public message"},
+                {"type": "paragraph", "text": "BodyRecallTerm mentions Faker"},
                 {"type": "image", "storage_path": "/private/not-public.jpg"},
             ],
         )
@@ -62,12 +62,12 @@ def mcp_database(monkeypatch: pytest.MonkeyPatch):
         db.flush()
         item = NormalizedItem(
             raw_item_id=raw.id,
-            normalized_title="Faker update",
-            normalized_text="Public message",
-            translated_title="Faker 最新消息",
-            translated_text="公开消息",
+            normalized_title="Public roster note",
+            normalized_text="BodyRecallTerm mentions Faker",
+            translated_title="公开阵容消息",
+            translated_text="正文提到 Faker",
             translated_content_blocks=[{"type": "paragraph", "text": "公开消息"}],
-            summary="Faker 的最新消息。",
+            summary="公开消息摘要。",
             products=["lol_esports"],
             message_type="esports_announcement",
             topics=["esports_rosters"],
@@ -118,6 +118,31 @@ def mcp_database(monkeypatch: pytest.MonkeyPatch):
                 source_published_at=raw.published_at,
             )
         )
+        withdrawn_event = Event(
+            title="Withdrawn event",
+            current_summary="This event lost its public mention.",
+            event_family="roster_change",
+            products=["lol_esports"],
+            lifecycle_status="stale",
+            credibility_level="plausible",
+            importance_score=0.7,
+            heat_score=0.2,
+        )
+        db.add(withdrawn_event)
+        db.flush()
+        db.add(
+            EventMention(
+                event_id=withdrawn_event.id,
+                normalized_item_id=withdrawn.id,
+                normalized_item_revision=1,
+                mention_index=0,
+                relation="reports",
+                source_role="known_leaker",
+                materiality="material_update",
+                evidence_excerpt="Withdrawn evidence",
+                source_published_at=withdrawn_raw.published_at,
+            )
+        )
         report = DailyReport(report_date=date(2026, 8, 14), status="published")
         db.add(report)
         db.flush()
@@ -161,7 +186,7 @@ def test_mcp_discovers_six_tools_and_reads_public_projections(mcp_database) -> N
     assert news.structured_content["items"][0]["related_event_ids"]
 
     item = _call("get_news_item", {"message_id": 1})
-    assert item.structured_content["title"] == "Faker 最新消息"
+    assert item.structured_content["title"] == "公开阵容消息"
     assert "storage_path" not in item.structured_content["original_content_blocks"][1]
     assert item.structured_content["events"][0]["title"] == "Faker roster update"
 
@@ -170,10 +195,31 @@ def test_mcp_discovers_six_tools_and_reads_public_projections(mcp_database) -> N
     detail = _call("get_event", {"event_id": 1})
     assert detail.structured_content["evidence"][0]["message_id"] == 1
 
+    hidden_event = _call("search_events", {"query": "Withdrawn event"})
+    assert hidden_event.structured_content["total"] == 0
+    hidden_detail = _call("get_event", {"event_id": 2})
+    assert hidden_detail.is_error is True
+    assert "not found" in str(hidden_detail.content[0].text).lower()
+
     report = _call("get_daily_report", {"report_date": "2026-08-14"})
     assert len(report.structured_content["sections"]["esports"]) == 1
+    report_message = report.structured_content["sections"]["esports"][0]
+    assert report_message["title"] == "公开阵容消息"
+    assert report_message["summary"] == "公开消息摘要。"
+    assert report_message["importance_score"] == 0.9
+    assert "original_content_blocks" not in report_message
+    assert "translated_content_blocks" not in report_message
+    assert "media" not in report_message
     latest = _call("get_latest_daily_report")
     assert latest.structured_content["report_date"] == "2026-08-14"
+
+
+def test_search_news_reaches_body_author_and_source(mcp_database) -> None:
+    for query in ("BodyRecallTerm", "AuthorRecallTerm", "MCP public source"):
+        result = _call("search_news", {"query": query})
+        assert result.is_error is False
+        assert result.structured_content["total"] == 1
+        assert result.structured_content["items"][0]["id"] == 1
 
 
 def test_mcp_unknown_ids_and_non_published_items_are_not_exposed(mcp_database) -> None:

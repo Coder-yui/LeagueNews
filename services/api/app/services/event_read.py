@@ -210,7 +210,12 @@ def search_events(
 
 
 def get_event_detail(db: Session, event_id: int) -> dict[str, Any] | None:
-    event = db.get(Event, event_id)
+    event = db.scalar(
+        select(Event).where(
+            Event.id == event_id,
+            *event_conditions(db),
+        )
+    )
     return event_detail_payload(db, event) if event is not None else None
 
 

@@ -67,8 +67,9 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="get_event",
         description=(
-            "Read one persisted LeagueNews event by id. Returns the current public event "
-            "projection with lifecycle, importance, credibility, heat, supporting evidence, "
+            "Read one current public LeagueNews event by id. The event must have at least one "
+            "current published message mention; stale or withdrawn event projections are not "
+            "returned. Returns lifecycle, importance, credibility, heat, supporting evidence, "
             "related published messages, sources, and timeline updates."
         ),
         structured_output=True,

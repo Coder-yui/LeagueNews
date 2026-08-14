@@ -68,3 +68,20 @@ def test_invalid_daily_report_scheduler_configuration_fails_at_startup() -> None
                 daily_report_generation_grace_minutes=grace_minutes,
                 daily_report_scheduler_poll_seconds=poll_seconds,
             )
+
+
+def test_production_mcp_credentials_are_required_only_when_enabled() -> None:
+    disabled = Settings(mcp_production=True, mcp_enabled=False)
+    assert disabled.mcp_service_token == ""
+    assert disabled.mcp_allowed_hosts == ""
+
+    with pytest.raises(ValidationError):
+        Settings(mcp_production=True, mcp_enabled=True)
+
+    enabled = Settings(
+        mcp_production=True,
+        mcp_enabled=True,
+        mcp_service_token="production-secret",
+        mcp_allowed_hosts="news.example.com",
+    )
+    assert enabled.mcp_service_token == "production-secret"

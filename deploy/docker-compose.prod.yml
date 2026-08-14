@@ -31,10 +31,11 @@ x-api-service: &api-service
     <<: [*common-environment, *llm-environment, *collector-environment]
     API_CORS_ORIGINS: ${PUBLIC_ORIGIN}
     API_DOCS_ENABLED: "false"
+    MCP_PRODUCTION: "true"
     MCP_ENABLED: ${MCP_ENABLED:-true}
-    MCP_SERVICE_TOKEN: ${MCP_SERVICE_TOKEN:?MCP_SERVICE_TOKEN must be set for production}
+    MCP_SERVICE_TOKEN: ${MCP_SERVICE_TOKEN:-}
     MCP_AUTH_HEADER: ${MCP_AUTH_HEADER:-X-MCP-Service-Token}
-    MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:?MCP_ALLOWED_HOSTS must include the public MCP host}
+    MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
     MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
     PIPELINE_AUTOMATION_ENABLED: ${PIPELINE_AUTOMATION_ENABLED:-true}
   volumes:

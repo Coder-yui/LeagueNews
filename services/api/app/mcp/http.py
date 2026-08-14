@@ -9,7 +9,7 @@ class MCPServiceTokenMiddleware:
     """Protect the MCP transport with an optional configured service token.
 
     An empty token intentionally keeps localhost development friction-free. Production
-    Compose requires MCP_SERVICE_TOKEN to be set before the API container starts.
+    validation requires a token whenever MCP is enabled.
     """
 
     def __init__(self, app: Callable[..., Awaitable[None]], *, header: str, token: str):

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     daily_report_generation_grace_minutes: int = 15
     daily_report_scheduler_poll_seconds: float = 30.0
     mcp_enabled: bool = True
+    mcp_production: bool = False
     mcp_service_token: str = ""
     mcp_auth_header: str = "X-MCP-Service-Token"
     mcp_allowed_hosts: str = ""
@@ -101,6 +102,15 @@ class Settings(BaseSettings):
             raise ValueError("daily_report_scheduler_poll_seconds must be greater than 0")
         if not self.mcp_auth_header.strip() or any(char.isspace() for char in self.mcp_auth_header):
             raise ValueError("mcp_auth_header must be a non-empty HTTP header name")
+        if self.mcp_production and self.mcp_enabled:
+            if not self.mcp_service_token.strip():
+                raise ValueError(
+                    "mcp_service_token must be set when MCP is enabled in production"
+                )
+            if not self.mcp_allowed_hosts.strip():
+                raise ValueError(
+                    "mcp_allowed_hosts must be set when MCP is enabled in production"
+                )
         return self
 
     @property

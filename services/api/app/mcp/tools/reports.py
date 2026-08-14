@@ -4,7 +4,7 @@ from typing import Any
 from mcp.server import MCPServer
 
 from app.mcp.tools._common import mcp_db_session
-from app.mcp.tools.news import news_detail_projection
+from app.mcp.tools.news import news_list_projection
 from app.services.daily_report_read import (
     get_latest_published_daily_report,
     get_published_daily_report,
@@ -15,7 +15,7 @@ def _report_projection(report: dict[str, Any]) -> dict[str, Any]:
     return {
         **report,
         "sections": {
-            section: [news_detail_projection(message) for message in messages]
+            section: [news_list_projection(message) for message in messages]
             for section, messages in report["sections"].items()
         },
     }
@@ -27,7 +27,8 @@ def register(mcp: MCPServer) -> None:
         description=(
             "Read the already-published LeagueNews daily report for an ISO calendar date. "
             "The response preserves the lolpc, esports, tft, and other sections and their "
-            "published message content. Reading never generates or withdraws a report."
+            "compact published message summaries. Call get_news_item for full content or "
+            "evidence. Reading never generates or withdraws a report."
         ),
         structured_output=True,
     )
@@ -42,7 +43,9 @@ def register(mcp: MCPServer) -> None:
         name="get_latest_daily_report",
         description=(
             "Read the newest already-published LeagueNews daily report. If none exists, "
-            "return a clear not-found tool error. Reading never generates a report."
+            "return a clear not-found tool error. The report contains compact published "
+            "message summaries; call get_news_item for full content or evidence. Reading "
+            "never generates a report."
         ),
         structured_output=True,
     )

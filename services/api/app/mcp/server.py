@@ -34,8 +34,10 @@ def create_mcp_server() -> MCPServer:
         description="Read-only access to LeagueNews published messages, events, and daily reports.",
         instructions=(
             "Use search_news for individual published messages, search_events for aggregated "
-            "developments, and the report tools for already-published daily reports. All tools "
-            "are read-only and never trigger collection, processing, aggregation, or generation."
+            "developments, and the report tools for already-published daily reports. Daily "
+            "reports contain compact message summaries; use get_news_item for full content or "
+            "evidence. All tools are read-only and never trigger collection, processing, "
+            "aggregation, or generation."
         ),
         version="0.1.0",
     )

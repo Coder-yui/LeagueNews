@@ -12,6 +12,7 @@ from app.domain.message_taxonomy import Product
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
 from app.models.raw_item import RawItem
+from app.models.source import Source
 from app.services.raw_item_versions import latest_normalized_item_condition
 
 
@@ -29,6 +30,7 @@ def published_item_statement():
     return (
         select(NormalizedItem)
         .join(NormalizedItem.raw_item)
+        .join(RawItem.source)
         .options(
             selectinload(NormalizedItem.raw_item).selectinload(RawItem.source),
             selectinload(NormalizedItem.raw_item).selectinload(RawItem.media_assets),
@@ -99,6 +101,10 @@ def published_item_conditions(
                     NormalizedItem.normalized_title.ilike(pattern),
                     NormalizedItem.translated_title.ilike(pattern),
                     NormalizedItem.summary.ilike(pattern),
+                    NormalizedItem.normalized_text.ilike(pattern),
+                    NormalizedItem.translated_text.ilike(pattern),
+                    RawItem.author_name.ilike(pattern),
+                    Source.name.ilike(pattern),
                 )
             )
     publication_time = publication_time_column()
@@ -144,7 +150,10 @@ def search_published_items(
         timezone_name=timezone_name,
     )
     total = db.scalar(
-        select(func.count(NormalizedItem.id)).join(NormalizedItem.raw_item).where(*conditions)
+        select(func.count(NormalizedItem.id))
+        .join(NormalizedItem.raw_item)
+        .join(RawItem.source)
+        .where(*conditions)
     ) or 0
     sort_column = {
         "time": publication_time_column(),

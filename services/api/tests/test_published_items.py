@@ -555,3 +555,79 @@ def test_published_days_and_date_filter_use_requested_civil_timezone() -> None:
         }
         assert previous_day not in {item["id"] for item in august_13_page["items"]}
         assert next_day not in {item["id"] for item in august_13_page["items"]}
+
+
+def test_published_days_search_joins_source_without_duplicate_counts() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source_a = Source(name="Source A", connector_type="manual")
+        source_b = Source(name="Source B", connector_type="manual")
+        db.add_all([source_a, source_b])
+        db.flush()
+
+        def add_item(source: Source, external_id: str, text: str) -> NormalizedItem:
+            raw = RawItem(
+                source_id=source.id,
+                external_id=external_id,
+                native_title=external_id,
+                content_blocks=[{"type": "paragraph", "text": text}],
+                published_at=datetime(2026, 8, 14, 1, tzinfo=UTC),
+            )
+            db.add(raw)
+            db.flush()
+            item = NormalizedItem(
+                raw_item_id=raw.id,
+                normalized_title=external_id,
+                normalized_text=text,
+                summary=external_id,
+                entities=[],
+                products=["lol_pc"],
+                message_type="game_announcement",
+                topics=["gameplay"],
+                classification_version="message-taxonomy-v3",
+                importance_score=0.5,
+                target_language="zh-CN",
+                translated_title=external_id,
+                translated_text=text,
+                translated_content_blocks=[],
+                translation_status="not_required",
+                analysis_model="test",
+                analysis_version="test",
+            )
+            db.add(item)
+            return item
+
+        matching_item = add_item(source_a, "message-a", "BodyRecallTerm")
+        add_item(source_b, "message-b", "Other body")
+        db.commit()
+
+        body_days = list_published_days(search="BodyRecallTerm", limit=30, db=db)
+        source_days = list_published_days(search="Source A", limit=30, db=db)
+        body_page = list_published_items_page(
+            search="BodyRecallTerm",
+            sort_by="time",
+            sort="desc",
+            limit=25,
+            offset=0,
+            db=db,
+        )
+        source_page = list_published_items_page(
+            search="Source A",
+            sort_by="time",
+            sort="desc",
+            limit=25,
+            offset=0,
+            db=db,
+        )
+
+        assert [(day["date"], day["count"]) for day in body_days["days"]] == [
+            (date(2026, 8, 14), 1)
+        ]
+        assert [(day["date"], day["count"]) for day in source_days["days"]] == [
+            (date(2026, 8, 14), 1)
+        ]
+        assert body_page["total"] == 1
+        assert source_page["total"] == 1
+        assert body_page["items"][0]["id"] == matching_item.id
+        assert source_page["items"][0]["id"] == matching_item.id

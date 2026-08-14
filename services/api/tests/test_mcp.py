@@ -210,8 +210,10 @@ def test_mcp_discovers_six_tools_and_reads_public_projections(mcp_database) -> N
     assert "original_content_blocks" not in report_message
     assert "translated_content_blocks" not in report_message
     assert "media" not in report_message
+    assert "related_event_ids" not in report_message
     latest = _call("get_latest_daily_report")
     assert latest.structured_content["report_date"] == "2026-08-14"
+    assert "related_event_ids" not in latest.structured_content["sections"]["esports"][0]
 
 
 def test_search_news_reaches_body_author_and_source(mcp_database) -> None:

@@ -15,7 +15,10 @@ def _report_projection(report: dict[str, Any]) -> dict[str, Any]:
     return {
         **report,
         "sections": {
-            section: [news_list_projection(message) for message in messages]
+            section: [
+                news_list_projection(message, include_related_event_ids=False)
+                for message in messages
+            ]
             for section, messages in report["sections"].items()
         },
     }

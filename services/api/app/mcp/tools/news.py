@@ -14,9 +14,10 @@ def news_list_projection(
     payload: dict[str, Any],
     *,
     related_event_ids: list[int] | None = None,
+    include_related_event_ids: bool = True,
 ) -> dict[str, Any]:
     """Keep search results compact while retaining agent triage fields."""
-    return {
+    projection = {
         "id": payload["id"],
         "title": payload["title"],
         "summary": payload["summary"],
@@ -29,8 +30,10 @@ def news_list_projection(
         "author": payload["author"],
         "published_at": payload["published_at"],
         "source_url": payload["source_url"],
-        "related_event_ids": related_event_ids or [],
     }
+    if include_related_event_ids:
+        projection["related_event_ids"] = related_event_ids or []
+    return projection
 
 
 def news_detail_projection(
@@ -158,4 +161,3 @@ def register(mcp: MCPServer) -> None:
                 raise ValueError("published news item not found")
             associations = event_associations_for_messages(db, [message_id])
         return news_detail_projection(payload, events=associations.get(message_id, []))
-

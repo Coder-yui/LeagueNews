@@ -216,6 +216,7 @@ def list_published_days(
         select(publication_time)
         .select_from(NormalizedItem)
         .join(NormalizedItem.raw_item)
+        .join(RawItem.source)
         .where(*conditions)
         .order_by(publication_time.desc(), NormalizedItem.id.desc())
         .execution_options(yield_per=500)

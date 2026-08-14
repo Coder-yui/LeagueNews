@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 
 from app.services.collection_scheduler import scheduler_loop as collection_scheduler_loop
 from app.services.daily_report_scheduler import daily_report_scheduler_loop
+from app.services.notification_dispatcher import notification_dispatcher_loop
 
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ async def scheduler_main() -> None:
     await asyncio.gather(
         supervise("collection scheduler", collection_scheduler_loop),
         supervise("daily report scheduler", daily_report_scheduler_loop),
+        supervise("notification dispatcher", notification_dispatcher_loop),
     )
 
 

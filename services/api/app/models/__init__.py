@@ -9,6 +9,7 @@ from app.models.normalized_item import (
     NormalizedItemMediaExtraction,
     NormalizedItemRevision,
 )
+from app.models.notification import NotificationOutbox
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.ocr_lab import OCRProfile, OCRTestRun
 from app.models.raw_item import RawItem
@@ -32,6 +33,7 @@ __all__ = [
     "NormalizedItem",
     "NormalizedItemMediaExtraction",
     "NormalizedItemRevision",
+    "NotificationOutbox",
     "OCRProfile",
     "OCRTestRun",
     "ProcessingRun",

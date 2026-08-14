@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     api_docs_enabled: bool = True
     database_url: str = "postgresql+psycopg://lol:lol_local_password@localhost:5432/lol_daily_intel"
     api_cors_origins: str = "http://localhost:3000"
+    public_origin: str = "http://localhost:3000"
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"
@@ -49,6 +50,15 @@ class Settings(BaseSettings):
     daily_report_automation_enabled: bool = True
     daily_report_generation_grace_minutes: int = 15
     daily_report_scheduler_poll_seconds: float = 30.0
+    feishu_featured_push_enabled: bool = False
+    feishu_featured_webhook_url: str = ""
+    feishu_featured_secret: str = ""
+    feishu_alert_push_enabled: bool = False
+    feishu_alert_webhook_url: str = ""
+    feishu_alert_secret: str = ""
+    feishu_notification_poll_seconds: float = 5.0
+    feishu_notification_lease_seconds: int = 120
+    feishu_alert_cooldown_minutes: int = 60
     mcp_enabled: bool = True
     mcp_production: bool = False
     mcp_service_token: str = ""
@@ -100,6 +110,20 @@ class Settings(BaseSettings):
             raise ValueError("daily_report_generation_grace_minutes cannot be negative")
         if self.daily_report_scheduler_poll_seconds <= 0:
             raise ValueError("daily_report_scheduler_poll_seconds must be greater than 0")
+        if self.feishu_notification_poll_seconds <= 0:
+            raise ValueError("feishu_notification_poll_seconds must be greater than 0")
+        if self.feishu_notification_lease_seconds <= 0:
+            raise ValueError("feishu_notification_lease_seconds must be greater than 0")
+        if self.feishu_alert_cooldown_minutes <= 0:
+            raise ValueError("feishu_alert_cooldown_minutes must be greater than 0")
+        if self.feishu_featured_push_enabled and not self.feishu_featured_webhook_url.strip():
+            raise ValueError(
+                "feishu_featured_webhook_url must be set when featured Feishu push is enabled"
+            )
+        if self.feishu_alert_push_enabled and not self.feishu_alert_webhook_url.strip():
+            raise ValueError(
+                "feishu_alert_webhook_url must be set when alert Feishu push is enabled"
+            )
         if not self.mcp_auth_header.strip() or any(char.isspace() for char in self.mcp_auth_header):
             raise ValueError("mcp_auth_header must be a non-empty HTTP header name")
         if self.mcp_production and self.mcp_enabled:

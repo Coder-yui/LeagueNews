@@ -18,6 +18,11 @@ Source 调度或手工触发
   -> Pipeline Worker durable downstream job
   -> optional single-call EventMention[] aggregation
   -> Event current projection + evidence
+
+Published messages and durable failures also produce records in the notification outbox. The
+collection-scheduler process runs the notification dispatcher, which delivers those records to the
+separate featured-message and alert Feishu bots. Notification delivery is a side channel and never
+changes the success or rollback semantics of the core pipeline.
 ```
 
 当前运行时包含 Connector、共享 ingestion、RawItem 修订、媒体落盘、自动任务、人工审核、
@@ -114,8 +119,9 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 | `events` / `event_mentions` / `event_revisions` | 事件当前投影、mention 证据与历史修订 |
 | `event_aggregation_runs` | 准入、候选、调用次数、结构化决定和应用结果审计 |
 | `daily_reports` / `daily_report_items` | 日报当前投影与消息排序 |
+| `notification_outbox` | 精选消息与系统失败告警的幂等记录、租约和重试状态 |
 
-最新迁移为 `069_fence_event_runs_by_revision.sql`。SQL migration 是生产数据库的
+最新迁移为 `070_add_notification_outbox.sql`。SQL migration 是生产数据库的
 唯一结构来源：新数据库和历史数据库都执行同一条有序 migration 链，不再使用 ORM `create_all()`
 初始化生产结构。不得绕过追加迁移直接修改。全新 001→069 初始化与旧 031→069 顺序升级已在
 可销毁 PostgreSQL 17 上验证。

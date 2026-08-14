@@ -22,6 +22,7 @@ from app.services.pipeline_execution import (
 )
 from app.services.event_metrics import refresh_stale_event_metrics
 from app.services.pipeline_queue import enqueue_pipeline_job
+from app.services.notifications import enqueue_pipeline_failure
 from app.services.raw_item_versions import (
     is_latest_raw_item,
     latest_raw_item_condition,
@@ -335,6 +336,12 @@ async def process_next_job() -> bool:
                     correction.status = "failed"
                     correction.error_message = job.error_message
                     correction.completed_at = job.completed_at
+            failed_raw_item = db.get(RawItem, job.raw_item_id)
+            enqueue_pipeline_failure(
+                db,
+                job=job,
+                raw_item=failed_raw_item,
+            )
             db.commit()
         finally:
             heartbeat.cancel()

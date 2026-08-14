@@ -14,6 +14,7 @@ from app.models.connector_run import ConnectorRun
 from app.models.source import Source
 from app.schemas.collection_schedule import CollectionScheduleUpdate
 from app.services.connector_runner import run_connector
+from app.services.notifications import enqueue_collection_failure
 
 
 def _validate_source(source: Source, *, require_active: bool) -> None:
@@ -211,6 +212,7 @@ async def execute_claimed_schedule(
     )
     succeeded = False
     error_message = None
+    failure: BaseException | None = None
     try:
         run = await run_connector(
             db,
@@ -223,6 +225,7 @@ async def execute_claimed_schedule(
         )
         succeeded = True
     except Exception as exc:
+        failure = exc
         error_message = str(exc)[:4000]
         run = _latest_connector_run(db, source_id)
     finally:
@@ -269,6 +272,15 @@ async def execute_claimed_schedule(
     )
     schedule.lease_token = None
     schedule.lease_expires_at = None
+    if not succeeded:
+        enqueue_collection_failure(
+            db,
+            source=schedule.source,
+            connector_run=run,
+            error=failure or error_message or "collection failed",
+            consecutive_failures=schedule.consecutive_failures,
+            occurred_at=now,
+        )
     db.commit()
 
 

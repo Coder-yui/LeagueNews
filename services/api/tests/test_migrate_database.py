@@ -72,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name == "001_initial_schema.sql"
-    assert files[-1].name == "069_fence_event_runs_by_revision.sql"
+    assert files[-1].name == "070_add_notification_outbox.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -176,3 +176,19 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     event_run_fencing = (MIGRATIONS / "069_fence_event_runs_by_revision.sql").read_text()
     assert "normalized_item_id, normalized_item_revision" in event_run_fencing
     assert "'069_fence_event_runs_by_revision'" in event_run_fencing
+
+    notification_outbox = (MIGRATIONS / "070_add_notification_outbox.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS notification_outbox" in notification_outbox
+    for column in (
+        "target",
+        "kind",
+        "dedupe_key",
+        "payload",
+        "status",
+        "attempts",
+        "next_attempt_at",
+        "lease_token",
+        "lease_expires_at",
+    ):
+        assert column in notification_outbox
+    assert "'070_add_notification_outbox'" in notification_outbox

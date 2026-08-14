@@ -31,6 +31,7 @@ from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
 from app.services.classification_source import resolve_classification_source
 from app.services.llm import LLMClient, execution_metadata
 from app.services.media_publication import publish_raw_item_media
+from app.services.notifications import enqueue_featured_message
 from app.services.pipeline_execution import (
     PipelineExecutionGuard,
     assert_execution_owned,
@@ -1114,6 +1115,7 @@ def _apply_normalized_item(
             db.delete(link)
     db.flush()
     publish_raw_item_media(raw_item)
+    enqueue_featured_message(db, item)
 
     translated_by_id = {
         int(value["extraction_id"]): value

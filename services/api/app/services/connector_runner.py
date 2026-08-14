@@ -14,6 +14,10 @@ from app.services.ingestion import ingest_connector_items
 class ConnectorRunError(RuntimeError):
     """A registered connector could not complete a collection run."""
 
+    def __init__(self, message: str, *, run_id: int | None = None) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+
 
 def resolve_source(
     db: Session, *, connector_type: str, source_id: int | None
@@ -118,4 +122,4 @@ async def run_connector(
             failed_run.error_message = str(exc)[:4000]
             failed_run.finished_at = datetime.now(UTC)
             db.commit()
-        raise ConnectorRunError(str(exc)) from exc
+        raise ConnectorRunError(str(exc), run_id=run.id) from exc

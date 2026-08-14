@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.connectors.registry import connector_registry
 from app.core.database import get_db
 from app.models.connector_run import ConnectorRun
+from app.models.source import Source
 from app.schemas.connector import (
     ConnectorRegistrationRead,
     ConnectorRunPageRead,
@@ -14,8 +16,10 @@ from app.schemas.connector import (
     ConnectorRunRequest,
 )
 from app.services.connector_runner import ConnectorRunError, run_connector
+from app.services.notifications import enqueue_collection_failure
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("", response_model=list[ConnectorRegistrationRead])
@@ -85,6 +89,25 @@ async def trigger_connector_run(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ConnectorRunError as exc:
+        failed_run = db.get(ConnectorRun, exc.run_id) if exc.run_id is not None else None
+        if failed_run is not None:
+            source = db.get(Source, failed_run.source_id)
+            if source is not None:
+                try:
+                    enqueue_collection_failure(
+                        db,
+                        source=source,
+                        connector_run=failed_run,
+                        error=exc.__cause__ or exc,
+                        consecutive_failures=1,
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "failed to enqueue collection alert for connector run id=%s",
+                        failed_run.id,
+                    )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),

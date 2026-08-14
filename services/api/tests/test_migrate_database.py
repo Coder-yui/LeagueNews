@@ -72,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name == "001_initial_schema.sql"
-    assert files[-1].name == "070_add_notification_outbox.sql"
+    assert files[-1].name == "071_add_pipeline_retry_schedule.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -192,3 +192,8 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     ):
         assert column in notification_outbox
     assert "'070_add_notification_outbox'" in notification_outbox
+
+    pipeline_retry = (MIGRATIONS / "071_add_pipeline_retry_schedule.sql").read_text()
+    assert "ADD COLUMN next_attempt_at timestamptz" in pipeline_retry
+    assert "ix_pipeline_jobs_next_attempt_at" in pipeline_retry
+    assert "'071_add_pipeline_retry_schedule'" in pipeline_retry

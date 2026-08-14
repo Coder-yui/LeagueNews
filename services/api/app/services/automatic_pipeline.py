@@ -1,8 +1,9 @@
 import asyncio
-import time
+import logging
 import os
 import secrets
 import socket
+import time
 from datetime import UTC, datetime
 from datetime import timedelta
 
@@ -33,6 +34,10 @@ from app.workflows.reviewed_pipeline import (
     resume_item_processing,
     start_item_processing,
 )
+
+
+logger = logging.getLogger(__name__)
+PIPELINE_RETRY_BACKOFF_SECONDS = (30, 120, 600)
 
 
 def _worker_id() -> str:
@@ -92,6 +97,50 @@ def _active_item_run(db: Session, raw_item_id: int) -> ProcessingRun | None:
     )
 
 
+def _failed_item_run(db: Session, job: PipelineJob) -> ProcessingRun | None:
+    if job.processing_run_id is not None:
+        run = db.get(ProcessingRun, job.processing_run_id)
+        if (
+            run is not None
+            and run.workflow_type == "item"
+            and run.execution_mode == "automatic"
+            and run.status == "failed"
+        ):
+            return run
+        return None
+    statement = select(ProcessingRun).where(
+        ProcessingRun.raw_item_id == job.raw_item_id,
+        ProcessingRun.workflow_type == "item",
+        ProcessingRun.execution_mode == "automatic",
+        ProcessingRun.status == "failed",
+    )
+    if job.correction_id is not None:
+        statement = statement.where(ProcessingRun.correction_id == job.correction_id)
+    return db.scalar(statement.order_by(ProcessingRun.id.desc()).limit(1))
+
+
+def _is_retryable_pipeline_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if isinstance(exc, LookupError):
+        return False
+    permanent_markers = (
+        "no longer exists",
+        "has been superseded",
+        "manual processing run owns",
+        "no longer available",
+        "configuration",
+        "unsupported",
+    )
+    return not any(marker in message for marker in permanent_markers)
+
+
+def _retry_delay_seconds(attempts: int) -> int:
+    index = max(attempts - 1, 0)
+    return PIPELINE_RETRY_BACKOFF_SECONDS[
+        min(index, len(PIPELINE_RETRY_BACKOFF_SECONDS) - 1)
+    ]
+
+
 async def execute_pipeline_job(
     db: Session,
     job: PipelineJob,
@@ -118,7 +167,7 @@ async def execute_pipeline_job(
         await publish_normalized_item_downstream(db, item)
         return
 
-    item_run = _active_item_run(db, raw_item.id)
+    item_run = _active_item_run(db, raw_item.id) or _failed_item_run(db, job)
     if item_run is None and (
         raw_item.normalized_item is None
         or raw_item.normalized_item.publication_status == "withdrawn"
@@ -137,6 +186,20 @@ async def execute_pipeline_job(
             job.completed_at = datetime.now(UTC)
             return
         job.processing_run_id = item_run.id
+        if item_run.status == "failed":
+            item_run.status = "running"
+            item_run.outcome = None
+            item_run.error_message = None
+            item_run.completed_at = None
+            if item_run.correction_id:
+                correction = db.get(PipelineCorrection, item_run.correction_id)
+                if correction is not None:
+                    correction.status = "running"
+                    correction.error_message = None
+                    correction.completed_at = None
+            assert_execution_owned(db, execution_guard)
+            db.commit()
+            db.refresh(item_run)
         if item_run.status == "running":
             item_run = await resume_item_processing(
                 db,
@@ -176,19 +239,72 @@ async def execute_pipeline_job(
     await publish_normalized_item_downstream(db, item)
 
 
+def _finalize_expired_exhausted_job(db: Session, now: datetime) -> bool:
+    job = db.scalar(
+        select(PipelineJob)
+        .where(
+            PipelineJob.status == "running",
+            PipelineJob.attempts >= settings.pipeline_worker_max_attempts,
+            or_(
+                PipelineJob.lease_expires_at.is_(None),
+                PipelineJob.lease_expires_at <= now,
+            ),
+        )
+        .order_by(PipelineJob.lease_expires_at, PipelineJob.id)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+    if job is None:
+        return False
+    job.status = "failed"
+    job.error_message = job.error_message or (
+        "pipeline worker lease expired after reaching the maximum attempt count"
+    )
+    job.completed_at = now
+    job.next_attempt_at = None
+    job.lease_token = None
+    job.lease_expires_at = None
+    job.worker_id = None
+    checkpoint = _latest_checkpoint(db, job.raw_item_id)
+    job.last_checkpoint_id = checkpoint.id if checkpoint else None
+    if job.correction_id and job.current_stage != "event_aggregation":
+        correction = db.get(PipelineCorrection, job.correction_id)
+        if correction is not None:
+            correction.status = "failed"
+            correction.error_message = job.error_message
+            correction.completed_at = now
+    raw_item = db.get(RawItem, job.raw_item_id)
+    enqueue_pipeline_failure(db, job=job, raw_item=raw_item)
+    db.commit()
+    logger.error("pipeline job %s exhausted after an expired lease", job.id)
+    return True
+
+
 def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob | None:
     now = datetime.now(UTC)
+    while _finalize_expired_exhausted_job(db, now):
+        now = datetime.now(UTC)
     job = db.scalar(
         select(PipelineJob)
         .where(
             or_(
-                PipelineJob.status == "queued",
+                (
+                    (PipelineJob.status == "queued")
+                    & (PipelineJob.attempts < settings.pipeline_worker_max_attempts)
+                ),
+                (
+                    (PipelineJob.status == "failed")
+                    & PipelineJob.next_attempt_at.is_not(None)
+                    & (PipelineJob.next_attempt_at <= now)
+                    & (PipelineJob.attempts < settings.pipeline_worker_max_attempts)
+                ),
                 (
                     (PipelineJob.status == "running")
                     & (
                         PipelineJob.lease_expires_at.is_(None)
                         | (PipelineJob.lease_expires_at <= now)
                     )
+                    & (PipelineJob.attempts < settings.pipeline_worker_max_attempts)
                 ),
             )
         )
@@ -204,6 +320,8 @@ def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob
     job.status = "running"
     job.attempts += 1
     job.started_at = job.started_at or now
+    job.completed_at = None
+    job.next_attempt_at = None
     job.error_message = None
     job.worker_id = worker_id or _worker_id()
     job.lease_token = secrets.token_hex(24)
@@ -290,6 +408,7 @@ async def process_next_job() -> bool:
                 execution_guard=execution_guard,
             )
             if job.status == "cancelled":
+                job.next_attempt_at = None
                 job.lease_token = None
                 job.lease_expires_at = None
                 job.worker_id = None
@@ -299,6 +418,7 @@ async def process_next_job() -> bool:
             job = db.get(PipelineJob, job.id)
             job.status = "completed"
             job.completed_at = datetime.now(UTC)
+            job.next_attempt_at = None
             checkpoint = _latest_checkpoint(db, job.raw_item_id)
             job.last_checkpoint_id = checkpoint.id if checkpoint else None
             job.lease_token = None
@@ -324,24 +444,47 @@ async def process_next_job() -> bool:
             job = db.get(PipelineJob, job.id)
             job.status = "failed"
             job.error_message = str(exc)[:4000]
-            job.completed_at = datetime.now(UTC)
+            now = datetime.now(UTC)
+            job.completed_at = now
             checkpoint = _latest_checkpoint(db, job.raw_item_id)
             job.last_checkpoint_id = checkpoint.id if checkpoint else None
+            if job.processing_run_id is None:
+                failed_run = _failed_item_run(db, job)
+                if failed_run is not None:
+                    job.processing_run_id = failed_run.id
             job.lease_token = None
             job.lease_expires_at = None
             job.worker_id = None
-            if job.correction_id and job.current_stage != "event_aggregation":
-                correction = db.get(PipelineCorrection, job.correction_id)
-                if correction is not None:
-                    correction.status = "failed"
-                    correction.error_message = job.error_message
-                    correction.completed_at = job.completed_at
-            failed_raw_item = db.get(RawItem, job.raw_item_id)
-            enqueue_pipeline_failure(
-                db,
-                job=job,
-                raw_item=failed_raw_item,
+            can_retry = (
+                job.attempts < settings.pipeline_worker_max_attempts
+                and _is_retryable_pipeline_error(exc)
             )
+            if can_retry:
+                job.completed_at = None
+                job.next_attempt_at = now + timedelta(
+                    seconds=_retry_delay_seconds(job.attempts)
+                )
+                logger.warning(
+                    "pipeline job %s failed on attempt %s; retry scheduled at %s: %s",
+                    job.id,
+                    job.attempts,
+                    job.next_attempt_at.isoformat(),
+                    exc,
+                )
+            else:
+                job.next_attempt_at = None
+                if job.correction_id and job.current_stage != "event_aggregation":
+                    correction = db.get(PipelineCorrection, job.correction_id)
+                    if correction is not None:
+                        correction.status = "failed"
+                        correction.error_message = job.error_message
+                        correction.completed_at = job.completed_at
+                failed_raw_item = db.get(RawItem, job.raw_item_id)
+                enqueue_pipeline_failure(
+                    db,
+                    job=job,
+                    raw_item=failed_raw_item,
+                )
             db.commit()
         finally:
             heartbeat.cancel()
@@ -354,10 +497,18 @@ async def worker_loop() -> None:
     while True:
         now = time.monotonic()
         if settings.event_aggregation_enabled and now >= next_event_refresh_at:
-            with SessionLocal() as db:
-                refresh_stale_event_metrics(db)
-                db.commit()
+            try:
+                with SessionLocal() as db:
+                    refresh_stale_event_metrics(db)
+                    db.commit()
+            except Exception:
+                logger.exception("pipeline worker maintenance failed")
             next_event_refresh_at = now + settings.event_metrics_refresh_seconds
-        processed = await process_next_job()
+        try:
+            processed = await process_next_job()
+        except Exception:
+            logger.exception("pipeline worker iteration failed")
+            await asyncio.sleep(settings.pipeline_worker_poll_seconds)
+            continue
         if not processed:
             await asyncio.sleep(settings.pipeline_worker_poll_seconds)

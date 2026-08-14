@@ -47,6 +47,11 @@ def test_invalid_pipeline_lease_configuration_fails_at_startup() -> None:
             )
 
 
+def test_invalid_pipeline_retry_configuration_fails_at_startup() -> None:
+    with pytest.raises(ValidationError):
+        Settings(pipeline_worker_max_attempts=0)
+
+
 def test_invalid_collection_lease_configuration_fails_at_startup() -> None:
     for lease_minutes, heartbeat_seconds in ((0, 1), (1, 0), (1, 60), (1, 61)):
         with pytest.raises(ValidationError):
@@ -54,6 +59,11 @@ def test_invalid_collection_lease_configuration_fails_at_startup() -> None:
                 collection_scheduler_lease_minutes=lease_minutes,
                 collection_scheduler_heartbeat_seconds=heartbeat_seconds,
             )
+
+
+def test_invalid_collection_timeout_configuration_fails_at_startup() -> None:
+    with pytest.raises(ValidationError):
+        Settings(collection_run_timeout_seconds=0)
 
 
 def test_invalid_event_metrics_refresh_configuration_fails_at_startup() -> None:

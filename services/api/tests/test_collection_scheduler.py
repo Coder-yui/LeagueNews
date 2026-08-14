@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401
 import app.services.collection_scheduler as scheduler_service
 from app.core.database import Base, get_db
+from app.core.config import settings
 from app.main import app
 from app.models.collection_schedule import SourceCollectionSchedule
 from app.models.connector_run import ConnectorRun
@@ -285,6 +287,75 @@ async def test_lost_lease_does_not_overwrite_new_owner(
     assert current is not None
     assert current.lease_token == "new-owner-token"
     assert current.last_status == "running"
+
+
+@pytest.mark.anyio
+async def test_connector_timeout_fails_run_releases_lease_and_allows_next_source(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stuck_source = _source(db, name="Stuck source")
+    healthy_source = _source(db, name="Healthy source")
+    stuck_schedule = upsert_collection_schedule(
+        db,
+        source=stuck_source,
+        payload=CollectionScheduleUpdate(enabled=True, retry_delay_minutes=8),
+    )
+    healthy_schedule = upsert_collection_schedule(
+        db,
+        source=healthy_source,
+        payload=CollectionScheduleUpdate(enabled=True),
+    )
+    monkeypatch.setattr(settings, "collection_run_timeout_seconds", 0.01)
+
+    async def fake_run_connector(session: Session, **kwargs: object) -> ConnectorRun:
+        source_id = int(kwargs["source_id"])
+        run = ConnectorRun(
+            source_id=source_id,
+            connector_type="riot_official",
+            status="running",
+        )
+        session.add(run)
+        session.commit()
+        if source_id == stuck_source.id:
+            await asyncio.sleep(1)
+        run.status = "completed"
+        run.finished_at = datetime.now(UTC)
+        session.commit()
+        return run
+
+    monkeypatch.setattr(scheduler_service, "run_connector", fake_run_connector)
+
+    first_claim = claim_due_schedule(db)
+    assert first_claim is not None
+    await execute_claimed_schedule(
+        db,
+        schedule_id=first_claim[0],
+        lease_token=first_claim[1],
+    )
+    db.expire_all()
+    failed = db.get(SourceCollectionSchedule, stuck_schedule.id)
+    assert failed is not None
+    assert failed.last_status == "failed"
+    assert failed.last_error == "connector run exceeded deadline of 0.01 seconds"
+    assert failed.consecutive_failures == 1
+    assert failed.lease_token is None
+    assert failed.next_run_at is not None
+    failed_run = db.get(ConnectorRun, failed.last_connector_run_id)
+    assert failed_run is not None
+    assert failed_run.status == "failed"
+
+    second_claim = claim_due_schedule(db)
+    assert second_claim is not None
+    await execute_claimed_schedule(
+        db,
+        schedule_id=second_claim[0],
+        lease_token=second_claim[1],
+    )
+    db.expire_all()
+    healthy = db.get(SourceCollectionSchedule, healthy_schedule.id)
+    assert healthy is not None
+    assert healthy.last_status == "succeeded"
 
 
 def test_collection_schedule_api_lists_configures_and_requests_run() -> None:

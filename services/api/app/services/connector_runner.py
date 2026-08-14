@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -5,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.connectors.base import ConnectorRequest, ConnectorSource
 from app.connectors.config import validate_connector_config, validate_external_key
+from app.core.config import settings
 from app.connectors.registry import connector_registry
 from app.models.connector_run import ConnectorRun
 from app.models.source import Source
@@ -94,9 +96,10 @@ async def run_connector(
             options=options,
             cursor=cursor,
         )
-        batch = await connector.collect(request)
-        discovered_count = len(batch)
-        result = await ingest_connector_items(db, source=source, items=list(batch))
+        async with asyncio.timeout(settings.collection_run_timeout_seconds):
+            batch = await connector.collect(request)
+            discovered_count = len(batch)
+            result = await ingest_connector_items(db, source=source, items=list(batch))
         run = db.get(ConnectorRun, run.id)
         if not run:
             raise RuntimeError("connector run record disappeared")
@@ -113,13 +116,29 @@ async def run_connector(
         db.commit()
         db.refresh(run)
         return run
+    except asyncio.CancelledError:
+        db.rollback()
+        failed_run = db.get(ConnectorRun, run.id)
+        if failed_run:
+            failed_run.status = "failed"
+            failed_run.discovered_count = discovered_count
+            failed_run.error_message = "connector run cancelled"
+            failed_run.finished_at = datetime.now(UTC)
+            db.commit()
+        raise
     except Exception as exc:
         db.rollback()
         failed_run = db.get(ConnectorRun, run.id)
         if failed_run:
             failed_run.status = "failed"
             failed_run.discovered_count = discovered_count
-            failed_run.error_message = str(exc)[:4000]
+            failed_run.error_message = (
+                str(exc)[:4000]
+                or "connector run exceeded its configured deadline"
+            )
             failed_run.finished_at = datetime.now(UTC)
             db.commit()
-        raise ConnectorRunError(str(exc), run_id=run.id) from exc
+        raise ConnectorRunError(
+            str(exc)[:4000] or "connector run exceeded its configured deadline",
+            run_id=run.id,
+        ) from exc

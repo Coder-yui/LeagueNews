@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,8 +14,11 @@ from app.models.collection_schedule import SourceCollectionSchedule
 from app.models.connector_run import ConnectorRun
 from app.models.source import Source
 from app.schemas.collection_schedule import CollectionScheduleUpdate
-from app.services.connector_runner import run_connector
+from app.services.connector_runner import ConnectorRunError, run_connector
 from app.services.notifications import enqueue_collection_failure
+
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_source(source: Source, *, require_active: bool) -> None:
@@ -210,27 +214,45 @@ async def execute_claimed_schedule(
     heartbeat = asyncio.create_task(
         _heartbeat_schedule(schedule_id, lease_token, lease_lost)
     )
+    previous_run = _latest_connector_run(db, source_id)
+    previous_run_id = previous_run.id if previous_run is not None else None
     succeeded = False
     error_message = None
     failure: BaseException | None = None
+    run: ConnectorRun | None = None
     try:
-        run = await run_connector(
-            db,
-            connector_type=connector_type,
-            source_id=source_id,
-            limit=fetch_limit,
-            since=since,
-            options=options,
-            cursor=cursor,
-        )
+        async with asyncio.timeout(settings.collection_run_timeout_seconds):
+            run = await run_connector(
+                db,
+                connector_type=connector_type,
+                source_id=source_id,
+                limit=fetch_limit,
+                since=since,
+                options=options,
+                cursor=cursor,
+            )
         succeeded = True
+    except TimeoutError as exc:
+        failure = exc
+        error_message = (
+            "connector run exceeded deadline of "
+            f"{settings.collection_run_timeout_seconds} seconds"
+        )
+        run = _latest_connector_run(db, source_id)
     except Exception as exc:
         failure = exc
         error_message = str(exc)[:4000]
-        run = _latest_connector_run(db, source_id)
+        run = (
+            db.get(ConnectorRun, exc.run_id)
+            if isinstance(exc, ConnectorRunError) and exc.run_id is not None
+            else _latest_connector_run(db, source_id)
+        )
     finally:
         heartbeat.cancel()
         await asyncio.gather(heartbeat, return_exceptions=True)
+
+    if not succeeded and run is not None and run.id == previous_run_id:
+        run = None
 
     now = datetime.now(UTC)
     if lease_lost.is_set():
@@ -250,6 +272,10 @@ async def execute_claimed_schedule(
     if schedule is None:
         db.rollback()
         return
+    if not succeeded and run is not None and run.status == "running":
+        run.status = "failed"
+        run.error_message = error_message or "collection failed"
+        run.finished_at = now
     schedule.last_connector_run_id = run.id if run is not None else None
     schedule.last_finished_at = now
     schedule.last_status = "succeeded" if succeeded else "failed"
@@ -331,6 +357,11 @@ async def process_next_schedule() -> bool:
 
 async def scheduler_loop() -> None:
     while True:
-        processed = await process_next_schedule()
+        try:
+            processed = await process_next_schedule()
+        except Exception:
+            logger.exception("collection scheduler iteration failed")
+            await asyncio.sleep(settings.collection_scheduler_poll_seconds)
+            continue
         if not processed:
             await asyncio.sleep(settings.collection_scheduler_poll_seconds)

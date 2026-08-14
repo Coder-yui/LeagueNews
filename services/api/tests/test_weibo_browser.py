@@ -1,9 +1,15 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from app.services.weibo_browser import WeiboBrowserError, _load_cookie_file
+from app.services.weibo_browser import (
+    WEIBO_FETCH_TIMEOUT_MS,
+    WeiboBrowserError,
+    WeiboBrowserSession,
+    _load_cookie_file,
+)
 
 
 def test_load_cookie_file_accepts_playwright_cookie_export(tmp_path: Path) -> None:
@@ -28,3 +34,22 @@ def test_load_cookie_file_rejects_non_cookie_payload(tmp_path: Path) -> None:
 
     with pytest.raises(WeiboBrowserError, match="must contain a list"):
         _load_cookie_file(cookie_file)
+
+
+def test_weibo_fetch_uses_abort_controller_deadline() -> None:
+    captured: dict[str, object] = {}
+
+    class FakePage:
+        url = "https://weibo.com/"
+
+        def evaluate(self, script: str, url: str, timeout_ms: int) -> dict[str, object]:
+            captured.update(script=script, url=url, timeout_ms=timeout_ms)
+            return {"status": 200, "text": "{}"}
+
+    session = object.__new__(WeiboBrowserSession)
+    session._context = SimpleNamespace(pages=[FakePage()])
+
+    assert session._get_json("https://weibo.com/ajax/test") == {}
+    assert "AbortController" in captured["script"]
+    assert "controller.abort()" in captured["script"]
+    assert captured["timeout_ms"] == WEIBO_FETCH_TIMEOUT_MS

@@ -67,6 +67,7 @@ class PipelineJobRead(BaseModel):
     processing_run_id: int | None
     last_checkpoint_id: int | None
     attempts: int
+    next_attempt_at: datetime | None
     error_message: str | None
     created_at: datetime
     started_at: datetime | None

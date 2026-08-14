@@ -43,10 +43,12 @@ class Settings(BaseSettings):
     pipeline_worker_poll_seconds: float = 2.0
     pipeline_worker_lease_seconds: int = 300
     pipeline_worker_heartbeat_seconds: int = 30
+    pipeline_worker_max_attempts: int = 4
     rumor_expiry_days: int = 14
     collection_scheduler_poll_seconds: float = 5.0
     collection_scheduler_lease_minutes: int = 30
     collection_scheduler_heartbeat_seconds: int = 60
+    collection_run_timeout_seconds: int = 300
     daily_report_automation_enabled: bool = True
     daily_report_generation_grace_minutes: int = 15
     daily_report_scheduler_poll_seconds: float = 30.0
@@ -76,6 +78,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "pipeline_worker_heartbeat_seconds must be greater than 0"
             )
+        if self.pipeline_worker_max_attempts <= 0:
+            raise ValueError("pipeline_worker_max_attempts must be greater than 0")
         if self.rumor_expiry_days <= 0:
             raise ValueError("rumor_expiry_days must be greater than 0")
         if self.event_metrics_refresh_seconds <= 0:
@@ -101,6 +105,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "collection_scheduler_heartbeat_seconds must be greater than 0"
             )
+        if self.collection_run_timeout_seconds <= 0:
+            raise ValueError("collection_run_timeout_seconds must be greater than 0")
         if self.collection_scheduler_heartbeat_seconds >= collection_lease_seconds:
             raise ValueError(
                 "collection_scheduler_heartbeat_seconds must be less than "

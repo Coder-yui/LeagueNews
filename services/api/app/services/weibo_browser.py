@@ -11,6 +11,9 @@ from playwright.sync_api import BrowserContext, Playwright, sync_playwright
 from app.core.config import settings
 
 
+WEIBO_FETCH_TIMEOUT_MS = 45_000
+
+
 class WeiboBrowserError(RuntimeError):
     """A persistent browser session could not be started or queried."""
 
@@ -69,13 +72,17 @@ class WeiboBrowserSession:
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        if self._context is not None:
-            await self._run(self._context.close)
+        try:
+            if self._context is not None:
+                await self._run(self._context.close)
+        finally:
             self._context = None
-        if self._playwright is not None:
-            await self._run(self._playwright.stop)
-            self._playwright = None
-        self._executor.shutdown(wait=True)
+            try:
+                if self._playwright is not None:
+                    await self._run(self._playwright.stop)
+            finally:
+                self._playwright = None
+                self._executor.shutdown(wait=True)
 
     async def open_weibo(self, url: str = "https://weibo.com/") -> None:
         await self._run(self._open_weibo, url)
@@ -118,23 +125,31 @@ class WeiboBrowserSession:
         try:
             result = page.evaluate(
                 """
-                async (url) => {
-                  const response = await fetch(url, {
-                    method: "GET",
-                    credentials: "include",
-                    headers: {
-                      "Accept": "application/json, text/plain, */*",
-                      "X-Requested-With": "XMLHttpRequest"
-                    }
-                  });
-                  return {
-                    status: response.status,
-                    contentType: response.headers.get("content-type") || "",
-                    text: await response.text()
-                  };
+                async (url, timeoutMs) => {
+                  const controller = new AbortController();
+                  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+                  try {
+                    const response = await fetch(url, {
+                      method: "GET",
+                      credentials: "include",
+                      signal: controller.signal,
+                      headers: {
+                        "Accept": "application/json, text/plain, */*",
+                        "X-Requested-With": "XMLHttpRequest"
+                      }
+                    });
+                    return {
+                      status: response.status,
+                      contentType: response.headers.get("content-type") || "",
+                      text: await response.text()
+                    };
+                  } finally {
+                    clearTimeout(timeout);
+                  }
                 }
                 """,
                 url,
+                WEIBO_FETCH_TIMEOUT_MS,
             )
         except Exception as exc:
             raise WeiboBrowserError(

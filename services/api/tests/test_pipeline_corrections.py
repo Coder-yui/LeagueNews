@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -703,6 +704,176 @@ async def test_heartbeat_notifies_execution_when_lease_token_is_lost(
     )
     await _heartbeat_job(1, "stale-token", lease_lost)
     assert lease_lost.is_set()
+
+
+@pytest.mark.anyio
+async def test_pipeline_job_retries_transient_failure_and_completes(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db)
+    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued")
+    db.add(job)
+    db.commit()
+    calls = 0
+
+    async def flaky_execute(*_args: object, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("temporary LLM timeout")
+
+    monkeypatch.setattr(automatic_pipeline, "execute_pipeline_job", flaky_execute)
+    monkeypatch.setattr(automatic_pipeline, "SessionLocal", lambda: nullcontext(db))
+
+    assert await automatic_pipeline.process_next_job() is True
+    db.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 1
+    assert job.next_attempt_at is not None
+    assert job.completed_at is None
+    assert job.next_attempt_at.replace(tzinfo=UTC) >= datetime.now(UTC) + timedelta(
+        seconds=29
+    )
+
+    job.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+    assert await automatic_pipeline.process_next_job() is True
+    db.refresh(job)
+    assert job.status == "completed"
+    assert job.attempts == 2
+    assert job.next_attempt_at is None
+    assert calls == 2
+
+
+@pytest.mark.anyio
+async def test_pipeline_job_failure_alert_is_sent_only_after_attempts_exhausted(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db)
+    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued")
+    db.add(job)
+    db.commit()
+    notifications: list[dict[str, object]] = []
+
+    async def always_fails(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("temporary upstream failure")
+
+    def record_failure(_db: Session, **kwargs: object) -> None:
+        notifications.append(kwargs)
+
+    monkeypatch.setattr(automatic_pipeline, "execute_pipeline_job", always_fails)
+    monkeypatch.setattr(automatic_pipeline, "SessionLocal", lambda: nullcontext(db))
+    monkeypatch.setattr(automatic_pipeline.settings, "pipeline_worker_max_attempts", 2)
+    monkeypatch.setattr(automatic_pipeline, "enqueue_pipeline_failure", record_failure)
+
+    assert await automatic_pipeline.process_next_job() is True
+    db.refresh(job)
+    assert job.status == "failed"
+    assert job.next_attempt_at is not None
+    assert notifications == []
+
+    job.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+    assert await automatic_pipeline.process_next_job() is True
+    db.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 2
+    assert job.next_attempt_at is None
+    assert job.completed_at is not None
+    assert len(notifications) == 1
+    assert _claim_next_job(db) is None
+
+
+@pytest.mark.anyio
+async def test_pipeline_retry_reuses_failed_processing_run_and_checkpoint(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db)
+    item.publication_status = "withdrawn"
+    run = ProcessingRun(
+        raw_item_id=item.raw_item_id,
+        workflow_type="item",
+        status="failed",
+        current_stage="translation",
+        execution_mode="automatic",
+        context={"relevance_decision": {"decision": "relevant"}},
+    )
+    db.add(run)
+    db.flush()
+    checkpoint = ProcessingCheckpoint(
+        raw_item_id=item.raw_item_id,
+        processing_run_id=run.id,
+        stage="relevance",
+        output_snapshot={"decision": "relevant"},
+        decision_source="automatic",
+    )
+    db.add(checkpoint)
+    db.flush()
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="failed",
+        current_stage="translation",
+        processing_run_id=run.id,
+        last_checkpoint_id=checkpoint.id,
+        attempts=1,
+        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    db.add(job)
+    db.commit()
+    resumed: dict[str, int] = {}
+
+    async def fake_resume(_db: Session, current_run: ProcessingRun, **_kwargs: object):
+        resumed["run_id"] = current_run.id
+        current_run.status = "completed"
+        current_run.outcome = "irrelevant"
+        return current_run
+
+    monkeypatch.setattr(automatic_pipeline, "resume_item_processing", fake_resume)
+
+    claimed = _claim_next_job(db)
+    assert claimed is not None
+    await execute_pipeline_job(db, claimed)
+
+    assert resumed == {"run_id": run.id}
+    persisted_run = db.scalar(
+        select(ProcessingRun).where(ProcessingRun.raw_item_id == item.raw_item_id)
+    )
+    assert persisted_run is not None
+    assert persisted_run.id == run.id
+    assert len(list(db.scalars(select(ProcessingRun)))) == 1
+
+
+@pytest.mark.anyio
+async def test_worker_loop_survives_maintenance_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopLoop(Exception):
+        pass
+
+    processed = 0
+
+    def fail_refresh(_db: Session) -> None:
+        raise RuntimeError("metrics database hiccup")
+
+    async def fake_process_next_job() -> bool:
+        nonlocal processed
+        processed += 1
+        return False
+
+    async def stop_sleep(_seconds: float) -> None:
+        raise StopLoop
+
+    monkeypatch.setattr(automatic_pipeline, "refresh_stale_event_metrics", fail_refresh)
+    monkeypatch.setattr(automatic_pipeline, "process_next_job", fake_process_next_job)
+    monkeypatch.setattr(automatic_pipeline.asyncio, "sleep", stop_sleep)
+    monkeypatch.setattr(automatic_pipeline.settings, "event_aggregation_enabled", True)
+
+    with pytest.raises(StopLoop):
+        await automatic_pipeline.worker_loop()
+    assert processed == 1
 
 
 @pytest.mark.anyio

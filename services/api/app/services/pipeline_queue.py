@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,13 @@ def enqueue_pipeline_job(
     existing = db.scalar(
         select(PipelineJob).where(
             PipelineJob.raw_item_id == raw_item_id,
-            PipelineJob.status.in_(["queued", "running"]),
+            or_(
+                PipelineJob.status.in_(["queued", "running"]),
+                and_(
+                    PipelineJob.status == "failed",
+                    PipelineJob.next_attempt_at.is_not(None),
+                ),
+            ),
         )
     )
     if existing is not None:
@@ -38,6 +44,12 @@ def enqueue_pipeline_job(
         return db.scalar(
             select(PipelineJob).where(
                 PipelineJob.raw_item_id == raw_item_id,
-                PipelineJob.status.in_(["queued", "running"]),
+                or_(
+                    PipelineJob.status.in_(["queued", "running"]),
+                    and_(
+                        PipelineJob.status == "failed",
+                        PipelineJob.next_attempt_at.is_not(None),
+                    ),
+                ),
             )
         )

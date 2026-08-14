@@ -169,7 +169,13 @@ class PipelineJob(Base):
             "uq_pipeline_jobs_active_raw_item",
             "raw_item_id",
             unique=True,
-            postgresql_where=text("status IN ('queued', 'running')"),
-            sqlite_where=text("status IN ('queued', 'running')"),
+            postgresql_where=text(
+                "status IN ('queued', 'running') OR "
+                "(status = 'failed' AND next_attempt_at IS NOT NULL)"
+            ),
+            sqlite_where=text(
+                "status IN ('queued', 'running') OR "
+                "(status = 'failed' AND next_attempt_at IS NOT NULL)"
+            ),
         ),
     )

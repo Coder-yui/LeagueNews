@@ -42,8 +42,9 @@ def test_weibo_fetch_uses_abort_controller_deadline() -> None:
     class FakePage:
         url = "https://weibo.com/"
 
-        def evaluate(self, script: str, url: str, timeout_ms: int) -> dict[str, object]:
-            captured.update(script=script, url=url, timeout_ms=timeout_ms)
+        def evaluate(self, script: str, arg: object) -> dict[str, object]:
+            assert isinstance(arg, dict)
+            captured.update(script=script, arg=arg)
             return {"status": 200, "text": "{}"}
 
     session = object.__new__(WeiboBrowserSession)
@@ -52,4 +53,7 @@ def test_weibo_fetch_uses_abort_controller_deadline() -> None:
     assert session._get_json("https://weibo.com/ajax/test") == {}
     assert "AbortController" in captured["script"]
     assert "controller.abort()" in captured["script"]
-    assert captured["timeout_ms"] == WEIBO_FETCH_TIMEOUT_MS
+    assert captured["arg"] == {
+        "url": "https://weibo.com/ajax/test",
+        "timeoutMs": WEIBO_FETCH_TIMEOUT_MS,
+    }

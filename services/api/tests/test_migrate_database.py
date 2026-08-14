@@ -72,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name == "001_initial_schema.sql"
-    assert files[-1].name == "071_add_pipeline_retry_schedule.sql"
+    assert files[-1].name == "072_include_retry_pending_pipeline_jobs.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -197,3 +197,11 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     assert "ADD COLUMN next_attempt_at timestamptz" in pipeline_retry
     assert "ix_pipeline_jobs_next_attempt_at" in pipeline_retry
     assert "'071_add_pipeline_retry_schedule'" in pipeline_retry
+
+    active_pipeline_jobs = (
+        MIGRATIONS / "072_include_retry_pending_pipeline_jobs.sql"
+    ).read_text()
+    assert "DROP INDEX IF EXISTS uq_pipeline_jobs_active_raw_item" in active_pipeline_jobs
+    assert "status IN ('queued', 'running')" in active_pipeline_jobs
+    assert "status = 'failed' AND next_attempt_at IS NOT NULL" in active_pipeline_jobs
+    assert "'072_include_retry_pending_pipeline_jobs'" in active_pipeline_jobs

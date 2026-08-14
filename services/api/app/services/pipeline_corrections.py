@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.normalized_item import NormalizedItem
@@ -119,13 +119,24 @@ def _supersede_active_work(db: Session, *, raw_item_id: int) -> None:
     for job in db.scalars(
         select(PipelineJob).where(
             PipelineJob.raw_item_id == raw_item_id,
-            PipelineJob.status.in_(["queued", "running"]),
+            or_(
+                PipelineJob.status.in_(["queued", "running"]),
+                and_(
+                    PipelineJob.status == "failed",
+                    PipelineJob.next_attempt_at.is_not(None),
+                ),
+            ),
             PipelineJob.current_stage == "event_aggregation",
         )
     ):
         job.status = "cancelled"
         job.error_message = "superseded by message correction"
         job.completed_at = now
+        job.next_attempt_at = None
+        job.worker_id = None
+        job.lease_token = None
+        job.lease_expires_at = None
+        job.heartbeat_at = None
     for run in db.scalars(
         select(ProcessingRun).where(
             ProcessingRun.raw_item_id == raw_item_id,
@@ -244,6 +255,8 @@ async def recover_failed_job(
         raise LookupError("pipeline job not found")
     if job.status != "failed":
         raise ValueError(f"pipeline job cannot recover from status={job.status}")
+    if job.next_attempt_at is not None:
+        raise ValueError("pipeline job is already scheduled for automatic retry")
     raw_item = db.get(RawItem, job.raw_item_id)
     if raw_item is None:
         raise ValueError("raw item no longer exists")
@@ -257,7 +270,13 @@ async def recover_failed_job(
             select(PipelineJob).where(
                 PipelineJob.raw_item_id == job.raw_item_id,
                 PipelineJob.id != job.id,
-                PipelineJob.status.in_(["queued", "running"]),
+                or_(
+                    PipelineJob.status.in_(["queued", "running"]),
+                    and_(
+                        PipelineJob.status == "failed",
+                        PipelineJob.next_attempt_at.is_not(None),
+                    ),
+                ),
             )
         ) is not None:
             job.status = "cancelled"

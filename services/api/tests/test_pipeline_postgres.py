@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, delete, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.pipeline import PipelineJob
@@ -21,6 +22,55 @@ from app.models.connector_run import ConnectorRun
 from app.workflows.reviewed_pipeline import start_item_processing
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.mark.skipif(
+    not os.getenv("PIPELINE_TEST_DATABASE_URL"),
+    reason="PIPELINE_TEST_DATABASE_URL is not configured",
+)
+def test_active_pipeline_index_rejects_retry_pending_and_queued_jobs() -> None:
+    engine = create_engine(os.environ["PIPELINE_TEST_DATABASE_URL"], pool_pre_ping=True)
+    suffix = uuid4().hex
+    source_id = raw_item_id = None
+    try:
+        with Session(engine) as db:
+            source = Source(
+                name=f"pipeline-active-index-{suffix}",
+                connector_type="manual",
+            )
+            db.add(source)
+            db.flush()
+            source_id = source.id
+            raw = RawItem(
+                source_id=source.id,
+                external_id=suffix,
+                content_blocks=[{"type": "paragraph", "text": "test"}],
+            )
+            db.add(raw)
+            db.flush()
+            raw_item_id = raw.id
+            db.add(
+                PipelineJob(
+                    raw_item_id=raw.id,
+                    status="failed",
+                    next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+            )
+            db.commit()
+
+        with Session(engine) as db:
+            db.add(PipelineJob(raw_item_id=raw_item_id, status="queued"))
+            with pytest.raises(IntegrityError):
+                db.commit()
+    finally:
+        with Session(engine) as db:
+            if raw_item_id is not None:
+                db.execute(delete(PipelineJob).where(PipelineJob.raw_item_id == raw_item_id))
+                db.execute(delete(RawItem).where(RawItem.id == raw_item_id))
+            if source_id is not None:
+                db.execute(delete(Source).where(Source.id == source_id))
+            db.commit()
+        engine.dispose()
 
 
 @pytest.mark.skipif(

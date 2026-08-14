@@ -400,8 +400,11 @@ async def test_correction_cancels_old_event_job_and_new_publish_queues_fresh_job
     item = _published_item(db, suffix=" event job supersession")
     old_job = PipelineJob(
         raw_item_id=item.raw_item_id,
-        status="running",
+        status="failed",
         current_stage="event_aggregation",
+        next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
+        error_message="event downstream unavailable",
+        completed_at=datetime.now(UTC),
     )
     db.add(old_job)
     db.commit()
@@ -421,6 +424,11 @@ async def test_correction_cancels_old_event_job_and_new_publish_queues_fresh_job
     )
     assert old_job.status == "cancelled"
     assert old_job.error_message == "superseded by message correction"
+    assert old_job.next_attempt_at is None
+    assert old_job.worker_id is None
+    assert old_job.lease_token is None
+    assert old_job.lease_expires_at is None
+    assert old_job.heartbeat_at is None
 
     correction, review = _final_manual_review(db, item, correction=correction)
     await approve_review(db, review, note="确认修正")
@@ -517,6 +525,37 @@ async def test_failed_event_job_recovery_requeues_without_message_correction(
     assert event_run is not None
     assert event_run.status == "completed"
     assert item.publication_status == "published"
+
+
+@pytest.mark.anyio
+async def test_manual_recover_rejects_job_already_scheduled_for_retry(db: Session) -> None:
+    item = _published_item(db, suffix=" manual retry conflict")
+    next_attempt_at = datetime.now(UTC) + timedelta(minutes=5)
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="failed",
+        current_stage="event_aggregation",
+        next_attempt_at=next_attempt_at,
+        error_message="temporary downstream failure",
+    )
+    db.add(job)
+    db.commit()
+
+    with pytest.raises(ValueError, match="already scheduled for automatic retry"):
+        await recover_failed_job(
+            db,
+            job_id=job.id,
+            payload=PipelineCorrectionCreate(
+                restart_from_stage="importance",
+                resume_mode="manual",
+                reason="人工重试",
+            ),
+        )
+
+    db.refresh(job)
+    assert job.status == "failed"
+    assert job.next_attempt_at.replace(tzinfo=UTC) == next_attempt_at
+    assert db.scalar(select(PipelineCorrection)) is None
 
 
 @pytest.mark.anyio
@@ -654,6 +693,25 @@ def test_pipeline_job_enqueue_is_idempotent_per_active_raw_item(db: Session) -> 
     assert second is first
     assert len(list(db.scalars(select(PipelineJob)))) == 1
     assert db.scalar(select(PipelineCorrection)) is None
+
+
+def test_pipeline_job_enqueue_reuses_retry_pending_job(db: Session) -> None:
+    item = _published_item(db, suffix=" retry pending enqueue")
+    retry_job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="failed",
+        current_stage="relevance",
+        next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    db.add(retry_job)
+    db.commit()
+
+    enqueued = enqueue_pipeline_job(db, raw_item_id=item.raw_item_id)
+
+    assert enqueued is retry_job
+    assert enqueued.status == "failed"
+    assert enqueued.next_attempt_at is not None
+    assert len(list(db.scalars(select(PipelineJob)))) == 1
 
 
 def test_pipeline_job_stale_lease_is_reclaimed_with_provenance(db: Session) -> None:

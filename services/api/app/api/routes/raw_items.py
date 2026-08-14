@@ -148,14 +148,29 @@ def list_raw_items_admin_page(
         .outerjoin(latest_run, latest_run.id == latest_run_ids.c.latest_run_id)
         .where(latest_raw_item_condition())
     )
+    terminal_failed_job = and_(
+        latest_job.status == "failed",
+        latest_job.next_attempt_at.is_(None),
+    )
+    active_job = or_(
+        latest_job.status.in_(["queued", "running"]),
+        and_(
+            latest_job.status == "failed",
+            latest_job.next_attempt_at.is_not(None),
+        ),
+    )
+    active_job = func.coalesce(active_job, False)
     failed = or_(
-        func.coalesce(latest_job.status == "failed", False),
-        func.coalesce(latest_run.status == "failed", False),
+        func.coalesce(terminal_failed_job, False),
+        and_(
+            not_(active_job),
+            func.coalesce(latest_run.status == "failed", False),
+        ),
     )
     processing = and_(
         not_(failed),
         or_(
-            func.coalesce(latest_job.status.in_(["queued", "running"]), False),
+            active_job,
             func.coalesce(latest_run.status.in_(["running", "awaiting_review"]), False),
         ),
     )

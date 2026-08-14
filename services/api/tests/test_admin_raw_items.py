@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -6,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
 from app.main import app
 from app.models.media_asset import MediaAsset
+from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
 
@@ -158,6 +161,48 @@ def test_raw_item_admin_queries_exclude_superseded_revisions() -> None:
     assert process_old.json()["detail"] == (
         "raw item has been superseded by a newer revision"
     )
+
+
+def test_raw_item_admin_treats_retry_pending_job_as_processing() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Retry status source", connector_type="manual")
+        raw = RawItem(
+            source=source,
+            native_title="Retry pending item",
+            content_blocks=[{"type": "paragraph", "text": "Retry pending"}],
+        )
+        db.add_all([source, raw])
+        db.flush()
+        db.add(
+            PipelineJob(
+                raw_item_id=raw.id,
+                status="failed",
+                next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        )
+        db.commit()
+
+    def override_get_db():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        response = TestClient(app).get(
+            "/api/v1/raw-items/admin-page?process_status=processing"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["current_pipeline_job_status"] == "failed"
 
 
 def test_raw_item_admin_page_reports_total_and_paginates_beyond_100() -> None:

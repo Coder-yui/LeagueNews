@@ -125,7 +125,7 @@ class WeiboBrowserSession:
         try:
             result = page.evaluate(
                 """
-                async (url, timeoutMs) => {
+                async ({url, timeoutMs}) => {
                   const controller = new AbortController();
                   const timeout = setTimeout(() => controller.abort(), timeoutMs);
                   try {
@@ -148,8 +148,10 @@ class WeiboBrowserSession:
                   }
                 }
                 """,
-                url,
-                WEIBO_FETCH_TIMEOUT_MS,
+                {
+                    "url": url,
+                    "timeoutMs": WEIBO_FETCH_TIMEOUT_MS,
+                },
             )
         except Exception as exc:
             raise WeiboBrowserError(

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.normalized_item import NormalizedItem
@@ -22,7 +22,13 @@ def supersede_previous_raw_revision(
     for job in db.scalars(
         select(PipelineJob).where(
             PipelineJob.raw_item_id == previous.id,
-            PipelineJob.status.in_(["queued", "running"]),
+            or_(
+                PipelineJob.status.in_(["queued", "running"]),
+                and_(
+                    PipelineJob.status == "failed",
+                    PipelineJob.next_attempt_at.is_not(None),
+                ),
+            ),
         )
     ):
         job.status = "cancelled"
@@ -31,6 +37,8 @@ def supersede_previous_raw_revision(
         job.worker_id = None
         job.lease_token = None
         job.lease_expires_at = None
+        job.heartbeat_at = None
+        job.next_attempt_at = None
 
     for run in db.scalars(
         select(ProcessingRun).where(

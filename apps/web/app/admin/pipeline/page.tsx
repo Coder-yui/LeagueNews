@@ -136,6 +136,25 @@ export default function PipelinePage() {
       setBusy(null);
     }
   };
+  const restartFromBeginning = async (item: RawAdminItem) => {
+    if (!window.confirm("将从相关性开始重新执行完整处理链路，并创建新的 ProcessingRun。确定继续吗？")) return;
+    setBusy(item.id);
+    setActionError((value) => ({ ...value, [item.id]: "" }));
+    try {
+      await adminApi(`/raw-items/${item.id}/process`, {
+        method: "POST",
+        body: "{}",
+      });
+      await load();
+    } catch (value) {
+      setActionError((current) => ({
+        ...current,
+        [item.id]: value instanceof Error ? value.message : "从头重跑失败",
+      }));
+    } finally {
+      setBusy(null);
+    }
+  };
   const resetPage = (setter: () => void) => {
     setter();
     setPage(1);
@@ -268,6 +287,7 @@ export default function PipelinePage() {
               <tbody>
                 {data.items.map((item) => {
                   const itemStatus = rowStatus(item);
+                  const canRestartFromBeginning = itemStatus === "failed" && !item.normalized_item_id;
                   const label =
                     itemStatus === "completed"
                       ? "查看"
@@ -324,19 +344,34 @@ export default function PipelinePage() {
                             <PipelineStageBar stages={inferStages(item)} />
                           </td>
                           <td>
-                            <button
-                              className={`admin-table-button ${itemStatus === "failed" ? "danger" : ""}`}
-                              type="button"
-                              disabled={
-                                busy === item.id || itemStatus === "processing"
-                              }
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void act(item);
-                              }}
-                            >
-                              {busy === item.id ? "提交中…" : label}
-                            </button>
+                            <div className="admin-row-actions">
+                              <button
+                                className={`admin-table-button ${itemStatus === "failed" ? "danger" : ""}`}
+                                type="button"
+                                disabled={
+                                  busy === item.id || itemStatus === "processing"
+                                }
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void act(item);
+                                }}
+                              >
+                                {busy === item.id ? "提交中…" : label}
+                              </button>
+                              {canRestartFromBeginning && (
+                                <button
+                                  className="admin-table-button danger"
+                                  type="button"
+                                  disabled={busy === item.id}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void restartFromBeginning(item);
+                                  }}
+                                >
+                                  从头重跑
+                                </button>
+                              )}
+                            </div>
                             {actionError[item.id] && (
                               <small className="admin-inline-error">
                                 {actionError[item.id]}

@@ -10,6 +10,7 @@ from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.repositories.events import current_event_mention_conditions
+from app.services.published_items import _is_public_static_media_path
 
 
 def _source_payload(item: NormalizedItem | None) -> dict[str, Any] | None:
@@ -29,7 +30,12 @@ def _best_media_url(item: NormalizedItem | None) -> str | None:
     if item is None:
         return None
     assets = sorted(item.raw_item.media_assets, key=lambda value: (value.block_index, value.id))
-    return next((asset.public_path for asset in assets if asset.public_path), None)
+    for asset in assets:
+        if asset.public_path:
+            return asset.public_path
+        if _is_public_static_media_path(asset.storage_path):
+            return asset.storage_path
+    return None
 
 
 def event_reference_items(

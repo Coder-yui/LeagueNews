@@ -45,7 +45,7 @@ def test_message_content_analysis_only_receives_first_stage_catalog() -> None:
             "entities": [{"name": "WBG", "type": "team", "canonical_name": "WBG"}],
             "products": ["lol_esports"],
             "content_form": "original",
-            "classification_version": "message-taxonomy-v3",
+            "classification_version": "message-taxonomy-v4",
         }
     )
     client, completions = _client_with_responses([response])

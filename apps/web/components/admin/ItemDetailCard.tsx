@@ -19,6 +19,11 @@ export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChan
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const stages = inferStages(item);
+  const canRestartFromBeginning = !item.normalized_item_id && (
+    run?.status === "failed" ||
+    item.processing_status === "failed" ||
+    item.current_pipeline_job_status === "failed"
+  );
   const importanceProposal = record(context.approved_importance_proposal);
   const importance = record(importanceProposal.importance_dimensions ?? context.importance_dimensions);
 
@@ -32,6 +37,19 @@ export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChan
     finally { setBusy(false); }
   };
 
+  const restartFromBeginning = async () => {
+    if (!window.confirm("将从相关性开始重新执行完整处理链路，并创建新的 ProcessingRun。确定继续吗？")) return;
+    setBusy(true); setError(null);
+    try {
+      await adminApi(`/raw-items/${item.id}/process`, {
+        method: "POST",
+        body: "{}",
+      });
+      onChanged?.();
+    } catch (value) { setError(value instanceof Error ? value.message : "从头重跑失败"); }
+    finally { setBusy(false); }
+  };
+
   return (
     <section className="admin-item-detail">
       <div className="admin-detail-intro"><div><span>原文摘要</span><p>{item.summary ?? item.content_blocks.find((block) => block.text)?.text ?? "暂无文本摘要"}</p></div><dl><div><dt>来源</dt><dd>{item.source_name} · {item.source_connector_type}</dd></div><div><dt>发布时间</dt><dd>{new Date(item.published_at ?? item.ingested_at).toLocaleString("zh-CN")}</dd></div><div><dt>处理 Run</dt><dd>{run ? `#${run.id} · ${run.status}` : "尚未启动"}</dd></div></dl></div>
@@ -40,7 +58,11 @@ export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChan
       </div>
       <div className="admin-detail-breakdowns"><ImportanceDimensions scoreValue={item.importance_score} dimensions={importance} /></div>
       {item.normalized_item_id && <div className="admin-membership-strip"><span>发布投影</span><Link href={`/admin/messages/${item.normalized_item_id}`}>消息 #{item.normalized_item_id}</Link></div>}
-      <div className="admin-inline-actions"><select aria-label="选择重跑阶段" value={stage} onChange={(event) => setStage(event.target.value as PipelineStageName)}>{PIPELINE_STAGES.map((name) => <option value={name} key={name}>{STAGE_LABELS[name]}</option>)}</select><button type="button" onClick={() => void rerun()} disabled={busy}>{busy ? "提交中…" : `重跑 ${STAGE_LABELS[stage]}`}</button><button type="button" onClick={() => setRawOpen((value) => !value)}>{rawOpen ? "隐藏原始 JSON" : "查看原始 JSON"}</button>{item.canonical_url && <a href={item.canonical_url} target="_blank" rel="noreferrer">查看原文</a>}</div>
+      <div className="admin-inline-actions">
+        {item.normalized_item_id && <><select aria-label="选择重跑阶段" value={stage} onChange={(event) => setStage(event.target.value as PipelineStageName)}>{PIPELINE_STAGES.map((name) => <option value={name} key={name}>{STAGE_LABELS[name]}</option>)}</select><button type="button" onClick={() => void rerun()} disabled={busy}>{busy ? "提交中…" : `重跑 ${STAGE_LABELS[stage]}`}</button></>}
+        {canRestartFromBeginning && <button type="button" className="danger" onClick={() => void restartFromBeginning()} disabled={busy}>{busy ? "提交中…" : "从头重跑"}</button>}
+        <button type="button" onClick={() => setRawOpen((value) => !value)}>{rawOpen ? "隐藏原始 JSON" : "查看原始 JSON"}</button>{item.canonical_url && <a href={item.canonical_url} target="_blank" rel="noreferrer">查看原文</a>}
+      </div>
       {error && <p className="admin-inline-error">{error}</p>}
       {rawOpen && <pre className="admin-raw-json">{JSON.stringify(item, null, 2)}</pre>}
     </section>

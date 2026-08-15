@@ -2,7 +2,7 @@
 
 > 状态：当前运行规则
 >
-> 存储版本：`message-taxonomy-v3`
+> 存储版本：`message-taxonomy-v4`
 >
 > 设计版本：Products v0.6 / Content Form v0.5 / Message Type v1.0 / Topics v0.2
 >
@@ -149,6 +149,7 @@
 | --- | --- | --- |
 | `esports_rumor_speculation` | 赛事传闻与推测 | 对选手转会、队伍变化、赛事安排或其他电竞事项的传言、推测和未确认说法。 |
 | `esports_community_discussion` | 赛事社区讨论 | 社区对选手的评价、赛事过程和结果的讨论、分析与观点表达。 |
+| `esports_community_promotion_interaction` | 赛事社区推广与互动 | 非官方账号围绕电竞赛事、直播、观赛、战队选手或赛事活动，以展示、宣传、引流、抽奖、福利、带话题参与或其他参与引导为主要目的的内容；主体不是未确认消息披露、赛事分析或观点讨论。 |
 | `unknown` | 类型未知 | 证据不足，或产品与信源确定后仍没有合适的消息类型。 |
 
 #### 英雄联盟宇宙 × 官方信源
@@ -232,6 +233,7 @@
 | `esports_promotion_interaction` | 赛事推广与互动 | `lol_esports` | 官方 | 赛事集锦、采访、赛事宣传、观赛引导和官方互动内容。 |
 | `esports_rumor_speculation` | 赛事传闻与推测 | `lol_esports` | 非官方 | 对选手转会、队伍变化、赛事安排或其他电竞事项的传言、推测和未确认说法。 |
 | `esports_community_discussion` | 赛事社区讨论 | `lol_esports` | 非官方 | 社区对选手的评价、赛事过程和结果的讨论、分析与观点表达。 |
+| `esports_community_promotion_interaction` | 赛事社区推广与互动 | `lol_esports` | 非官方 | 非官方账号围绕电竞赛事、直播、观赛、战队选手或赛事活动，以展示、宣传、引流、抽奖、福利、带话题参与或其他参与引导为主要目的的内容；主体不是未确认消息披露、赛事分析或观点讨论。 |
 | `lol_universe_announcement` | 英雄联盟宇宙公告 | `lol_universe` | 官方 | 官方发布的世界观设定、角色故事、动画影视、音乐项目、合作或上线安排等正式消息。 |
 | `lol_universe_promotion_interaction` | 英雄联盟宇宙推广与互动 | `lol_universe` | 官方 | 对世界观内容、动画影视、音乐、艺术作品或相关创作的官方宣传、展示和互动引导。 |
 | `lol_universe_leak` | 英雄联盟宇宙爆料 | `lol_universe` | 非官方 | 非官方渠道披露的未确认角色故事、世界观设定、动画影视、音乐或其他叙事项目内容。 |
@@ -253,7 +255,7 @@
 ### 共通约束
 
 - `game_patch_notes`、`game_official_preview`、`game_announcement`、`game_notice`、`game_promotion_interaction` 只能从游戏官方信源表中暴露。
-- `game_leak`、`game_community_notice`、`game_community_promotion_interaction`、`game_community_discussion`、`esports_rumor_speculation`、`esports_community_discussion` 只能从非官方信源表中暴露。
+- `game_leak`、`game_community_notice`、`game_community_promotion_interaction`、`game_community_discussion`、`esports_rumor_speculation`、`esports_community_discussion`、`esports_community_promotion_interaction` 只能从非官方信源表中暴露。
 - `esports_announcement` 和 `esports_promotion_interaction` 只用于 `lol_esports`；赛事相关内容不能因为提到某个英雄就改成普通游戏类型。
 - `game_official_preview` 与 `game_promotion_interaction` 的边界先看发布目的和信息密度：多项具体机制、数值、规则、玩法或开发说明才支持官方预览；短帖、视频、口号式展示、预热和参与引导属于推广互动。上线日期、测试服或“以正式服为准”只说明信息阶段，不能单独支持官方预览。
 - `game_announcement` 与 `game_promotion_interaction` 的边界先看主要传播目的：游戏公告以可独立核验的明确时间、范围、参与或获取方式、规则和安排等正式事实为主体，宣传措辞只是辅助；推广互动以展示、造势、唤起回忆或参与引导为主体。上线、现已上线、即将上线、回归等状态不能单独支持游戏公告；正式事实只是宣传背景、没有形成独立完整告知时，仍属于推广互动。

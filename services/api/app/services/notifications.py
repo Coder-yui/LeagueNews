@@ -143,7 +143,10 @@ def _featured_payload(item: NormalizedItem) -> dict[str, Any]:
 def enqueue_featured_message(db: Session, item: NormalizedItem) -> bool:
     if not settings.feishu_featured_push_enabled:
         return False
-    if item.publication_status != "published" or not is_featured_message(item.importance_score):
+    if item.publication_status != "published" or not is_featured_message(
+        item.importance_score,
+        content_form=item.content_form,
+    ):
         return False
     return enqueue_notification(
         db,

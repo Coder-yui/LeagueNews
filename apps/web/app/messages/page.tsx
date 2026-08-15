@@ -1,7 +1,11 @@
 import { Search } from "lucide-react";
 import Link from "next/link";
+import { BackToTop } from "@/components/back-to-top";
 import { MessageFeed } from "@/components/message-feed";
+import { PublishedDays } from "@/components/published-days";
 import { PublicPagination, PublicSortControls } from "@/components/public-list-controls";
+import { PublicPageMasthead } from "@/components/public-page-masthead";
+import { PublicSelect } from "@/components/public-select";
 import { PublicShell } from "@/components/public-shell";
 import { getPublishedDays, getPublishedItemsPage } from "@/lib/api";
 import {
@@ -46,16 +50,17 @@ export default async function MessagesPage({ searchParams }: { searchParams: Pro
 
   return (
     <PublicShell className="messages-page">
-      <section className="public-page-intro public-frame compact-intro">
-        <p className="ln-eyebrow"><i /> Reviewed Dispatches</p>
-        <div><h1>消息归档</h1><p>快速检索已公开消息；筛选条件保留在网址中，打开详情后可以原路返回。</p></div>
-      </section>
+      <PublicPageMasthead
+        eyebrow="Reviewed Dispatches"
+        title="消息归档"
+        description="快速检索已公开消息；筛选条件保留在网址中，打开详情后可以原路返回。"
+      />
 
       <section className="message-workspace public-frame">
         <form className="public-filter-panel" action="/messages" method="get">
           <label className="public-search-field"><span>搜索</span><div><Search size={15} /><input name="search" defaultValue={search} placeholder="标题、摘要或消息 ID" /></div></label>
-          <label><span>产品</span><select name="product" defaultValue={product ?? ""}><option value="">全部产品</option>{productOptions.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
-          <label><span>消息类型</span><select name="message_type" defaultValue={messageType ?? ""}><option value="">全部类型</option>{messagePage.message_type_options.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</select></label>
+          <PublicSelect label="产品" name="product" defaultValue={product ?? ""}><option value="">全部产品</option>{productOptions.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</PublicSelect>
+          <PublicSelect label="消息类型" name="message_type" defaultValue={messageType ?? ""}><option value="">全部类型</option>{messagePage.message_type_options.map((value) => <option value={value} key={value}>{publicLabel(value)}</option>)}</PublicSelect>
           <label><span>日期</span><input type="date" name="date" defaultValue={date} /></label>
           <label className="public-check-field"><input type="checkbox" name="featured" value="true" defaultChecked={featured} /><span>仅看精选</span></label>
           <input type="hidden" name="sort_by" value={sortBy} />
@@ -64,11 +69,15 @@ export default async function MessagesPage({ searchParams }: { searchParams: Pro
         </form>
 
         {publishedDays.days.length > 0 && (
-          <nav className="published-days" aria-label="日期归档">
-            <span>近期归档</span>
-            <Link className={!date ? "active" : ""} href={publicListHref("/messages", currentParams, { date: null, page: null })}>全部</Link>
-            {publishedDays.days.slice(0, 8).map((day) => <Link className={date === day.date ? "active" : ""} href={publicListHref("/messages", currentParams, { date: day.date, page: null })} key={day.date}><b>{day.date.slice(5)}</b><small>{day.count}</small></Link>)}
-          </nav>
+          <PublishedDays
+            allHref={publicListHref("/messages", currentParams, { date: null, page: null })}
+            days={publishedDays.days.map((day) => ({
+              count: day.count,
+              date: day.date,
+              href: publicListHref("/messages", currentParams, { date: day.date, page: null }),
+            }))}
+            selectedDate={date}
+          />
         )}
 
         <div className="public-list-head">
@@ -78,6 +87,7 @@ export default async function MessagesPage({ searchParams }: { searchParams: Pro
         <MessageFeed items={messagePage.items} startIndex={offset} returnTo={returnTo} returnLabel="返回消息列表" />
         <PublicPagination pathname="/messages" searchParams={currentParams} page={page} pageSize={PAGE_SIZE} total={messagePage.total} />
       </section>
+      <BackToTop />
     </PublicShell>
   );
 }

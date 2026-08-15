@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowUpRight, ExternalLink } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { BackToTop } from "@/components/back-to-top";
 import { PublicShell } from "@/components/public-shell";
 import { getEvent } from "@/lib/api";
 import { formatPublicTime, publicLabel } from "@/lib/public-labels";
@@ -29,7 +30,7 @@ export default async function EventPage({ params, searchParams }: { params: Prom
     <PublicShell className="event-detail-page">
       <article>
         <header className={`event-detail-hero ${event.best_media_url ? "has-image" : ""}`}>
-          {event.best_media_url && <div className="event-detail-image"><Image src={event.best_media_url} alt="" fill sizes="100vw" priority unoptimized /></div>}
+          {event.best_media_url && <div className="event-detail-image"><Image src={event.best_media_url} alt="" fill sizes="100vw" priority unoptimized referrerPolicy="no-referrer" /></div>}
           <div className="event-detail-overlay" />
           <div className="public-frame event-detail-hero-inner">
             <Link className="message-back" href={safeReturn}><ArrowLeft size={15} /> 返回事件列表</Link>
@@ -76,7 +77,7 @@ export default async function EventPage({ params, searchParams }: { params: Prom
               <article key={evidence.mention_id}>
                 <div className="ln-card-labels"><span>{publicLabel(evidence.relation)}</span><span>{publicLabel(evidence.source_role)}</span><span>{publicLabel(evidence.materiality)}</span></div>
                 <h3>{evidence.source_name}</h3><p>{evidence.evidence_excerpt || "该消息为事件提供背景上下文。"}</p>
-                <div><Link href={detailMessageHref(event.id, evidence.message_id)}>消息 #{evidence.message_id}</Link>{evidence.source_url && <a href={evidence.source_url} target="_blank" rel="noreferrer">原始来源 <ExternalLink size={12} /></a>}</div>
+                <div><Link href={detailMessageHref(event.id, evidence.message_id)}>查看消息</Link>{evidence.source_url && <a href={evidence.source_url} target="_blank" rel="noreferrer">原始来源 <ExternalLink size={12} /></a>}</div>
               </article>
             ))}</div> : <p className="event-empty-copy">尚无公开证据条目。</p>}
           </section>
@@ -87,6 +88,7 @@ export default async function EventPage({ params, searchParams }: { params: Prom
           </section>}
         </div>
       </article>
+      <BackToTop />
     </PublicShell>
   );
 }

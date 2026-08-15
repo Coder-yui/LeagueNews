@@ -25,6 +25,8 @@ from app.schemas.normalized_item import PublishedItemRead
 def test_featured_message_threshold_includes_boundary() -> None:
     assert is_featured_message(0.75)
     assert not is_featured_message(0.7499)
+    assert not is_featured_message(1.0, content_form="repost")
+    assert is_featured_message(0.75, content_form="quote")
 
 
 def test_published_payload_combines_reviewed_item_source_and_bilingual_ocr() -> None:
@@ -315,7 +317,8 @@ def test_published_page_featured_filter_preserves_normal_list() -> None:
         db.add(source)
         db.flush()
 
-        for index, score in enumerate((0.75, 0.7499, 0.9), start=1):
+        cases = ((0.75, "original"), (0.7499, "original"), (0.9, "repost"))
+        for index, (score, content_form) in enumerate(cases, start=1):
             raw = RawItem(
                 source_id=source.id,
                 external_id=f"featured-{index}",
@@ -335,6 +338,7 @@ def test_published_page_featured_filter_preserves_normal_list() -> None:
                     message_type="unknown",
                     topics=["unknown"],
                     classification_version="message-taxonomy-v3",
+                    content_form=content_form,
                     importance_score=score,
                     target_language="zh-CN",
                     translated_title=raw.native_title,
@@ -354,8 +358,8 @@ def test_published_page_featured_filter_preserves_normal_list() -> None:
         )
 
         assert all_items["total"] == 3
-        assert featured_items["total"] == 2
-        assert {item["importance_score"] for item in featured_items["items"]} == {0.75, 0.9}
+        assert featured_items["total"] == 1
+        assert featured_items["items"][0]["importance_score"] == 0.75
 
 
 def test_published_page_filters_each_product_membership_and_supports_requested_sorts() -> None:

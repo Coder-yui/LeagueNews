@@ -65,17 +65,22 @@ class XTwitterConnector(BaseConnector[object]):
             user = await api.user_by_login(username)
             if user is None:
                 raise XConnectorCollectionError(f"X user was not found: @{username}")
+            target_user_id = int(user.id) if user.id is not None else None
+            if target_user_id is None:
+                raise XConnectorCollectionError(
+                    f"X user @{username} returned no usable id"
+                )
             if request.historical:
                 return await self._fetch_historical_batch(
                     api,
-                    user_id=user.id,
+                    target_user_id=target_user_id,
                     since=since,
                     cursor=request.cursor,
                     limit=limit,
                 )
             return await self._fetch_recent_batch(
                 api,
-                user_id=user.id,
+                target_user_id=target_user_id,
                 since=since,
                 cursor=request.cursor,
                 limit=limit,
@@ -95,7 +100,7 @@ class XTwitterConnector(BaseConnector[object]):
         self,
         api: object,
         *,
-        user_id: int,
+        target_user_id: int,
         cursor: str | None,
         limit: int,
     ) -> tuple[list[object], str | None]:
@@ -104,7 +109,7 @@ class XTwitterConnector(BaseConnector[object]):
         variables: dict[str, object] = {"count": limit}
         if cursor:
             variables["cursor"] = cursor
-        responses = api.user_tweets_raw(user_id, limit=1, kv=variables)
+        responses = api.user_tweets_raw(target_user_id, limit=1, kv=variables)
         try:
             response = await anext(responses)
         except StopAsyncIteration:
@@ -120,7 +125,7 @@ class XTwitterConnector(BaseConnector[object]):
         self,
         api: object,
         *,
-        user_id: int,
+        target_user_id: int,
         since: datetime | None,
         cursor: dict[str, Any] | None,
         limit: int,
@@ -128,13 +133,15 @@ class XTwitterConnector(BaseConnector[object]):
         page_cursor = _pagination_cursor(cursor)
         records, next_page_cursor = await self._fetch_tweet_page(
             api,
-            user_id=user_id,
+            target_user_id=target_user_id,
             cursor=page_cursor,
             limit=limit,
         )
         reached_boundary = False
         in_range_records: list[object] = []
         for tweet in records:
+            if not _is_authored_or_retweet(target_user_id, tweet):
+                continue
             published_at = _attr(tweet, "date")
             if isinstance(since, datetime) and isinstance(published_at, datetime):
                 if published_at < since:
@@ -154,7 +161,7 @@ class XTwitterConnector(BaseConnector[object]):
         self,
         api: object,
         *,
-        user_id: int,
+        target_user_id: int,
         since: datetime | None,
         cursor: dict[str, Any] | None,
         limit: int,
@@ -167,9 +174,11 @@ class XTwitterConnector(BaseConnector[object]):
         scanned = 0
         reached_boundary = False
         records: list[object] = []
-        tweets = api.user_tweets(user_id, limit=scan_limit)
+        tweets = api.user_tweets(target_user_id, limit=scan_limit)
         try:
             async for tweet in tweets:
+                if not _is_authored_or_retweet(target_user_id, tweet):
+                    continue
                 scanned += 1
                 tweet_id = clean_text(_attr(tweet, "id_str", "id"))
                 published_at = _attr(tweet, "date")
@@ -376,6 +385,40 @@ def _ordered_tweets(records: list[object]) -> list[object]:
         ),
         reverse=True,
     )
+
+
+def _tweet_author_user_id(tweet: object) -> int | None:
+    """Return the tweet's author user id as an int, or None when unavailable."""
+    user = _attr(tweet, "user")
+    # 注意：不能直接 _attr(user, "id", "id_str", "rest_id")，因为 dict 里 id 可能显式为 None
+    # （此时 name in value 为 True，_attr 返回 None 不会 fallback）。
+    for name in ("id", "id_str", "rest_id"):
+        raw = _attr(user, name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _is_authored_or_retweet(target_user_id: int, tweet: object) -> bool:
+    """Keep only tweets authored by the target account or retweets by them.
+
+    ``retweetedTweet`` being present is the canonical marker for a retweeted
+    envelope. Even if the envelope user id matches, we also accept a clear
+    retweet marker so future parser changes cannot cause retweets to be
+    dropped by accident.
+    """
+    author_id = _tweet_author_user_id(tweet)
+    if author_id is not None and author_id == target_user_id:
+        return True
+    if _attr(tweet, "retweetedTweet") is not None:
+        return True
+    # Unknown author → keep (conservative, avoid accidentally blanking a feed
+    # if twscrape ever renames the user id attribute).
+    return author_id is None
 
 
 def _attr(value: object, *names: str) -> object:

@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from app.connectors.base import ConnectorRequest, ConnectorSource
-from app.connectors.x_twitter import XConnectorConfigurationError, XTwitterConnector
+from app.connectors.x_twitter import (
+    XConnectorConfigurationError,
+    XTwitterConnector,
+    _is_authored_or_retweet,
+    _tweet_author_user_id,
+)
 from app.core.config import settings
 
 
@@ -228,11 +233,11 @@ def test_x_cursor_uses_provider_pagination_without_rescanning(
     async def fetch_page(
         _api: object,
         *,
-        user_id: int,
+        target_user_id: int,
         cursor: str | None,
         limit: int,
     ) -> tuple[list[object], str | None]:
-        assert user_id == 1
+        assert target_user_id == 1
         assert limit == 2
         requested_cursors.append(cursor)
         return (
@@ -328,3 +333,144 @@ def test_x_normal_collection_retains_pending_cursor_strategy(
     assert batch.truncated is True
     assert "pending_ids" in batch.next_cursor
     assert "x_pagination_cursor" not in batch.next_cursor
+
+
+# ——————————————————————————————————————————————————————————————————————————————
+# Author-attribution filter: keep only the target account's own tweets and
+# retweets, discard unrelated recommendations / mentions (串台).
+# ——————————————————————————————————————————————————————————————————————————————
+
+
+def _tweet_dict(*, author_id: object, retweeted: object = None, date: str = "2026-08-10T10:00:00+00:00") -> dict:
+    """Factory for a lightweight tweet-shaped dict compatible with _attr."""
+    user: dict | None
+    if author_id is None:
+        user = None
+    elif isinstance(author_id, dict):
+        user = author_id
+    else:
+        user = {"id": author_id, "id_str": str(author_id), "username": "u", "displayname": "U"}
+    tweet: dict = {
+        "id_str": "1",
+        "date": datetime.fromisoformat(date),
+        "user": user,
+        "rawContent": "hello",
+        "url": "https://x.com/u/status/1",
+    }
+    if retweeted is not None:
+        tweet["retweetedTweet"] = retweeted
+    return tweet
+
+
+def test_tweet_author_user_id_accepts_id_and_id_str() -> None:
+    assert _tweet_author_user_id(_tweet_dict(author_id=42)) == 42
+    assert _tweet_author_user_id(
+        _tweet_dict(author_id={"id": None, "id_str": "42", "username": "x", "displayname": "X"})
+    ) == 42
+    assert _tweet_author_user_id(
+        _tweet_dict(author_id={"rest_id": "99", "username": "x", "displayname": "X"})
+    ) == 99
+
+
+def test_tweet_author_user_id_returns_none_when_user_missing() -> None:
+    assert _tweet_author_user_id(_tweet_dict(author_id=None)) is None
+    assert _tweet_author_user_id(
+        _tweet_dict(author_id={"username": "no id", "displayname": "no id"})
+    ) is None
+
+
+def test_authorship_filter_keeps_own_tweets() -> None:
+    target = 100
+    own = _tweet_dict(author_id=target)
+    reply = _tweet_dict(author_id=target, date="2026-08-10T11:00:00+00:00")
+    # 回复帖作者也是目标账号 → 必须保留
+    reply["inReplyToTweetId"] = "9999999"
+
+    assert _is_authored_or_retweet(target, own) is True
+    assert _is_authored_or_retweet(target, reply) is True
+
+
+def test_authorship_filter_keeps_retweets() -> None:
+    target = 100
+    original_author = 200
+    # 转推的 envelope.user 通常是目标账号，这里显式模拟两种情况：
+    # 1) retweetedTweet 存在，作者 id 正确（常规）
+    rt_normal = _tweet_dict(author_id=target, retweeted={"id_str": "RT1"})
+    # 2) retweetedTweet 存在，但 envelope user id 被 parser 弄错了 —— 也应该保留（双保险）
+    rt_parser_weird = _tweet_dict(author_id=original_author, retweeted={"id_str": "RT2"})
+
+    assert _is_authored_or_retweet(target, rt_normal) is True
+    assert _is_authored_or_retweet(target, rt_parser_weird) is True
+
+
+def test_authorship_filter_drops_unrelated_recommendations() -> None:
+    target = 100
+    stranger = 9999
+    # 路人独立 tweet：没有 retweetedTweet 标记，作者不是目标 → 丢弃
+    unrelated = _tweet_dict(author_id=stranger)
+    # 路人 tweet 内容里 @ 了目标账号（mention 帖）→ 同样丢弃
+    mention = _tweet_dict(author_id=stranger, date="2026-08-10T12:00:00+00:00")
+    mention["rawContent"] = "@target you're wrong"
+
+    assert _is_authored_or_retweet(target, unrelated) is False
+    assert _is_authored_or_retweet(target, mention) is False
+
+
+def test_authorship_filter_preserves_tweets_when_user_field_is_missing() -> None:
+    """Conservative fallback: unknown authorship means keep (防误杀)."""
+    target = 100
+    broken = _tweet_dict(author_id=None)
+    assert _is_authored_or_retweet(target, broken) is True
+
+
+def test_recent_collection_filters_out_stranager_tweets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """混合列表里只保留本人发和转推，串台路人帖要被过滤掉（recent 路径）."""
+    cookie_file = tmp_path / "x-cookies.json"
+    cookie_file.write_text('{"auth_token":"a","ct0":"b"}', encoding="utf-8")
+    monkeypatch.setattr(settings, "x_cookie_file", str(cookie_file))
+
+    TARGET = 42
+    STRANGER = 9
+    stranger_post = _tweet_dict(author_id=STRANGER, date="2026-08-15T10:00:00+00:00")
+    stranger_post["rawContent"] = "recommended unrelated post"
+    own_post = _tweet_dict(author_id=TARGET, date="2026-08-15T09:00:00+00:00")
+    own_post["id_str"] = "2"
+    retweet_post = _tweet_dict(author_id=TARGET, retweeted={"id_str": "RT-1"}, date="2026-08-15T08:00:00+00:00")
+    retweet_post["id_str"] = "3"
+    mention_post = _tweet_dict(author_id=STRANGER, date="2026-08-15T07:00:00+00:00")
+    mention_post["id_str"] = "4"
+    mention_post["rawContent"] = "@target hi"
+    stranger_related_only = _tweet_dict(author_id=777, date="2026-08-15T06:00:00+00:00")
+    stranger_related_only["id_str"] = "5"
+    stranger_related_only["rawContent"] = "related by algorithm only"
+
+    class Pool:
+        async def delete_accounts(self, *_: object) -> None:
+            return None
+
+        async def add_account_cookies(self, *_: object) -> None:
+            return None
+
+    class API:
+        pool = Pool()
+
+        async def user_by_login(self, _username: str):
+            return type("User", (), {"id": TARGET})()
+
+        async def user_tweets(self, _uid: int, *, limit: int):
+            for t in [stranger_post, own_post, retweet_post, mention_post, stranger_related_only]:
+                yield t
+
+    connector = XTwitterConnector(api_factory=lambda *_args, **_kwargs: API())
+    batch = asyncio.run(
+        connector.collect(
+            ConnectorRequest(source=x_source(), limit=10, since=None, options={}, cursor={})
+        )
+    )
+
+    external_ids = [item.external_id for item in batch]
+    # 只有 own_post / retweet_post 应该留下来（3 条路人 + 1 条 mention + 1 条算法推荐 都去掉）
+    assert external_ids == ["2", "3"]
+    assert len(external_ids) == 2

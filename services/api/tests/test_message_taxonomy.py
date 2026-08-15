@@ -41,9 +41,9 @@ def test_catalog_contract_and_source_specific_candidates() -> None:
     assert [value["code"] for value in content_catalog["content_forms"]] == [
         rule.code for rule in CONTENT_FORM_RULES
     ]
-    assert len(message_codes) == 26
+    assert len(message_codes) == 27
     assert set(message_codes) == MESSAGE_TYPES
-    assert len(MESSAGE_TYPE_ORDER) == len(set(MESSAGE_TYPE_ORDER)) == 26
+    assert len(MESSAGE_TYPE_ORDER) == len(set(MESSAGE_TYPE_ORDER)) == 27
     assert len(topic_codes) == len(set(topic_codes)) == 26
     assert "生成非空摘要" in next(
         value["definition"]
@@ -91,6 +91,10 @@ def test_catalog_contract_and_source_specific_candidates() -> None:
     assert "带货" in _message_definition(
         unofficial, "game_community_promotion_interaction"
     )
+    assert "抽奖" in _message_definition(
+        classification_catalog(products=["lol_esports"], source_kind="unofficial"),
+        "esports_community_promotion_interaction",
+    )
     assert "esports_matches" not in {value["code"] for value in official["topics"]}
     assert "champions" in {value["code"] for value in official["topics"]}
 
@@ -106,6 +110,16 @@ def test_content_form_validation_boundaries() -> None:
             content_form="media_only",
             message_type="unknown",
             topics=["unknown"],
+            source_kind="unofficial",
+        )
+        is None
+    )
+    assert (
+        classification_error(
+            products=["lol_esports"],
+            content_form="original",
+            message_type="esports_community_promotion_interaction",
+            topics=["esports_fandom_live"],
             source_kind="unofficial",
         )
         is None
@@ -284,6 +298,11 @@ def test_importance_policy_is_classification_native() -> None:
         message_type="esports_promotion_interaction",
         topics=["esports_matches", "esports_broadcast"],
         content="每日精彩集锦",
+    ) == "esports_promotion"
+    assert derive_importance_profile(
+        message_type="esports_community_promotion_interaction",
+        topics=["esports_fandom_live"],
+        content="赛事福利活动",
     ) == "esports_promotion"
     assert derive_importance_profile(
         message_type="game_community_notice",

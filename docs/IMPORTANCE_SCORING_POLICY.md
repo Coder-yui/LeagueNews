@@ -116,9 +116,9 @@
 | `esports_promotion_interaction` | `esports_promotion` |
 | `esports_rumor_speculation` | `esports_rumor` |
 | `esports_community_discussion` | 赛事分析 -> `esports_analysis`；其他 -> `esports_discussion` |
+| `esports_community_promotion_interaction` | `esports_promotion` |
 
-赛事推广不会因为包含 `esports_matches`、`esports_schedule` 或 `esports_rosters` 而使用正式赛果、
-赛程或转会档案。
+赛事推广（包括非官方社区推广）不会因为包含 `esports_matches`、`esports_schedule` 或 `esports_rosters` 而使用正式赛果、赛程或转会档案。
 
 ### 4.3 英雄联盟宇宙、其他产品与 Riot 生态
 

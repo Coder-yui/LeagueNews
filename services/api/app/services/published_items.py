@@ -90,6 +90,8 @@ def published_item_conditions(
         conditions.append(NormalizedItem.importance_score >= min_importance)
     elif featured:
         conditions.append(NormalizedItem.importance_score >= FEATURED_MESSAGE_MIN_IMPORTANCE)
+    if featured:
+        conditions.append(NormalizedItem.content_form != "repost")
     if search:
         search_value = search.strip()
         if search_value.isdigit():
@@ -244,9 +246,13 @@ def list_published_days(
 def published_item_payload(item: NormalizedItem) -> dict[str, Any]:
     raw_item = item.raw_item
     source = raw_item.source
-    public_media_by_index = {
-        asset.block_index: asset.public_path for asset in raw_item.media_assets if asset.public_path
-    }
+    public_media_by_index: dict[int, str] = {}
+    storage_media_by_index: dict[int, str] = {}
+    for asset in raw_item.media_assets:
+        if asset.public_path:
+            public_media_by_index[asset.block_index] = asset.public_path
+        elif _is_public_static_media_path(asset.storage_path):
+            storage_media_by_index[asset.block_index] = asset.storage_path
     media_extractions = []
     for link in sorted(
         item.media_links,
@@ -262,9 +268,12 @@ def published_item_payload(item: NormalizedItem) -> dict[str, Any]:
                 "extraction_id": extraction.id,
                 "media_asset_id": asset.id,
                 "block_index": asset.block_index,
-                # Only the published path is part of the public projection. The
-                # local storage_path is intentionally never returned here.
-                "storage_path": asset.public_path,
+                "storage_path": asset.public_path
+                or (
+                    asset.storage_path
+                    if _is_public_static_media_path(asset.storage_path)
+                    else None
+                ),
                 "source_url": asset.source_url,
                 "mime_type": asset.mime_type,
                 "confidence": extraction.confidence,
@@ -297,12 +306,12 @@ def published_item_payload(item: NormalizedItem) -> dict[str, Any]:
         "published_at": raw_item.published_at,
         "original_title": raw_item.display_title,
         "original_content_blocks": public_content_blocks(
-            raw_item.content_blocks, public_media_by_index
+            raw_item.content_blocks, public_media_by_index, storage_media_by_index
         ),
         "source_language": item.source_language,
         "translated_title": item.translated_title,
         "translated_content_blocks": public_content_blocks(
-            item.translated_content_blocks, public_media_by_index
+            item.translated_content_blocks, public_media_by_index, storage_media_by_index
         ),
         "translation_status": item.translation_status,
         "media_extractions": media_extractions,
@@ -310,9 +319,30 @@ def published_item_payload(item: NormalizedItem) -> dict[str, Any]:
     }
 
 
+def _is_public_static_media_path(storage_path: str | None) -> bool:
+    """Return True if the storage_path is directly servable from the public
+    media directory (e.g. ``/media/x_twitter/...``) without going through
+    publication copy or an authenticated endpoint.
+    """
+    if not isinstance(storage_path, str) or not storage_path:
+        return False
+    if not storage_path.startswith("/media/"):
+        return False
+    # Published and namespace-rooted paths are publicly reachable
+    # (resolved_media_root lives inside Next.js's ``public`` directory).
+    # Anything under ``/media/private/`` or an internal API route is excluded.
+    normalized = storage_path.replace("\\", "/")
+    if "/private/" in normalized:
+        return False
+    if normalized.startswith("/api/"):
+        return False
+    return True
+
+
 def public_content_blocks(
     blocks: list[dict[str, Any]],
     public_media_by_index: dict[int, str],
+    storage_media_by_index: dict[int, str] | None = None,
 ) -> list[dict[str, Any]]:
     result = []
     for index, block in enumerate(blocks):
@@ -321,8 +351,14 @@ def public_content_blocks(
             public_path = public_media_by_index.get(index)
             if public_path:
                 copied["storage_path"] = public_path
+            elif storage_media_by_index and index in storage_media_by_index:
+                copied["storage_path"] = storage_media_by_index[index]
             else:
-                copied.pop("storage_path", None)
+                # Preserve a storage_path that already points at a public
+                # static location; only strip internal-only paths.
+                existing_path = copied.get("storage_path")
+                if not _is_public_static_media_path(existing_path):
+                    copied.pop("storage_path", None)
         else:
             # Non-image storage paths are internal implementation details and
             # are not useful to public consumers.

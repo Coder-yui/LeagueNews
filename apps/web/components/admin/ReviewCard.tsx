@@ -37,6 +37,7 @@ const messageTypes = [
   "esports_promotion_interaction",
   "esports_rumor_speculation",
   "esports_community_discussion",
+  "esports_community_promotion_interaction",
   "lol_universe_announcement",
   "lol_universe_promotion_interaction",
   "lol_universe_leak",

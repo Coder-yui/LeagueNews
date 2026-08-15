@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Final, Literal, get_args
 
 
-CLASSIFICATION_VERSION: Final = "message-taxonomy-v3"
+CLASSIFICATION_VERSION: Final = "message-taxonomy-v4"
 
 Product = Literal[
     "lol_pc",
@@ -29,6 +29,7 @@ MessageType = Literal[
     "esports_promotion_interaction",
     "esports_rumor_speculation",
     "esports_community_discussion",
+    "esports_community_promotion_interaction",
     "lol_universe_announcement",
     "lol_universe_promotion_interaction",
     "lol_universe_leak",
@@ -253,6 +254,13 @@ MESSAGE_TYPE_RULES: Final = (
         frozenset({"lol_esports"}),
         "unofficial",
         "社区对选手的评价、赛事过程和结果的讨论、分析与观点表达。",
+    ),
+    MessageTypeRule(
+        "esports_community_promotion_interaction",
+        "赛事社区推广与互动",
+        frozenset({"lol_esports"}),
+        "unofficial",
+        "非官方账号围绕电竞赛事、直播、观赛、战队选手或赛事活动，以展示、宣传、引流、抽奖、福利、带话题参与或其他参与引导为主要目的的内容；主体不是未确认消息披露、赛事分析或观点讨论。",
     ),
     MessageTypeRule(
         "lol_universe_announcement",

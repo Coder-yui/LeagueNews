@@ -47,7 +47,7 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 - `content_form`：单选；
 - `message_type`：单选，受产品与本轮分类信源三态约束；
 - `topics`：多选，受产品约束；
-- `classification_version`：当前为 `message-taxonomy-v3`。
+- `classification_version`：当前为 `message-taxonomy-v4`。
 
 `original` 和 `quote` 使用当前 Source 的官方性质；`repost` 只在结构化 URL 能与已配置 Source
 稳定匹配时使用上游官方性质，否则使用 `unknown` 并披露官方、非官方候选并集。采用的

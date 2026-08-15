@@ -1,10 +1,13 @@
 import { ArrowLeft, ArrowRight, CalendarDays, FileText } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
+import { BackToTop } from "@/components/back-to-top";
 import { firstMessageImage, MessageCard } from "@/components/message-feed";
+import { PublicPageMasthead } from "@/components/public-page-masthead";
 import { PublicShell } from "@/components/public-shell";
 import { SectionTitle } from "@/components/section-title";
 import { getDailyReport, getDailyReports } from "@/lib/api";
+import { resolveImageSrc } from "@/lib/image-src";
 import { publicLabel } from "@/lib/public-labels";
 import type { DailyReport, PublishedItem } from "@/lib/types";
 
@@ -43,19 +46,18 @@ export default async function DailyReportPage({ searchParams }: { searchParams: 
 
   return (
     <PublicShell className="daily-page">
-      <section className="daily-masthead">
-        <div className="public-frame">
-          <p className="ln-eyebrow"><i /> LeagueNews Daily</p>
-          <h1>每日纪要</h1>
-          <p>将一天里值得继续关注的公开消息，整理成更从容的阅读次序。</p>
-          <div className="daily-date-bar">
-            <Link href={`/daily?date=${adjacentDate(reportDate, -1)}`} aria-label="前一天"><ArrowLeft size={16} /></Link>
-            <form action="/daily" method="get"><CalendarDays size={15} /><input type="date" name="date" defaultValue={reportDate} /><button type="submit">查看</button></form>
-            <Link href={`/daily?date=${adjacentDate(reportDate, 1)}`} aria-label="后一天"><ArrowRight size={16} /></Link>
-            {reportDate !== latestDate && <Link className="daily-latest-link" href={`/daily?date=${latestDate}`}>返回最新日报</Link>}
-          </div>
+      <PublicPageMasthead
+        eyebrow="LeagueNews Daily"
+        title="每日纪要"
+        description="将一天里值得继续关注的公开消息，整理成更从容的阅读次序。"
+      >
+        <div className="daily-date-bar">
+          <Link href={`/daily?date=${adjacentDate(reportDate, -1)}`} aria-label="前一天"><ArrowLeft size={16} /></Link>
+          <form action="/daily" method="get"><CalendarDays size={15} /><input type="date" name="date" defaultValue={reportDate} /><button type="submit">查看</button></form>
+          <Link href={`/daily?date=${adjacentDate(reportDate, 1)}`} aria-label="后一天"><ArrowRight size={16} /></Link>
+          {reportDate !== latestDate && <Link className="daily-latest-link" href={`/daily?date=${latestDate}`}>返回最新日报</Link>}
         </div>
-      </section>
+      </PublicPageMasthead>
 
       {!report ? (
         <section className="daily-report-empty public-frame">
@@ -64,7 +66,7 @@ export default async function DailyReportPage({ searchParams }: { searchParams: 
       ) : (
         <div className="public-frame daily-report-content">
           {lead && <section className={`daily-lead ${leadImage ? "has-image" : ""}`}>
-            {leadImage && <div className="daily-lead-image"><Image src={leadImage.storage_path ?? leadImage.source_url ?? ""} alt="" fill sizes="(max-width: 760px) 100vw, 50vw" unoptimized /></div>}
+            {leadImage && <div className="daily-lead-image"><Image src={resolveImageSrc(leadImage.storage_path, leadImage.source_url)} alt="" fill sizes="(max-width: 760px) 100vw, 50vw" unoptimized referrerPolicy="no-referrer" /></div>}
             <div className="daily-lead-copy"><p className="ln-eyebrow"><i /> 当日优先阅读</p><div className="ln-card-labels"><span>{publicLabel(lead.products[0] ?? "unknown")}</span><span>重要性 {Math.round(lead.importance_score * 100)}</span><span>{lead.source_name}</span></div><h2><Link href={`/messages/${lead.id}?from=${encodeURIComponent(returnTo)}&fromLabel=${encodeURIComponent("返回日报")}`}>{lead.title}</Link></h2><p>{lead.summary}</p><Link className="ln-text-link" href={`/messages/${lead.id}?from=${encodeURIComponent(returnTo)}&fromLabel=${encodeURIComponent("返回日报")}`}>阅读完整消息 <ArrowRight size={14} /></Link></div>
           </section>}
 
@@ -77,6 +79,7 @@ export default async function DailyReportPage({ searchParams }: { searchParams: 
           </div>
         </div>
       )}
+      <BackToTop />
     </PublicShell>
   );
 }

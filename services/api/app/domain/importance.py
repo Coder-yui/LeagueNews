@@ -11,8 +11,8 @@ IMPORTANCE_POLICY_VERSION: Final = "importance-v11-repost-weekly-rotation"
 FEATURED_MESSAGE_MIN_IMPORTANCE: Final = 0.75
 
 
-def is_featured_message(score: float) -> bool:
-    return score >= FEATURED_MESSAGE_MIN_IMPORTANCE
+def is_featured_message(score: float, *, content_form: str = "original") -> bool:
+    return content_form != "repost" and score >= FEATURED_MESSAGE_MIN_IMPORTANCE
 
 ImportanceScale = Literal["minor", "standard", "major"]
 CompetitionRegion = Literal["none", "lpl", "lck", "international", "other"]
@@ -307,6 +307,9 @@ PROFILE_ROUTES: Final[dict[MessageType, tuple[ProfileRoute, ...]]] = {
     "esports_community_discussion": (
         _route({"esports_analysis"}, "esports_analysis"),
         _route(set(TOPIC_FAMILIES.values()), "esports_discussion"),
+    ),
+    "esports_community_promotion_interaction": (
+        _route(set(TOPIC_FAMILIES.values()), "esports_promotion"),
     ),
     "lol_universe_announcement": (
         _route(set(TOPIC_FAMILIES.values()), "universe_announcement"),

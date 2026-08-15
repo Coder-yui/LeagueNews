@@ -57,7 +57,7 @@ LLM 输出 `relevant | irrelevant | uncertain`、置信度和理由。`irrelevan
 - 标准标题与摘要；
 - `products`、`content_form`；
 - 最多 8 个实体；
-- `classification_version=message-taxonomy-v3`；分类信源三态依据随提案、checkpoint 和最终 facets 保存。
+- `classification_version=message-taxonomy-v4`；分类信源三态依据随提案、checkpoint 和最终 facets 保存。
 
 产品尽量单选、最多 3 个。该调用不接收消息类型或主题目录，也不能提前输出这两个字段。
 `media_only` 或 `link_only` 固定输出 `products=[unknown]`，摘要和实体为空；流程在批准后直接

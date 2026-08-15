@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useState } from "react";
 import { adminApi } from "@/lib/api";
+import { resolveImageSrcWithRemoteFallback } from "@/lib/image-src";
 import type {
   OCRReviewExtraction,
   OCRTableData,
@@ -70,7 +71,7 @@ function ExtractionPreview({
   );
   const [editingRecord, setEditingRecord] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
-  const imageSource = extraction.storage_path ?? extraction.source_url;
+  const imageSource = resolveImageSrcWithRemoteFallback(extraction.storage_path, extraction.source_url);
   const activeSections = tableDraft.sections
     .map((section, sectionIndex) => ({ section, sectionIndex }))
     .filter(({ section }) => section.section_type === activeSectionType);

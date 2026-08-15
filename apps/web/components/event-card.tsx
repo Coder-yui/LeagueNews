@@ -12,7 +12,7 @@ export function EventCard({ event, featured = false, returnTo }: { event: EventC
     <article className={`ln-event-card ${featured ? "featured" : ""}`}>
       {event.best_media_url && (
         <Link className="ln-event-image" href={href} tabIndex={-1}>
-          <Image src={event.best_media_url} alt="" width={960} height={540} sizes={featured ? "(max-width: 760px) 100vw, 60vw" : "(max-width: 760px) 100vw, 360px"} unoptimized />
+          <Image src={event.best_media_url} alt="" width={960} height={540} sizes={featured ? "(max-width: 760px) 100vw, 60vw" : "(max-width: 760px) 100vw, 360px"} unoptimized referrerPolicy="no-referrer" />
         </Link>
       )}
       <div className="ln-event-copy">

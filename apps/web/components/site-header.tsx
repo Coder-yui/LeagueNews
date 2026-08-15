@@ -48,7 +48,6 @@ export function SiteHeader() {
               </Link>
             );
           })}
-          <Link className="public-admin-link" href="/admin" onClick={() => setOpen(false)}>管理台</Link>
         </nav>
       </div>
     </header>

@@ -848,7 +848,7 @@ def test_importance_upgrades_legacy_analysis_source_and_final_projection(
 
         db.refresh(run)
         upgraded = run.context["approved_message_analysis_proposal"]
-        assert upgraded["classification_version"] == "message-taxonomy-v3"
+        assert upgraded["classification_version"] == "message-taxonomy-v4"
         assert upgraded["classification_source"]["source_kind"] == "unknown"
         assert captured["source_context"]["classification_source_kind"] == "unknown"
         review = db.scalar(
@@ -863,7 +863,7 @@ def test_importance_upgrades_legacy_analysis_source_and_final_projection(
             analysis_proposal=upgraded,
             importance_proposal=review.proposal,
         )
-        assert proposal["classification_version"] == "message-taxonomy-v3"
+        assert proposal["classification_version"] == "message-taxonomy-v4"
         assert proposal["facets"]["classification_source"]["basis"] == "unresolved"
 
 
@@ -1463,6 +1463,41 @@ def test_restart_continues_from_each_rejected_stage(monkeypatch) -> None:
             assert new_run.status == "awaiting_review"
             assert old_run.status == "rejected"
             assert generated_stages == [stage]
+
+
+def test_start_from_relevance_creates_fresh_run_without_failed_context(monkeypatch) -> None:
+    generated_stages: list[str] = []
+
+    async def fake_relevance_review(db, run):
+        generated_stages.append(run.current_stage)
+        run.status = "awaiting_review"
+        db.commit()
+
+    monkeypatch.setattr(reviewed_pipeline, "_evaluate_relevance", fake_relevance_review)
+    with _session() as db:
+        raw = _raw_item(db)
+        failed_run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="failed",
+            current_stage="importance",
+            context={
+                "approved_message_analysis_proposal": {"products": ["lol_pc"]},
+                "approved_importance_proposal": {"message_type": "unknown"},
+            },
+        )
+        db.add(failed_run)
+        db.commit()
+
+        restarted = asyncio.run(reviewed_pipeline.start_item_processing(db, raw))
+
+        assert restarted.id != failed_run.id
+        assert restarted.supersedes_run_id == failed_run.id
+        assert restarted.current_stage == "relevance"
+        assert restarted.context == {}
+        assert restarted.status == "awaiting_review"
+        assert failed_run.status == "failed"
+        assert generated_stages == ["relevance"]
 
 
 def test_approved_importance_publishes_message() -> None:

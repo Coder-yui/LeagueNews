@@ -32,7 +32,7 @@ class NormalizedItem(Base):
     products: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["unknown"])
     message_type: Mapped[str] = mapped_column(String(80), default="unknown", index=True)
     topics: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["unknown"])
-    classification_version: Mapped[str] = mapped_column(String(40), default="message-taxonomy-v3")
+    classification_version: Mapped[str] = mapped_column(String(40), default="message-taxonomy-v4")
     content_form: Mapped[str] = mapped_column(String(30), default="original")
     facets: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     importance_score: Mapped[float] = mapped_column(Float, index=True)

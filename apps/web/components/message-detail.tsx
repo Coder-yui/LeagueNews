@@ -3,11 +3,12 @@
 import Image from "next/image";
 import { useState } from "react";
 import {
-  ArrowUp,
   ExternalLink,
   Languages,
 } from "lucide-react";
+import { BackToTop } from "@/components/back-to-top";
 import { contentFormLabel } from "@/lib/content-form-labels";
+import { imageBlockSrc } from "@/lib/image-src";
 import { importanceLevel } from "@/lib/importance-labels";
 import { formatPublicTime, publicLabel } from "@/lib/public-labels";
 import type {
@@ -112,19 +113,20 @@ function ContentBlocks({
     <div className="message-blocks">
       {blocks.map((block, index) => {
         const key = block.id ?? `${block.type}-${index}`;
-        if (block.type === "image" && (block.storage_path || block.source_url)) {
+        if (block.type === "image" && block.storage_path) {
           const extraction = extractions.find((item) => item.block_index === index);
           return (
             <div className="message-image-block" key={key}>
               <figure>
                 <Image
-                  src={block.storage_path ?? block.source_url ?? ""}
+                  src={imageBlockSrc(block)}
                   alt={block.alt_text ?? block.caption ?? "消息配图"}
                   width={1400}
                   height={1000}
                   sizes="(max-width: 900px) 100vw, 900px"
                   priority={index === 0}
                   unoptimized
+                  referrerPolicy="no-referrer"
                 />
                 {block.caption && <figcaption>{block.caption}</figcaption>}
               </figure>
@@ -244,15 +246,7 @@ export function MessageDetail({ item }: { item: PublishedItem }) {
           view === "translated" && canTranslate ? item.media_extractions : []
         }
       />
-      <button
-        className="message-back-to-top"
-        type="button"
-        aria-label="回到顶部"
-        title="回到顶部"
-        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-      >
-        <ArrowUp size={17} strokeWidth={2.4} />
-      </button>
+      <BackToTop />
     </article>
   );
 }

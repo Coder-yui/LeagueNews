@@ -98,6 +98,18 @@ def test_featured_enqueue_reuses_authoritative_rule_and_is_idempotent(
     assert notifications[0].payload["url"].endswith(f"/messages/{item.id}")
 
 
+def test_featured_enqueue_excludes_reposts(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "feishu_featured_push_enabled", True)
+    item = _published_item(db, score=1.0)
+    item.content_form = "repost"
+
+    assert enqueue_featured_message(db, item) is False
+    assert db.scalar(select(NotificationOutbox.id)) is None
+
+
 def test_collection_error_classification_uses_connector_boundaries() -> None:
     assert classify_collection_error(XConnectorConfigurationError("cookie missing")) == "authentication"
     assert classify_collection_error(

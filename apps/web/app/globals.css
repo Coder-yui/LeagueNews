@@ -987,6 +987,11 @@ html[data-theme="dark"] .public-header { background: rgba(7, 16, 21, .92); }
 html[data-theme="dark"] .ln-primary-link { background: rgba(7, 16, 21, .4); }
 html[data-theme="dark"] .ln-primary-link:hover,
 html[data-theme="dark"] .message-language-toggle button.active { color: #0b1215; }
+html[data-theme="dark"] .public-site .public-back-to-top:hover {
+  border-color: var(--ln-gold);
+  background: var(--ln-surface-raised);
+  color: var(--ln-gold-bright);
+}
 
 html[data-theme="dark"] .home-editorial-lead { background: linear-gradient(135deg, var(--ln-surface-raised), #0b151a); }
 html[data-theme="dark"] .home-editorial-lead-overlay {

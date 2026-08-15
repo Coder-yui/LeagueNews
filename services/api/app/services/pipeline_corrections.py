@@ -366,3 +366,81 @@ async def recover_failed_job(
         raise
     db.refresh(correction)
     return correction
+
+
+async def restart_raw_item_from_beginning(
+    db: Session, *, raw_item_id: int
+) -> PipelineCorrection | PipelineJob:
+    """Restart a failed item with fresh relevance context in automatic mode."""
+    raw_item = db.get(RawItem, raw_item_id)
+    if raw_item is None:
+        raise LookupError("raw item not found")
+    if not is_latest_raw_item(db, raw_item):
+        raise ValueError("raw item has been superseded by a newer revision")
+    payload = PipelineCorrectionCreate(
+        restart_from_stage=RELEVANCE_STAGE,
+        resume_mode="automatic",
+        reason="admin restart from beginning",
+    )
+    failed_job = db.scalar(
+        select(PipelineJob)
+        .where(PipelineJob.raw_item_id == raw_item.id, PipelineJob.status == "failed")
+        .order_by(PipelineJob.id.desc())
+        .limit(1)
+    )
+    if failed_job is not None:
+        return await recover_failed_job(db, job_id=failed_job.id, payload=payload)
+
+    source_run = _latest_processing_run(db, raw_item.id)
+    if source_run is None or source_run.status != "failed":
+        raise ValueError("raw item has no failed processing run to restart")
+    active_job = db.scalar(
+        select(PipelineJob).where(
+            PipelineJob.raw_item_id == raw_item.id,
+            PipelineJob.status.in_(["queued", "running"]),
+        )
+    )
+    if active_job is not None:
+        raise ValueError(f"raw item already has active pipeline job {active_job.id}")
+
+    correction = PipelineCorrection(
+        raw_item_id=raw_item.id,
+        normalized_item_id=raw_item.normalized_item.id if raw_item.normalized_item else None,
+        source_processing_run_id=source_run.id,
+        restart_from_stage=RELEVANCE_STAGE,
+        resume_mode="automatic",
+        reason=payload.reason,
+        status="running",
+        started_at=datetime.now(UTC),
+    )
+    db.add(correction)
+    db.commit()
+    db.refresh(correction)
+    try:
+        await start_item_processing(
+            db,
+            raw_item,
+            supersedes_run_id=source_run.id,
+            execution_mode="automatic",
+            correction_id=correction.id,
+            restart_from_stage=RELEVANCE_STAGE,
+            context={},
+        )
+        enqueue_pipeline_job(
+            db,
+            raw_item_id=raw_item.id,
+            correction_id=correction.id,
+            current_stage=RELEVANCE_STAGE,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        failed = db.get(PipelineCorrection, correction.id)
+        if failed is not None:
+            failed.status = "failed"
+            failed.error_message = str(exc)
+            failed.completed_at = datetime.now(UTC)
+            db.commit()
+        raise
+    db.refresh(correction)
+    return correction

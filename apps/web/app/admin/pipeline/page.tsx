@@ -141,7 +141,7 @@ export default function PipelinePage() {
     setBusy(item.id);
     setActionError((value) => ({ ...value, [item.id]: "" }));
     try {
-      await adminApi(`/raw-items/${item.id}/process`, {
+      await adminApi(`/raw-items/${item.id}/restart-from-beginning`, {
         method: "POST",
         body: "{}",
       });

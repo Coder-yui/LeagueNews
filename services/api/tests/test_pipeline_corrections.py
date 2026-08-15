@@ -27,7 +27,7 @@ from app.services.automatic_pipeline import (
     enqueue_pipeline_job,
     execute_pipeline_job,
 )
-from app.services.pipeline_corrections import recover_failed_job
+from app.services.pipeline_corrections import recover_failed_job, restart_raw_item_from_beginning
 from app.services.pipeline_execution import PipelineExecutionGuard, PipelineLeaseLost
 from app.workflows.reviewed_pipeline import approve_review, reject_review
 from app.workflows.event_aggregation import aggregate_normalized_item
@@ -699,6 +699,89 @@ async def test_message_job_recovery_still_creates_message_correction(
     assert correction.status == "running"
     assert started["restart_from_stage"] == "relevance"
     assert db.scalar(select(PipelineCorrection)) is not None
+
+
+@pytest.mark.anyio
+async def test_restart_from_beginning_uses_fresh_automatic_recovery(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Source(name="Restart source", connector_type="manual")
+    raw = RawItem(source=source, native_title="restart", content_blocks=[{"type": "paragraph", "text": "restart"}])
+    db.add(raw)
+    db.flush()
+    old_run = ProcessingRun(
+        raw_item_id=raw.id,
+        workflow_type="item",
+        status="failed",
+        current_stage="importance",
+        execution_mode="manual",
+        context={
+            "approved_message_analysis_proposal": {"stale": True},
+            "approved_importance_proposal": {"stale": True},
+        },
+    )
+    db.add(old_run)
+    db.commit()
+    started: dict[str, object] = {}
+
+    async def fake_start_item(_db: Session, _raw: RawItem, **kwargs: object):
+        started.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(correction_service, "start_item_processing", fake_start_item)
+    correction = await restart_raw_item_from_beginning(db, raw_item_id=raw.id)
+
+    assert correction.restart_from_stage == "relevance"
+    assert correction.resume_mode == "automatic"
+    assert correction.source_processing_run_id == old_run.id
+    assert started["execution_mode"] == "automatic"
+    assert started["restart_from_stage"] == "relevance"
+    assert started["context"] == {}
+    job = db.scalar(select(PipelineJob).where(PipelineJob.correction_id == correction.id))
+    assert job is not None
+    assert job.status == "queued"
+    assert job.current_stage == "relevance"
+
+
+@pytest.mark.anyio
+async def test_restart_from_beginning_recovers_failed_job_automatically(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Source(name="Restart job source", connector_type="manual")
+    raw = RawItem(source=source, native_title="restart", content_blocks=[{"type": "paragraph", "text": "restart"}])
+    db.add(raw)
+    db.flush()
+    old_run = ProcessingRun(
+        raw_item_id=raw.id,
+        workflow_type="item",
+        status="failed",
+        current_stage="importance",
+        execution_mode="manual",
+        context={"approved_message_analysis_proposal": {"stale": True}},
+    )
+    failed_job = PipelineJob(raw_item_id=raw.id, status="failed", current_stage="importance")
+    db.add_all([old_run, failed_job])
+    db.commit()
+    started: dict[str, object] = {}
+
+    async def fake_start_item(_db: Session, _raw: RawItem, **kwargs: object):
+        started.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(correction_service, "start_item_processing", fake_start_item)
+    correction = await restart_raw_item_from_beginning(db, raw_item_id=raw.id)
+
+    assert isinstance(correction, PipelineCorrection)
+    assert correction.restart_from_stage == "relevance"
+    assert correction.resume_mode == "automatic"
+    assert started["context"] == {}
+    assert started["execution_mode"] == "automatic"
+    replacement = db.scalar(
+        select(PipelineJob).where(PipelineJob.correction_id == correction.id)
+    )
+    assert replacement is not None
+    assert replacement.id != failed_job.id
+    assert replacement.current_stage == "relevance"
 
 
 def test_manual_rejection_cancels_correction(db: Session) -> None:

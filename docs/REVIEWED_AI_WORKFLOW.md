@@ -110,4 +110,14 @@ POST /api/v1/workflows/reviews/{id}/reject
 POST /api/v1/workflows/reviews/{id}/correct-ocr
 POST /api/v1/workflows/runs/{id}/retry
 POST /api/v1/pipeline/normalized-items/{id}/corrections
+POST /api/v1/raw-items/{id}/restart-from-beginning
 ```
+
+### 失败恢复与从头重跑
+
+“重试”继续失败 stage，保留已批准的上游 context/checkpoint，适用于临时网络、模型或 OCR
+故障。“从头重跑”仅针对失败项：从 `relevance` 创建新的 `ProcessingRun`，以空 context 和
+`execution_mode=automatic` 重新判断产品、重新执行后续阶段，并创建新的 `PipelineCorrection`
+及 queued `PipelineJob`。旧 run 通过 `supersedes_run_id` 保留历史；不会继承已批准的 message
+analysis 或 importance proposal。automatic 正常自动批准，只有原有业务规则要求人工审核时才进入
+`awaiting_review`。

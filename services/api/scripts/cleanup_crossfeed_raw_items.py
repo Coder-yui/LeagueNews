@@ -1,9 +1,9 @@
 """Remove STRAY cross-feed RawItems (X/Twitter "串台" posts) from a LOCAL dev DB.
 
-A cross-feed raw_item for an X source is defined as:
-  source.connector_type = 'x_twitter'
-  AND lower(raw_items.provenance->>'author_username') != lower(source.external_key)
-  AND raw_items.provenance->>'retweeted_tweet_id' IS NULL
+A cross-feed raw_item is a non-retweet X record whose canonical URL envelope
+author differs from the configured source. Candidate selection also requires a
+matching raw_item_source_payload with no ``retweeted_tweet_id``; missing source
+evidence is deliberately retained.
 
 These tweets sneaked in through twscrape's recommendation/mention injection
 in the user timeline endpoint before the connector-layer attribution filter
@@ -23,12 +23,12 @@ import argparse
 import json
 import sys
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 
 import app.models  # noqa: F401
 from app.core.database import SessionLocal, engine
 from app.models.daily_report import DailyReportItem
-from app.models.event import EventAggregationRun, EventMention
+from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
 from app.models.normalized_item import (
     NormalizedItem,
     NormalizedItemMediaExtraction,
@@ -38,6 +38,8 @@ from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheck
 from app.models.raw_item import RawItem
 from app.models.raw_item_source_payload import RawItemSourcePayload
 from app.models.workflow import ProcessingRun, ReviewTask
+from app.services.event_metrics import refresh_event_metrics
+from app.repositories.events import current_event_mention_conditions
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +466,89 @@ def perform_cleanup(db, raw_item_ids: tuple[int, ...], *, dry_run: bool) -> dict
     return counts
 
 
+def affected_event_ids(db, raw_item_ids: list[int]) -> set[int]:
+    return {
+        int(value)
+        for value in db.scalars(
+            select(EventMention.event_id)
+            .join(NormalizedItem, NormalizedItem.id == EventMention.normalized_item_id)
+            .where(NormalizedItem.raw_item_id.in_(raw_item_ids))
+        )
+    }
+
+
+def reconcile_affected_events(db, event_ids: set[int]) -> dict[str, int]:
+    """Remove orphaned events and fully recompute retained event projections."""
+    orphaned: set[int] = set()
+    retained: set[int] = set()
+    for event_id in event_ids:
+        mentions = db.scalar(
+            select(func.count())
+            .select_from(EventMention)
+            .join(EventMention.normalized_item)
+            .where(EventMention.event_id == event_id, *current_event_mention_conditions())
+        )
+        if mentions:
+            retained.add(event_id)
+        else:
+            orphaned.add(event_id)
+    if orphaned:
+        # Event is a derived current layer. An event without current mentions
+        # cannot be retained merely because its historical memberships exist.
+        db.execute(delete(EventMention).where(EventMention.event_id.in_(orphaned)))
+        db.execute(
+            text("DELETE FROM event_revisions WHERE event_id = ANY(:ids)"),
+            {"ids": sorted(orphaned)},
+        )
+        db.execute(delete(Event).where(Event.id.in_(orphaned)))
+    if retained:
+        for event_id in retained:
+            current_keys = {
+                (
+                    mention.normalized_item_id,
+                    mention.normalized_item_revision,
+                    mention.mention_index,
+                    mention.aggregation_policy_version,
+                )
+                for mention in db.scalars(
+                    select(EventMention)
+                    .join(EventMention.normalized_item)
+                    .where(
+                        EventMention.event_id == event_id,
+                        *current_event_mention_conditions(),
+                    )
+                )
+                if mention.materiality == "material_update"
+            }
+            snapshots = [
+                revision.evidence_snapshot or {}
+                for revision in db.scalars(
+                    select(EventRevision).where(EventRevision.event_id == event_id)
+                )
+            ]
+            can_restore_projection = any(
+                (
+                    snapshot.get("normalized_item_id"),
+                    snapshot.get("normalized_item_revision"),
+                    snapshot.get("mention_index"),
+                    snapshot.get("aggregation_policy_version"),
+                )
+                in current_keys
+                and isinstance(snapshot.get("projection_snapshot"), dict)
+                for snapshot in snapshots
+            )
+            if not can_restore_projection:
+                raise RuntimeError(
+                    f"event {event_id} has remaining mentions but no restorable projection; "
+                    "refusing cleanup instead of leaving stale derived state"
+                )
+        # Rebuild every derived field from remaining mentions. This restores
+        # summaries/key facts through revision snapshots instead of leaving a
+        # count-only patch after removed evidence.
+        refresh_event_metrics(db, retained)
+    return {"events_deleted": len(orphaned), "events_rebuilt": len(retained)}
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -557,8 +642,8 @@ def main() -> int:
             + "  ..."
         )
 
-        # 4. Compute the deletion plan — dry-run never commits.
-        plan = perform_cleanup(db, raw_item_ids, dry_run=not args.apply)
+        # 4. Compute the deletion plan before any destructive statement.
+        plan = perform_cleanup(db, raw_item_ids, dry_run=True)
 
         if not args.apply:
             print("\n=== [DRY-RUN] Row deletion plan (NO CHANGES WRITTEN) ===")
@@ -585,9 +670,28 @@ def main() -> int:
                 db.rollback()
                 return 1
 
-        # 6. Commit + assertions
-        db.commit()
-        post_counts = _global_counts()
+        # 6. Delete, rebuild affected Event projections, and validate before
+        # committing. A failed invariant rolls back the whole maintenance run.
+        affected_events = affected_event_ids(db, raw_item_ids)
+        try:
+            applied_plan = perform_cleanup(db, raw_item_ids, dry_run=False)
+            if applied_plan != plan:
+                raise RuntimeError("deletion scope changed after confirmation; refusing to commit")
+            event_result = reconcile_affected_events(db, affected_events)
+            db.flush()
+            post_counts = _global_counts()
+            remaining = _scalar(db, "SELECT COUNT(*) FROM raw_items WHERE id = ANY(:ids)", ids=raw_item_ids)
+            if remaining != 0:
+                raise RuntimeError(f"post-delete assertion failed: {remaining} candidate RawItems remain")
+            expected_raw_total = pre_counts["raw_items"] - plan["raw_items"]
+            if post_counts["raw_items"] != expected_raw_total:
+                raise RuntimeError(
+                    "post-delete assertion failed: raw_items total does not match the approved plan"
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         print("\n=== [APPLY] Deletion delta per table ===")
         all_keys = sorted(set(pre_counts) | set(post_counts))
         for k in all_keys:
@@ -600,23 +704,14 @@ def main() -> int:
                 marker = " ⚠ NO CHANGE even though plan expected some"
             print(f"  {k:<35} before={pre:>6} after={post:>6}  Δ=−{delta}{marker}")
 
-        # Hard assertions (only for the target RawItems + expected totals)
-        remaining = _scalar(db, "SELECT COUNT(*) FROM raw_items WHERE id = ANY(:ids)", ids=raw_item_ids)
-        assert (
-            remaining == 0
-        ), f"Post-delete assertion FAILED: {remaining} candidate RawItem(s) still in raw_items!"
         print("\n✅ Assertion 1/2: 0 candidate RawItem IDs remain in raw_items.")
-
-        expected_raw_total = pre_counts["raw_items"] - plan["raw_items"]
-        actual_raw_total = post_counts["raw_items"]
-        assert actual_raw_total == expected_raw_total, (
-            f"Post-delete assertion FAILED: total raw_items Δ mismatch.\n"
-            f"  before={pre_counts['raw_items']} expected_after={expected_raw_total} "
-            f"actual_after={actual_raw_total}"
-        )
         print(
             f"✅ Assertion 2/2: total raw_items dropped by exactly the plan count "
             f"(−{plan['raw_items']}). No unintended mass-delete."
+        )
+        print(
+            f"✅ Event integrity: deleted={event_result['events_deleted']} "
+            f"rebuilt={event_result['events_rebuilt']}."
         )
 
         print("\n🎉 Cleanup complete. Stray cross-feed RawItems and their downstream rows are gone.")

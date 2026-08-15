@@ -55,7 +55,7 @@ export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChan
     if (!window.confirm("将从相关性开始重新执行完整处理链路，并创建新的 ProcessingRun。确定继续吗？")) return;
     setBusy(true); setError(null);
     try {
-      await adminApi(`/raw-items/${item.id}/process`, {
+      await adminApi(`/raw-items/${item.id}/restart-from-beginning`, {
         method: "POST",
         body: "{}",
       });

@@ -49,6 +49,13 @@ export function PublicSelect({ children, defaultValue, disabled, id, label, name
   const selectedOption = options.find((option) => option.value === selectedValue) ?? options[0];
 
   useEffect(() => {
+    const nextIndex = options.findIndex((option) => option.value === initialValue);
+    setSelectedValue(nextIndex >= 0 ? initialValue : (options[0]?.value ?? ""));
+    setActiveIndex(Math.max(0, nextIndex));
+    setOpen(false);
+  }, [initialValue, options]);
+
+  useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };

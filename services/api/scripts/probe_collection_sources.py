@@ -1,4 +1,4 @@
-"""Probe one candidate from every active automated source without downstream jobs."""
+"""Probe active automated sources with optional read-only connectivity checks."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def _report_markdown(state: dict[str, Any]) -> str:
         f"- 状态：`{state['status']}`",
         f"- 时间窗：`{state['since']}` 至 `{state['until']}`（含边界）",
         f"- 相邻信源间隔：`{state['source_delay_seconds']} 秒`",
-        "- 下游处理：未启用；所有入库调用 `enqueue_downstream=False`",
+        f"- 模式：`{'probe-only（不入库）' if state['probe_only'] else '试采（不触发下游任务）'}`",
         "",
         "| Source ID | 信源 | Connector | 结果 | 候选 | 窗内候选 | 新建 | 修订 | 去重 | 错误类型 |",
         "|---:|---|---|---|---:|---:|---:|---:|---:|---|",
@@ -157,6 +157,7 @@ async def _run(args: argparse.Namespace) -> None:
         "since": since.isoformat(),
         "until": until.isoformat(),
         "source_delay_seconds": args.source_delay,
+        "probe_only": args.probe_only,
         "started_at": _now(),
         "updated_at": _now(),
         "finished_at": None,
@@ -181,23 +182,27 @@ async def _run(args: argparse.Namespace) -> None:
                 for item in batch
                 if _in_time_range(item.published_at, since=since, until=until)
             ]
-            with SessionLocal() as db:
-                live_source = db.get(Source, source.id)
-                if live_source is None or not live_source.is_active:
-                    raise RuntimeError("source is missing or inactive")
-                result = await ingest_connector_items(
-                    db,
-                    source=live_source,
-                    items=eligible,
-                    enqueue_downstream=False,
-                )
+            if args.probe_only:
+                created = revised = skipped = 0
+            else:
+                with SessionLocal() as db:
+                    live_source = db.get(Source, source.id)
+                    if live_source is None or not live_source.is_active:
+                        raise RuntimeError("source is missing or inactive")
+                    result = await ingest_connector_items(
+                        db,
+                        source=live_source,
+                        items=eligible,
+                        enqueue_downstream=False,
+                    )
+                created, revised, skipped = len(result.created), len(result.revised), len(result.skipped)
             source_state.update(
                 status="success",
                 discovered=len(batch),
                 eligible=len(eligible),
-                created=len(result.created),
-                revised=len(result.revised),
-                skipped=len(result.skipped),
+                created=created,
+                revised=revised,
+                skipped=skipped,
             )
         except Exception as exc:
             source_state.update(status="failed", error_type=type(exc).__name__)
@@ -219,6 +224,11 @@ def main() -> None:
     parser.add_argument("--source-delay", type=float, default=30.0)
     parser.add_argument("--source-id", type=int, action="append")
     parser.add_argument("--connector-type", action="append")
+    parser.add_argument(
+        "--probe-only",
+        action="store_true",
+        help="fetch and report only; do not write RawItems",
+    )
     parser.add_argument(
         "--state-file",
         type=Path,

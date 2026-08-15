@@ -10,7 +10,6 @@ import type { ContentBlock } from "./types";
  */
 export function resolveImageSrc(
   storagePath: string | null | undefined,
-  _sourceUrl?: string | null | undefined,
 ): string {
   return storagePath ?? "";
 }

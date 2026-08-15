@@ -11,6 +11,7 @@ from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import ProcessingRun
 from app.schemas.raw_item import RawItemAdminPageRead, RawItemRead
+from app.schemas.pipeline import PipelineCorrectionRead, PipelineJobRead
 from app.schemas.workflow import ProcessingRunRead
 from app.services.llm import LLMAnalysisError, LLMConfigurationError
 from app.services.media_repair import project_media_storage_paths
@@ -20,6 +21,7 @@ from app.services.raw_item_versions import (
     latest_raw_item_condition,
 )
 from app.workflows.reviewed_pipeline import start_item_processing
+from app.services.pipeline_corrections import restart_raw_item_from_beginning
 
 router = APIRouter()
 
@@ -308,3 +310,20 @@ async def process_raw_item(item_id: int, db: Session = Depends(get_db)) -> objec
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
+
+
+@router.post(
+    "/{item_id}/restart-from-beginning",
+    response_model=PipelineCorrectionRead | PipelineJobRead,
+)
+async def restart_from_beginning(item_id: int, db: Session = Depends(get_db)) -> object:
+    try:
+        return await restart_raw_item_from_beginning(db, raw_item_id=item_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (LLMAnalysisError, OCRProcessingError, RuntimeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

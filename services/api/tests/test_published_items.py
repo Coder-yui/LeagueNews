@@ -5,13 +5,12 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 from app.api.routes.normalized_items import (
-    _published_payload,
-    _published_statement,
     list_normalized_items,
     list_published_days,
     list_published_items,
     list_published_items_page,
 )
+from app.services.published_items import published_item_payload, published_item_statement
 from app.core.database import Base
 from app.domain.importance import is_featured_message
 from app.models.media_asset import MediaAsset
@@ -150,8 +149,8 @@ def test_published_payload_combines_reviewed_item_source_and_bilingual_ocr() -> 
         )
         db.commit()
 
-        loaded = db.scalar(_published_statement().where(NormalizedItem.id == item.id))
-        payload = PublishedItemRead.model_validate(_published_payload(loaded))
+        loaded = db.scalar(published_item_statement().where(NormalizedItem.id == item.id))
+        payload = PublishedItemRead.model_validate(published_item_payload(loaded))
 
         assert payload.source_name == "Designer X"
         assert payload.source_reliability_score == 0.85

@@ -18,19 +18,12 @@ from app.services.published_items import (
     DEFAULT_PUBLICATION_TIMEZONE,
     get_published_item as read_published_item,
     list_published_days as read_published_days,
-    published_item_payload,
-    published_item_statement,
     search_published_items,
 )
 from app.services.raw_item_versions import latest_normalized_item_condition
 
 
 router = APIRouter()
-
-# Kept as compatibility aliases for existing internal callers/tests. The
-# implementation lives in the shared read service, not in this HTTP adapter.
-_published_statement = published_item_statement
-_published_payload = published_item_payload
 
 
 @router.get("", response_model=list[NormalizedItemRead])

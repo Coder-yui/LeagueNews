@@ -66,7 +66,7 @@ export default async function DailyReportPage({ searchParams }: { searchParams: 
       ) : (
         <div className="public-frame daily-report-content">
           {lead && <section className={`daily-lead ${leadImage ? "has-image" : ""}`}>
-            {leadImage && <div className="daily-lead-image"><Image src={resolveImageSrc(leadImage.storage_path, leadImage.source_url)} alt="" fill sizes="(max-width: 760px) 100vw, 50vw" unoptimized referrerPolicy="no-referrer" /></div>}
+            {leadImage && <div className="daily-lead-image"><Image src={resolveImageSrc(leadImage.storage_path)} alt="" fill sizes="(max-width: 760px) 100vw, 50vw" unoptimized referrerPolicy="no-referrer" /></div>}
             <div className="daily-lead-copy"><p className="ln-eyebrow"><i /> 当日优先阅读</p><div className="ln-card-labels"><span>{publicLabel(lead.products[0] ?? "unknown")}</span><span>重要性 {Math.round(lead.importance_score * 100)}</span><span>{lead.source_name}</span></div><h2><Link href={`/messages/${lead.id}?from=${encodeURIComponent(returnTo)}&fromLabel=${encodeURIComponent("返回日报")}`}>{lead.title}</Link></h2><p>{lead.summary}</p><Link className="ln-text-link" href={`/messages/${lead.id}?from=${encodeURIComponent(returnTo)}&fromLabel=${encodeURIComponent("返回日报")}`}>阅读完整消息 <ArrowRight size={14} /></Link></div>
           </section>}
 

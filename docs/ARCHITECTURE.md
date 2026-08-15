@@ -72,6 +72,12 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 - EventMention 的当前投影必须同时满足已发布且 revision 等于 NormalizedItem.current_revision；旧
   revision 只保留为审计证据，不进入当前事件指标、引用、详情或日报去重。
 - Event 热度衰减由 Pipeline Worker 定期刷新，HTTP 请求不承担后台状态更新。
+- Media 下载按每一个 redirect hop 重新验证 URL 并选择 direct/proxy client：literal IP 永远要求
+  global；direct hostname 的所有 DNS 结果必须 global；proxy hostname 只能是 X/Riot 已知媒体 CDN
+  suffix allowlist。fake-IP 环境不以 DNS 放宽该 allowlist，未知 host fail closed。
+- 本地 destructive maintenance 脚本 dry-run 默认、要求 `--apply` 和确认（`--yes` 显式跳过），在
+  同一事务内完成删除、invariant 验证和 commit；删除 EventMention 后会删除空 Event 或重建保留
+  Event 的完整 derived projection。
 
 ## 页面与 API
 

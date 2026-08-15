@@ -55,7 +55,7 @@ export function FeaturedCarousel({ items }: { items: PublishedItem[] }) {
               {image && (
                 <div className="home-editorial-lead-image" aria-hidden="true">
                   <Image
-                    src={resolveImageSrc(image.storage_path, image.source_url)}
+                    src={resolveImageSrc(image.storage_path)}
                     alt=""
                     fill
                     sizes="(max-width: 760px) 100vw, 760px"

@@ -44,6 +44,17 @@ _DIRECT_CONNECT_SUFFIXES: tuple[str, ...] = (
     ".bdstatic.com",
 )
 
+# A proxy is allowed only for media hosts used by the X and Riot ingestion
+# paths. This deliberately small list avoids treating a locally configured
+# proxy as authority to fetch arbitrary internal-looking hostnames.
+_PROXIED_MEDIA_SUFFIXES: tuple[str, ...] = (
+    ".twimg.com",
+    ".riotgames.com",
+    ".leagueoflegends.com",
+    ".riotcdn.net",
+    ".akamaihd.net",
+)
+
 
 def _referrer_for_url(url: str) -> str | None:
     hostname = (urlparse(url).hostname or "").casefold()
@@ -82,6 +93,11 @@ def _uses_proxy(url: str) -> bool:
     return _should_use_proxy(hostname)
 
 
+def _is_allowed_proxied_media_host(hostname: str) -> bool:
+    name = hostname.casefold().rstrip(".")
+    return any(name.endswith(suffix) for suffix in _PROXIED_MEDIA_SUFFIXES)
+
+
 class MediaStorageError(RuntimeError):
     """Raised when a remote media asset cannot be stored safely."""
 
@@ -109,12 +125,6 @@ class MediaStorage:
             ):
                 semaphore = asyncio.Semaphore(3)
 
-                def _pick_client(url: str) -> httpx.AsyncClient:
-                    hostname = (urlparse(url).hostname or "").casefold()
-                    if proxy_url and _should_use_proxy(hostname):
-                        return proxy_client
-                    return direct_client
-
                 async def materialize(block: dict[str, object]) -> dict[str, object]:
                     copied = dict(block)
                     if (
@@ -132,7 +142,8 @@ class MediaStorage:
                         try:
                             async with semaphore:
                                 public_path, mime_type = await self._download_image(
-                                    _pick_client(source_url),
+                                    direct_client,
+                                    proxy_client,
                                     source_url,
                                     safe_namespace,
                                 )
@@ -159,13 +170,13 @@ class MediaStorage:
 
     async def _download_image(
         self,
-        client: httpx.AsyncClient,
+        direct_client: httpx.AsyncClient,
+        proxy_client: httpx.AsyncClient,
         url: str,
         namespace: str,
     ) -> tuple[str, str]:
-        await self._validate_public_url(url, check_ip=not _uses_proxy(url))
         try:
-            payload, mime_type = await self._fetch_image(client, url)
+            payload, mime_type = await self._fetch_image(direct_client, proxy_client, url)
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             raise MediaStorageError(
                 f"remote image download failed for {_safe_url_label(url)}"
@@ -187,14 +198,14 @@ class MediaStorage:
 
     async def _fetch_image(
         self,
-        client: httpx.AsyncClient,
+        direct_client: httpx.AsyncClient,
+        proxy_client: httpx.AsyncClient,
         url: str,
     ) -> tuple[bytearray, str]:
         current_url = url
         for _redirect in range(6):
-            await self._validate_public_url(
-                current_url, check_ip=not _uses_proxy(current_url)
-            )
+            use_proxy = await self._validate_media_url(current_url)
+            client = proxy_client if use_proxy else direct_client
             request_headers: dict[str, str] = {}
             referrer = _referrer_for_url(current_url)
             if referrer:
@@ -209,9 +220,7 @@ class MediaStorage:
                     current_url = urljoin(str(response.url), location)
                     continue
                 response.raise_for_status()
-                await self._validate_public_url(
-                    str(response.url), check_ip=not _uses_proxy(str(response.url))
-                )
+                await self._validate_media_url(str(response.url))
                 mime_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                 if not mime_type.startswith("image/"):
                     raise MediaStorageError(f"remote media is not an image: {mime_type or 'unknown'}")
@@ -227,7 +236,13 @@ class MediaStorage:
         raise MediaStorageError("remote image exceeded redirect limit")
 
     @staticmethod
-    async def _validate_public_url(url: str, *, check_ip: bool = True) -> None:
+    async def _validate_public_url(url: str) -> None:
+        """Validate a direct URL, including every resolved address."""
+        await MediaStorage._validate_media_url(url, allow_proxy=False)
+
+    @staticmethod
+    async def _validate_media_url(url: str, *, allow_proxy: bool = True) -> bool:
+        """Validate one hop and return whether it must use the proxy client."""
         parsed = urlparse(url)
         if (
             parsed.scheme not in {"http", "https"}
@@ -245,9 +260,15 @@ class MediaStorage:
             # reach RFC1918/link-local/metadata addresses through us.
             if not literal.is_global:
                 raise MediaStorageError("private or local media URLs are not allowed")
-            return
-        if not check_ip:
-            return
+            return False
+        proxy_route = allow_proxy and _uses_proxy(url)
+        if proxy_route:
+            if not _is_allowed_proxied_media_host(parsed.hostname):
+                raise MediaStorageError("proxied media hostname is not allowlisted")
+            # TUN/fake-IP DNS answers are intentionally not trusted here. The
+            # host suffix is the fail-closed admission boundary; literal IPs
+            # above are never exempted.
+            return True
         addresses = await _resolve_host_addresses(
             parsed.hostname,
             parsed.port or (443 if parsed.scheme == "https" else 80),
@@ -256,6 +277,7 @@ class MediaStorage:
             raise MediaStorageError("media hostname did not resolve")
         if any(not address.is_global for address in addresses):
             raise MediaStorageError("private or local media URLs are not allowed")
+        return False
 
 async def _resolve_host_addresses(
     hostname: str, port: int

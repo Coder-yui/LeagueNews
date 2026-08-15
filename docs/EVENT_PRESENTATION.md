@@ -40,7 +40,7 @@ EventDetail
   references{}
 ```
 
-所有公开消息内容继续通过现有 `_published_payload` 等价投影过滤媒体路径，不能泄漏 storage 内部
+所有公开消息内容继续通过 `published_item_payload()` 等价投影过滤媒体路径，不能泄漏 storage 内部
 路径、Source 配置或 provenance 私有数据。
 
 ## 四类消息引用

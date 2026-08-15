@@ -174,11 +174,13 @@ class XTwitterConnector(BaseConnector[object]):
         scanned = 0
         reached_boundary = False
         records: list[object] = []
+        skipped_ids: list[str] = []
         tweets = api.user_tweets(target_user_id, limit=scan_limit)
         try:
             async for tweet in tweets:
-                if not _is_authored_or_retweet(target_user_id, tweet):
-                    continue
+                # ``user_tweets(limit=...)`` limits the unfiltered timeline, not
+                # target-authored tweets. Count every consumed envelope so a full
+                # recommendation-heavy page keeps the pending cursor open.
                 scanned += 1
                 tweet_id = clean_text(_attr(tweet, "id_str", "id"))
                 published_at = _attr(tweet, "date")
@@ -186,6 +188,10 @@ class XTwitterConnector(BaseConnector[object]):
                     if published_at < since:
                         reached_boundary = True
                         break
+                if not _is_authored_or_retweet(target_user_id, tweet):
+                    if tweet_id:
+                        skipped_ids.append(tweet_id)
+                    continue
                 if tweet_id in pending_ids:
                     continue
                 records.append(tweet)
@@ -198,6 +204,7 @@ class XTwitterConnector(BaseConnector[object]):
         ordered = _ordered_tweets(records)
         return FetchBatch(
             records=ordered[:limit],
+            skipped_ids=tuple(skipped_ids),
             truncated=(
                 len(ordered) > limit
                 or (scanned >= scan_limit and not reached_boundary)
@@ -404,21 +411,15 @@ def _tweet_author_user_id(tweet: object) -> int | None:
 
 
 def _is_authored_or_retweet(target_user_id: int, tweet: object) -> bool:
-    """Keep only tweets authored by the target account or retweets by them.
-
-    ``retweetedTweet`` being present is the canonical marker for a retweeted
-    envelope. Even if the envelope user id matches, we also accept a clear
-    retweet marker so future parser changes cannot cause retweets to be
-    dropped by accident.
-    """
+    """Keep target-authored envelopes; retain unknown parser shapes conservatively."""
     author_id = _tweet_author_user_id(tweet)
-    if author_id is not None and author_id == target_user_id:
-        return True
-    if _attr(tweet, "retweetedTweet") is not None:
-        return True
+    if author_id is not None:
+        # A retweetedTweet identifies the embedded original, not the envelope
+        # author. A known foreign envelope is still algorithmic cross-feed.
+        return author_id == target_user_id
     # Unknown author → keep (conservative, avoid accidentally blanking a feed
     # if twscrape ever renames the user id attribute).
-    return author_id is None
+    return True
 
 
 def _attr(value: object, *names: str) -> object:

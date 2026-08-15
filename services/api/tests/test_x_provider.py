@@ -390,17 +390,17 @@ def test_authorship_filter_keeps_own_tweets() -> None:
     assert _is_authored_or_retweet(target, reply) is True
 
 
-def test_authorship_filter_keeps_retweets() -> None:
+def test_authorship_filter_keeps_only_target_authored_retweets() -> None:
     target = 100
     original_author = 200
     # 转推的 envelope.user 通常是目标账号，这里显式模拟两种情况：
     # 1) retweetedTweet 存在，作者 id 正确（常规）
     rt_normal = _tweet_dict(author_id=target, retweeted={"id_str": "RT1"})
-    # 2) retweetedTweet 存在，但 envelope user id 被 parser 弄错了 —— 也应该保留（双保险）
-    rt_parser_weird = _tweet_dict(author_id=original_author, retweeted={"id_str": "RT2"})
+    # 2) 算法混入的陌生账号 retweet。embedded tweet 不能覆盖 envelope author。
+    foreign_retweet = _tweet_dict(author_id=original_author, retweeted={"id_str": "RT2"})
 
     assert _is_authored_or_retweet(target, rt_normal) is True
-    assert _is_authored_or_retweet(target, rt_parser_weird) is True
+    assert _is_authored_or_retweet(target, foreign_retweet) is False
 
 
 def test_authorship_filter_drops_unrelated_recommendations() -> None:
@@ -423,7 +423,7 @@ def test_authorship_filter_preserves_tweets_when_user_field_is_missing() -> None
     assert _is_authored_or_retweet(target, broken) is True
 
 
-def test_recent_collection_filters_out_stranager_tweets(
+def test_recent_collection_filters_out_stranger_tweets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """混合列表里只保留本人发和转推，串台路人帖要被过滤掉（recent 路径）."""
@@ -474,3 +474,65 @@ def test_recent_collection_filters_out_stranager_tweets(
     # 只有 own_post / retweet_post 应该留下来（3 条路人 + 1 条 mention + 1 条算法推荐 都去掉）
     assert external_ids == ["2", "3"]
     assert len(external_ids) == 2
+
+
+def test_recent_collection_keeps_cursor_open_for_filtered_timeline_window() -> None:
+    target = 42
+    tweets = [
+        _tweet_dict(author_id=9, date=f"2026-08-15T10:0{index}:00+00:00")
+        for index in range(3)
+    ]
+    for index, tweet in enumerate(tweets, start=1):
+        tweet["id_str"] = str(index)
+    own_first = _tweet_dict(author_id=target, date="2026-08-15T09:55:00+00:00")
+    own_first["id_str"] = "4"
+    own_second = _tweet_dict(author_id=target, date="2026-08-15T09:54:00+00:00")
+    own_second["id_str"] = "5"
+    tweets.extend((own_first, own_second))
+
+    class API:
+        async def user_tweets(self, _uid: int, *, limit: int):
+            for tweet in tweets[:limit]:
+                yield tweet
+
+    connector = XTwitterConnector()
+    first = asyncio.run(
+        connector._fetch_recent_batch(API(), target_user_id=target, since=None, cursor={}, limit=2)
+    )
+    assert first.records == []
+    assert first.truncated is True
+    assert first.skipped_ids == ("1", "2", "3")
+
+    # BaseConnector adds filtered IDs to pending_ids. The next scan is enlarged
+    # and therefore consumes beyond the recommendation-only first window.
+    cursor = {"pending_ids": list(first.skipped_ids)}
+    second = asyncio.run(
+        connector._fetch_recent_batch(API(), target_user_id=target, since=None, cursor=cursor, limit=2)
+    )
+    assert [tweet["id_str"] for tweet in second.records] == ["4", "5"]
+    assert second.truncated is False
+
+
+def test_recent_collection_stops_at_since_boundary() -> None:
+    target = 42
+    newer = _tweet_dict(author_id=target, date="2026-08-15T10:00:00+00:00")
+    newer["id_str"] = "new"
+    older = _tweet_dict(author_id=9, date="2026-08-14T09:59:00+00:00")
+    older["id_str"] = "old"
+
+    class API:
+        async def user_tweets(self, _uid: int, *, limit: int):
+            yield newer
+            yield older
+
+    batch = asyncio.run(
+        XTwitterConnector()._fetch_recent_batch(
+            API(),
+            target_user_id=target,
+            since=datetime.fromisoformat("2026-08-14T10:00:00+00:00"),
+            cursor={},
+            limit=2,
+        )
+    )
+    assert [tweet["id_str"] for tweet in batch.records] == ["new"]
+    assert batch.truncated is False

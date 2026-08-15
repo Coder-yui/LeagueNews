@@ -130,24 +130,28 @@ def reset_downstream(*, apply: bool) -> dict[str, dict[str, int]]:
             print("Dry run only. Add --apply to actually delete the rows listed above.")
             return {"before": before, "after": before}
 
-        for label, model in DERIVED_TABLE_DELETE_ORDER:
-            db.execute(delete(model))
-        db.commit()
-
-        after = _counts(db)
-        # Post-conditions: preserved tables untouched; derived tables at zero.
-        for label, _ in PRESERVED_TABLE_LABELS:
-            if after[label] != before[label]:
-                db.rollback()  # purely defensive; already committed but state invariant fails
-                raise RuntimeError(
-                    f"Safety violation: preserved table {label!r} changed from "
-                    f"{before[label]} to {after[label]}"
-                )
-        for label, _ in DERIVED_TABLE_DELETE_ORDER:
-            if after[label] != 0:
-                raise RuntimeError(
-                    f"Derived table {label!r} was not fully cleared: {after[label]} rows remain"
-                )
+        try:
+            for _label, model in DERIVED_TABLE_DELETE_ORDER:
+                db.execute(delete(model))
+            # Flush/count/verify before committing. Any failed invariant rolls
+            # back the destructive work while it is still reversible.
+            db.flush()
+            after = _counts(db)
+            for label, _ in PRESERVED_TABLE_LABELS:
+                if after[label] != before[label]:
+                    raise RuntimeError(
+                        f"Safety violation: preserved table {label!r} changed from "
+                        f"{before[label]} to {after[label]}"
+                    )
+            for label, _ in DERIVED_TABLE_DELETE_ORDER:
+                if after[label] != 0:
+                    raise RuntimeError(
+                        f"Derived table {label!r} was not fully cleared: {after[label]} rows remain"
+                    )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         print(
             {
                 "preserved_after": {k: after[k] for k, _ in PRESERVED_TABLE_LABELS},
@@ -168,7 +172,15 @@ def main() -> None:
         )
     )
     parser.add_argument("--apply", action="store_true", help="perform the reset")
+    parser.add_argument("--yes", action="store_true", help="skip the exact interactive confirmation")
     args = parser.parse_args()
+    if args.yes and not args.apply:
+        parser.error("--yes requires --apply")
+    if args.apply and not args.yes:
+        expected = "yes, reset local downstream"
+        if input(f"Type exactly to continue: {expected}\n> ").strip() != expected:
+            print("Aborted. No changes made.")
+            return
     reset_downstream(apply=args.apply)
 
 

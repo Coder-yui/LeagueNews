@@ -100,6 +100,18 @@ ConnectorRequest
 - 正常轮询从 watermark 向前重叠 `overlap_minutes`，边界消息和延迟返回依赖 RawItem 幂等；
 - truncated 批次使用短间隔继续，不等待完整正常周期。
 
+### X timeline attribution
+
+X recent timeline 只接受 envelope author 明确等于 Source 账号的消息，包括该账号发出的
+retweet；明确属于其他账号的普通帖、mention 和 retweet 都过滤。缺失 author id 时保守保留，
+避免上游 parser 字段变化造成整批误杀。
+
+`user_tweets(limit=...)` 的限制针对原始 timeline。recent collector 因而对每个实际消费的
+envelope 计数，且把被 attribution filter 丢弃的 external id 写入 `skipped_ids`。共享 cursor
+会将它们合并到 `pending_ids`，下一次 scan window 自动扩大并越过推荐内容。只有达到 `since`
+边界、generator 真正耗尽，或原始 scan window 未截断时才允许推进 watermark；不能用“有效消息
+不足 limit”判断完整扫描。
+
 ## 增加新平台
 
 新 Connector 必须：

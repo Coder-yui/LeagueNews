@@ -19,8 +19,9 @@ export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChan
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const stages = inferStages(item);
-  const canRetry = !item.normalized_item_id && run?.status === "failed";
-  const canRestartFromBeginning = !item.normalized_item_id && (
+  const retryPending = item.current_pipeline_job_retry_pending;
+  const canRetry = !retryPending && !item.normalized_item_id && run?.status === "failed";
+  const canRestartFromBeginning = !retryPending && !item.normalized_item_id && (
     run?.status === "failed" ||
     item.processing_status === "failed" ||
     item.current_pipeline_job_status === "failed"
@@ -76,6 +77,7 @@ export function ItemDetailCard({ item, onChanged }: { item: RawAdminItem; onChan
         {item.normalized_item_id && <><select aria-label="选择重跑阶段" value={stage} onChange={(event) => setStage(event.target.value as PipelineStageName)}>{PIPELINE_STAGES.map((name) => <option value={name} key={name}>{STAGE_LABELS[name]}</option>)}</select><button type="button" onClick={() => void rerun()} disabled={busy}>{busy ? "提交中…" : `重跑 ${STAGE_LABELS[stage]}`}</button></>}
         {canRetry && <button type="button" onClick={() => void retry()} disabled={busy}>{busy ? "提交中…" : "重试"}</button>}
         {canRestartFromBeginning && <button type="button" className="danger" onClick={() => void restartFromBeginning()} disabled={busy}>{busy ? "提交中…" : "从头重跑"}</button>}
+        {retryPending && <span className="admin-badge">等待自动重试</span>}
         <button type="button" onClick={() => setRawOpen((value) => !value)}>{rawOpen ? "隐藏原始 JSON" : "查看原始 JSON"}</button>{item.canonical_url && <a href={item.canonical_url} target="_blank" rel="noreferrer">查看原文</a>}
       </div>
       {error && <p className="admin-inline-error">{error}</p>}

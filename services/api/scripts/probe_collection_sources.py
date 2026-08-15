@@ -125,7 +125,7 @@ def _ensure_local_database() -> None:
         raise RuntimeError("refusing collection because the configured database is not local")
 
 
-async def _run(args: argparse.Namespace) -> None:
+async def _run(args: argparse.Namespace) -> bool:
     since = _parse_datetime_argument(args.since, option="--since")
     until = _parse_datetime_argument(args.until, option="--until")
     if until < since:
@@ -210,9 +210,13 @@ async def _run(args: argparse.Namespace) -> None:
         if index < len(sources) - 1:
             await asyncio.sleep(args.source_delay)
 
-    state["status"] = "completed"
+    has_failures = any(
+        source["status"] == "failed" for source in state["sources"].values()
+    )
+    state["status"] = "completed_with_failures" if has_failures else "completed"
     state["finished_at"] = _now()
     _save_state(state, state_file, report_file)
+    return not has_failures
 
 
 def main() -> None:
@@ -241,7 +245,8 @@ def main() -> None:
     )
     args = parser.parse_args()
     args.source_delay = max(args.source_delay, 0.0)
-    asyncio.run(_run(args))
+    if not asyncio.run(_run(args)):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from app.models.media_asset import MediaAsset
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.models.workflow import ProcessingRun
 
 
 def test_raw_item_list_exposes_admin_pipeline_projection() -> None:
@@ -203,6 +204,54 @@ def test_raw_item_admin_treats_retry_pending_job_as_processing() -> None:
     assert response.status_code == 200
     assert response.json()["total"] == 1
     assert response.json()["items"][0]["current_pipeline_job_status"] == "failed"
+    assert response.json()["items"][0]["current_pipeline_job_retry_pending"] is True
+
+
+def test_manual_retry_returns_conflict_while_automatic_retry_is_pending() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Automatic retry source", connector_type="manual")
+        db.add(source)
+        db.flush()
+        raw = RawItem(
+            source_id=source.id,
+            content_blocks=[{"type": "paragraph", "text": "Evidence"}],
+        )
+        db.add(raw)
+        db.flush()
+        run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="failed",
+            current_stage="importance",
+        )
+        job = PipelineJob(
+            raw_item_id=raw.id,
+            status="failed",
+            current_stage="importance",
+            next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        db.add_all([run, job])
+        db.commit()
+        run_id = run.id
+
+    def override_get_db():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        response = TestClient(app).post(f"/api/v1/workflows/runs/{run_id}/retry")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert "active pipeline job" in response.json()["detail"]
 
 
 def test_raw_item_admin_page_reports_total_and_paginates_beyond_100() -> None:

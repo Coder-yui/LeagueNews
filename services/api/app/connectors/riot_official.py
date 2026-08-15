@@ -37,12 +37,7 @@ class RiotOfficialConnector(BaseConnector[RiotArticleRecord]):
         *,
         http_client_factory: Callable[[], ConnectorHTTPClient] | None = None,
     ) -> None:
-        # The public Riot site is region-routed. Local environments may need
-        # their configured proxy to avoid the route being rewritten to the
-        # Tencent mirror; cloud deployments can still inject a direct client.
-        self.http_client_factory = http_client_factory or (
-            lambda: ConnectorHTTPClient(trust_env=True)
-        )
+        self.http_client_factory = http_client_factory or ConnectorHTTPClient
 
     async def fetch(self, request: ConnectorRequest) -> FetchBatch[RiotArticleRecord]:
         limit = min(max(request.limit, 1), 50)

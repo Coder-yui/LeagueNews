@@ -64,6 +64,7 @@ class RawItemRead(BaseModel):
     current_pipeline_stage: str | None = None
     current_pipeline_job_id: int | None = None
     current_pipeline_job_status: str | None = None
+    current_pipeline_job_retry_pending: bool = False
     processing_runs: list["RawItemProcessingRunRead"] = []
 
 

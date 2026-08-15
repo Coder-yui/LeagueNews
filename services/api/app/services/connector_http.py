@@ -1,5 +1,4 @@
 import asyncio
-import os
 from urllib.parse import urlsplit
 
 import httpx
@@ -12,18 +11,12 @@ class ConnectorHTTPError(RuntimeError):
 
 
 class ConnectorHTTPClient:
-    def __init__(self, *, max_attempts: int = 3, trust_env: bool = False) -> None:
+    def __init__(self, *, max_attempts: int = 3) -> None:
         self.max_attempts = max_attempts
-        proxy = None
-        if trust_env:
-            # Prefer HTTP(S) proxies. Some local environments also export a
-            # SOCKS ALL_PROXY without installing socksio, which would make
-            # httpx fail before it can issue a request.
-            proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self._client = httpx.AsyncClient(
             follow_redirects=True,
             trust_env=False,
-            proxy=proxy,
+            proxy=settings.outbound_proxy_url or None,
             timeout=httpx.Timeout(30, connect=10),
             headers={"User-Agent": settings.connector_user_agent},
         )

@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.core.config import settings
+
 
 class FeishuDeliveryError(RuntimeError):
     """The Feishu webhook did not accept a notification."""
@@ -37,11 +39,12 @@ class FeishuBotClient:
             payload["timestamp"] = timestamp
             payload["sign"] = self.signature(timestamp, self.secret)
         try:
-            # Feishu webhook delivery is a direct outbound integration. Do not inherit
-            # an ambient SOCKS/HTTP proxy that may not be supported by the slim runtime.
+            # Only the explicit deployment proxy is honored; ambient environment
+            # variables must not change delivery behavior.
             async with self.client_factory(
                 timeout=self.timeout_seconds,
                 trust_env=False,
+                proxy=settings.outbound_proxy_url or None,
             ) as client:
                 response = await client.post(self.webhook_url, json=payload)
         except httpx.HTTPError as exc:

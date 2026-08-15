@@ -13,7 +13,7 @@ from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem
 from app.models.ocr_lab import OCRProfile
-from app.models.pipeline import ProcessingCheckpoint
+from app.models.pipeline import PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
@@ -1463,6 +1463,36 @@ def test_restart_continues_from_each_rejected_stage(monkeypatch) -> None:
             assert new_run.status == "awaiting_review"
             assert old_run.status == "rejected"
             assert generated_stages == [stage]
+
+
+def test_manual_retry_rejects_an_active_automatic_pipeline_job() -> None:
+    with _session() as db:
+        raw = _raw_item(db)
+        failed_run = ProcessingRun(
+            raw_item_id=raw.id,
+            workflow_type="item",
+            status="failed",
+            current_stage="importance",
+        )
+        retry_pending = PipelineJob(
+            raw_item_id=raw.id,
+            status="failed",
+            current_stage="importance",
+            next_attempt_at=datetime.now(UTC),
+        )
+        db.add_all([failed_run, retry_pending])
+        db.commit()
+
+        with pytest.raises(ValueError, match="active pipeline job"):
+            asyncio.run(retry_processing_run(db, failed_run))
+
+        assert len(
+            list(
+                db.scalars(
+                    select(ProcessingRun).where(ProcessingRun.raw_item_id == raw.id)
+                )
+            )
+        ) == 1
 
 
 def test_start_from_relevance_creates_fresh_run_without_failed_context(monkeypatch) -> None:

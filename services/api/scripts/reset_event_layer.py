@@ -46,28 +46,40 @@ def reset_event_layer(*, apply: bool) -> None:
             print("Dry run only. Add --apply to delete Event layer rows.")
             return
 
-        # Delete children first so the operation is valid on fresh and upgraded DBs.
-        db.execute(delete(EventMention))
-        db.execute(delete(EventRevision))
-        db.execute(delete(Event))
-        db.execute(delete(EventAggregationRun))
-        db.commit()
-
-        after = _counts(db)
-        if after["raw_items"] != before["raw_items"]:
-            raise RuntimeError("RawItem count changed during event reset")
-        if after["normalized_items"] != before["normalized_items"]:
-            raise RuntimeError("NormalizedItem count changed during event reset")
-        expected_zero = ("events", "event_mentions", "event_revisions", "event_aggregation_runs")
-        if any(after[key] != 0 for key in expected_zero):
-            raise RuntimeError(f"Event layer was not fully cleared: {after}")
+        try:
+            # Delete children first so the operation is valid on fresh and upgraded DBs.
+            db.execute(delete(EventMention))
+            db.execute(delete(EventRevision))
+            db.execute(delete(Event))
+            db.execute(delete(EventAggregationRun))
+            db.flush()
+            after = _counts(db)
+            if after["raw_items"] != before["raw_items"]:
+                raise RuntimeError("RawItem count changed during event reset")
+            if after["normalized_items"] != before["normalized_items"]:
+                raise RuntimeError("NormalizedItem count changed during event reset")
+            expected_zero = ("events", "event_mentions", "event_revisions", "event_aggregation_runs")
+            if any(after[key] != 0 for key in expected_zero):
+                raise RuntimeError(f"Event layer was not fully cleared: {after}")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         print({"after": after})
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reset local Event aggregation data only.")
     parser.add_argument("--apply", action="store_true", help="perform the reset")
+    parser.add_argument("--yes", action="store_true", help="skip the exact interactive confirmation")
     args = parser.parse_args()
+    if args.yes and not args.apply:
+        parser.error("--yes requires --apply")
+    if args.apply and not args.yes:
+        expected = "yes, reset event layer"
+        if input(f"Type exactly to continue: {expected}\n> ").strip() != expected:
+            print("Aborted. No changes made.")
+            return
     reset_event_layer(apply=args.apply)
 
 

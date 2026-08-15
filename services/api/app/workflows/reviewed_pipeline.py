@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,7 @@ from app.models.normalized_item import (
     NormalizedItemMediaExtraction,
     NormalizedItemRevision,
 )
-from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
+from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import GlossaryTerm, KnowledgeRule, ProcessingRun, ReviewTask
 from app.schemas.workflow import OCRReviewCorrection, ReviewRejection
@@ -164,6 +164,20 @@ async def retry_processing_run(db: Session, run: ProcessingRun) -> ProcessingRun
         raise ValueError(f"processing run cannot restart from status={run.status}")
     if run.raw_item.normalized_item:
         raise ValueError("raw item already has an approved normalized item")
+    active_job = db.scalar(
+        select(PipelineJob.id).where(
+            PipelineJob.raw_item_id == run.raw_item_id,
+            or_(
+                PipelineJob.status.in_(["queued", "running"]),
+                and_(
+                    PipelineJob.status == "failed",
+                    PipelineJob.next_attempt_at.is_not(None),
+                ),
+            ),
+        )
+    )
+    if active_job is not None:
+        raise ValueError(f"raw item already has active pipeline job {active_job}")
     active = db.scalar(
         select(ProcessingRun).where(
             ProcessingRun.raw_item_id == run.raw_item_id,

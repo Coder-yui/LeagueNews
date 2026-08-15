@@ -221,6 +221,7 @@ class XTwitterConnector(BaseConnector[object]):
                 raise_when_no_account=True,
                 wait_timeout=15,
                 wait_interval=1,
+                proxy=settings.outbound_proxy_url or None,
             )
         from twscrape import API
 
@@ -229,6 +230,7 @@ class XTwitterConnector(BaseConnector[object]):
             raise_when_no_account=True,
             wait_timeout=15,
             wait_interval=1,
+            proxy=settings.outbound_proxy_url or None,
         )
 
     @staticmethod

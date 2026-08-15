@@ -38,6 +38,21 @@ def request(source: ConnectorSource | None = None) -> ConnectorRequest:
     )
 
 
+def test_x_uses_explicit_outbound_proxy_for_twscrape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: dict[str, object] = {}
+
+    def make_api(*_args: object, **kwargs: object) -> object:
+        received.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(settings, "outbound_proxy_url", "http://127.0.0.1:7897")
+    XTwitterConnector(api_factory=make_api)._make_api(tmp_path / "twscrape.db")
+
+    assert received["proxy"] == "http://127.0.0.1:7897"
+
+
 def test_x_maps_text_media_alt_and_quote_without_secrets() -> None:
     tweet = json.loads((FIXTURES / "x_user_tweets.json").read_text(encoding="utf-8"))[0]
     tweet["date"] = datetime.fromisoformat(tweet["date"])

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     media_root: str = "../../apps/web/public/media"
     media_max_bytes: int = 20 * 1024 * 1024
     connector_user_agent: str = "LoLDailyIntel/0.1 (local development)"
+    outbound_proxy_url: str = ""
     x_cookie_file: str = ".secrets/x-cookies.json"
     x_fetch_limit: int = 10
     weibo_browser_profile: str = ".secrets/weibo-browser-profile"

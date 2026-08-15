@@ -5,6 +5,7 @@ x-common-environment: &common-environment
   MEDIA_ROOT: /data/media
   MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-20971520}
   CONNECTOR_USER_AGENT: ${CONNECTOR_USER_AGENT}
+  OUTBOUND_PROXY_URL: ${OUTBOUND_PROXY_URL:-}
 
 x-llm-environment: &llm-environment
   OPENAI_API_KEY: ${OPENAI_API_KEY}

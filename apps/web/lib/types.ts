@@ -128,6 +128,7 @@ export type RawAdminItem = {
   current_pipeline_stage: string | null;
   current_pipeline_job_id: number | null;
   current_pipeline_job_status: string | null;
+  current_pipeline_job_retry_pending: boolean;
   processing_runs: ProcessingRun[];
 };
 
@@ -286,6 +287,7 @@ export type PipelineJob = {
   current_stage: string;
   processing_run_id: number | null;
   attempts: number;
+  next_attempt_at: string | null;
   error_message: string | null;
   last_checkpoint_id: number | null;
   created_at: string;

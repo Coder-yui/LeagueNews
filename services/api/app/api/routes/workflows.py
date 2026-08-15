@@ -355,5 +355,7 @@ async def retry_run(run_id: int, db: Session = Depends(get_db)) -> object:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    except (LLMAnalysisError, OCRProcessingError, RuntimeError, ValueError) as exc:
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (LLMAnalysisError, OCRProcessingError, RuntimeError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

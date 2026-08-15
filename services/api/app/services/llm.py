@@ -190,7 +190,10 @@ class LLMClient:
                 base_url=settings.openai_base_url,
                 timeout=settings.llm_timeout_seconds,
                 max_retries=settings.llm_max_retries,
-                http_client=httpx.AsyncClient(trust_env=False),
+                http_client=httpx.AsyncClient(
+                    trust_env=False,
+                    proxy=settings.outbound_proxy_url or None,
+                ),
             )
             if self.enabled
             else None

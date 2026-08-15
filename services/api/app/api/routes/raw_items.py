@@ -85,6 +85,11 @@ def _raw_item_payloads(
                 "current_pipeline_stage": job.current_stage if job else None,
                 "current_pipeline_job_id": job.id if job else None,
                 "current_pipeline_job_status": job.status if job else None,
+                "current_pipeline_job_retry_pending": bool(
+                    job
+                    and job.status == "failed"
+                    and job.next_attempt_at is not None
+                ),
                 "processing_runs": sorted(
                     item.processing_runs, key=lambda run: run.id, reverse=True
                 ),

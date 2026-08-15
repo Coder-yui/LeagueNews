@@ -1,9 +1,9 @@
 "use client";
 
-import { Menu, X } from "lucide-react";
+import { Menu, Moon, Sun, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const navigation = [
   { href: "/", label: "首页", match: (pathname: string) => pathname === "/" },
@@ -15,14 +15,41 @@ const navigation = [
 export function SiteHeader() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+
+  useEffect(() => {
+    const initialTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    setTheme(initialTheme);
+  }, []);
+
+  function toggleTheme() {
+    const currentTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    const nextTheme = currentTheme === "light" ? "dark" : "light";
+    document.documentElement.dataset.theme = nextTheme;
+    window.localStorage.setItem("leaguenews-theme", nextTheme);
+    setTheme(nextTheme);
+  }
 
   return (
     <header className="public-header">
       <div className="public-header-inner">
-        <Link className="public-brand" href="/" aria-label="LeagueNews 首页" onClick={() => setOpen(false)}>
-          <span className="public-brand-mark" aria-hidden="true"><i />LN</span>
-          <span className="public-brand-name">LeagueNews<small>峡谷资讯纪事</small></span>
-        </Link>
+        <div className="public-brand-cluster">
+          <Link className="public-brand" href="/" aria-label="LeagueNews 首页" onClick={() => setOpen(false)}>
+            <span className="public-brand-mark" aria-hidden="true"><i />LN</span>
+            <span className="public-brand-name">LeagueNews<small>峡谷资讯纪事</small></span>
+          </Link>
+          <button
+            className="public-theme-toggle"
+            type="button"
+            aria-label={theme === "light" ? "切换深色主题" : "切换浅色主题"}
+            title={theme === "light" ? "深色主题" : "浅色主题"}
+            aria-pressed={theme === "dark"}
+            onClick={toggleTheme}
+          >
+            <Sun className="public-theme-icon public-theme-icon-sun" size={16} strokeWidth={1.8} />
+            <Moon className="public-theme-icon public-theme-icon-moon" size={16} strokeWidth={1.8} />
+          </button>
+        </div>
         <button
           className="public-menu-button"
           type="button"

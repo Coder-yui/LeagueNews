@@ -86,7 +86,8 @@ export default async function Home() {
           <Link className="ln-text-link" href={`/daily?date=${digestDate}`}>阅读最新简报 <ArrowRight size={14} /></Link>
         </div>
         <div className="home-digest-art" aria-hidden="true">
-          <Image src="/images/heimerdinger-diary.png" alt="" fill sizes="(max-width: 760px) 100vw, 700px" />
+          <Image className="home-digest-art-light" src="/images/heimerdinger-diary.png" alt="" fill sizes="(max-width: 760px) 100vw, 700px" />
+          <Image className="home-digest-art-dark" src="/images/lux-attic-daily-dark.jpg" alt="" fill sizes="(max-width: 760px) 100vw, 700px" />
         </div>
       </section>
     </PublicShell>

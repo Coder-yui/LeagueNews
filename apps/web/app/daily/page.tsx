@@ -53,7 +53,7 @@ export default async function DailyReportPage({ searchParams }: { searchParams: 
       >
         <div className="daily-date-bar">
           <Link href={`/daily?date=${adjacentDate(reportDate, -1)}`} aria-label="前一天"><ArrowLeft size={16} /></Link>
-          <form action="/daily" method="get"><CalendarDays size={15} /><input type="date" name="date" defaultValue={reportDate} /><button type="submit">查看</button></form>
+          <form action="/daily" method="get"><CalendarDays size={15} /><input key={reportDate} type="date" name="date" defaultValue={reportDate} /><button type="submit">查看</button></form>
           <Link href={`/daily?date=${adjacentDate(reportDate, 1)}`} aria-label="后一天"><ArrowRight size={16} /></Link>
           {reportDate !== latestDate && <Link className="daily-latest-link" href={`/daily?date=${latestDate}`}>返回最新日报</Link>}
         </div>

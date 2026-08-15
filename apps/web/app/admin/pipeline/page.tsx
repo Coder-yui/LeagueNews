@@ -21,6 +21,7 @@ function rowStatus(
   item: RawAdminItem,
 ): Exclude<FilterStatus, "all"> | "pending" {
   const run = item.processing_runs[0];
+  if (item.current_pipeline_job_retry_pending) return "processing";
   if (
     run?.status === "failed" ||
     item.current_pipeline_job_status === "failed" ||

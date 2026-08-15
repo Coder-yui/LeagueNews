@@ -47,6 +47,23 @@ POST /api/v1/raw-items/{raw_item_id}/process
 
 ## 2. 启动与基础检查
 
+### 出站代理
+
+本地需要通过 Clash 访问海外资源时，在 `.env` 设置：
+
+```dotenv
+OUTBOUND_PROXY_URL=http://127.0.0.1:7897
+```
+
+海外生产默认直连，保持：
+
+```dotenv
+OUTBOUND_PROXY_URL=
+```
+
+LeagueNews 不依赖系统 `HTTP_PROXY` 或 `HTTPS_PROXY`；相关 HTTP client 使用
+`trust_env=False`，只读取 `OUTBOUND_PROXY_URL`。
+
 ### 2.1 推荐启动方式
 
 在项目根目录执行：

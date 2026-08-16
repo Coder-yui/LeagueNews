@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session, attributes
 import app.models  # noqa: F401
 from app.core.database import Base
 from app.domain.event_admission import derive_event_space, minimal_event_filter
+from app.domain.esports_match_identity import esports_match_identity_conflict
+from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
@@ -20,6 +22,7 @@ from app.services.events import create_event
 from app.repositories.events import current_event_mention_conditions
 from app.services.llm import LLMAnalysisError
 from app.workflows.event_aggregation import (
+    EsportsMatchIdentityConflictError,
     STALE_RUNNING_RUN_AFTER,
     aggregate_normalized_item,
 )
@@ -149,6 +152,27 @@ def _create_decision(
             "latest_development": "首次出现",
             "key_facts": [],
         },
+    }
+
+
+def _esports_attach_decision(
+    *,
+    event_id: int,
+    match_identity: dict[str, object],
+    candidate_match_identity: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "mention_index": 0,
+        "action": "attach",
+        "event_id": event_id,
+        "product": "lol_esports",
+        "event_family": "esports_match",
+        "relation": "reports",
+        "source_role": "unknown",
+        "materiality": "material_update",
+        "evidence_excerpt": "BLG 对阵 TES",
+        "match_identity": match_identity,
+        "candidate_match_identity": candidate_match_identity,
     }
 
 
@@ -523,6 +547,290 @@ def test_attach_must_reference_this_request_candidate_set() -> None:
         assert run.outcome == "apply_error"
 
 
+def test_esports_match_date_conflict_blocks_forced_attach_before_membership_write() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="match occurrence conflict")
+        db.add(source)
+        db.flush()
+        seed_item = _item(
+            db,
+            source=source,
+            external_id="blg-tes-aug14",
+            title="8 月 14 日 BLG 对阵 TES",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+            published_at=datetime(2026, 8, 14, 8, tzinfo=UTC),
+        )
+        db.commit()
+        existing, _ = create_event(
+            db,
+            normalized_item_id=seed_item.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={
+                "participants": ["BLG", "TES"],
+                "match_date": "2026-08-14",
+                "series_format": "BO3",
+            },
+            title="BLG 对阵 TES（8 月 14 日）",
+            current_summary="BLG 与 TES 于 8 月 14 日进行 BO3。",
+            evidence_excerpt="8 月 14 日 BLG 对阵 TES",
+        )
+        item = _item(
+            db,
+            source=source,
+            external_id="blg-tes-aug16",
+            title="8 月 16 日 BLG 对阵 TES",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 8, tzinfo=UTC),
+        )
+        db.commit()
+        client = StaticClient(
+            _result(
+                _esports_attach_decision(
+                    event_id=existing.id,
+                    match_identity={
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                        "series_format": "BO3",
+                    },
+                    candidate_match_identity={
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-14",
+                        "series_format": "BO3",
+                    },
+                )
+            )
+        )
+
+        with pytest.raises(EsportsMatchIdentityConflictError, match="match_date"):
+            _aggregate(db, item, client)
+
+        db.refresh(existing)
+        assert db.scalar(select(func.count(EventMention.id))) == 1
+        assert existing.current_revision == 1
+        assert existing.canonical_anchors["match_date"] == "2026-08-14"
+        run = db.scalar(
+            select(EventAggregationRun).where(
+                EventAggregationRun.normalized_item_id == item.id
+            )
+        )
+        assert run is not None
+        assert run.status == "failed"
+        assert run.outcome == "apply_error"
+
+
+def test_same_esports_match_date_attaches_and_enriches_missing_identity() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="same match lifecycle")
+        db.add(source)
+        db.flush()
+        seed_item = _item(
+            db,
+            source=source,
+            external_id="blg-tes-preview",
+            title="BLG 对阵 TES 赛前预告",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+            published_at=datetime(2026, 8, 15, 8, tzinfo=UTC),
+        )
+        db.commit()
+        existing, _ = create_event(
+            db,
+            normalized_item_id=seed_item.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={
+                "participants": ["BLG", "TES"],
+                "match_date": "2026-08-16",
+            },
+            title="BLG 对阵 TES",
+            current_summary="BLG 与 TES 将于 8 月 16 日比赛。",
+            evidence_excerpt="BLG 对阵 TES 赛前预告",
+        )
+        item = _item(
+            db,
+            source=source,
+            external_id="blg-tes-result",
+            title="BLG 对阵 TES 赛果",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 14, tzinfo=UTC),
+        )
+        db.commit()
+        client = StaticClient(
+            _result(
+                _esports_attach_decision(
+                    event_id=existing.id,
+                    match_identity={
+                        "participants": ["BLG", "TES"],
+                        "competition": "LPL",
+                        "match_date": "2026-08-16",
+                        "series_format": "BO3",
+                    },
+                    candidate_match_identity={
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                    },
+                )
+            )
+        )
+
+        run = _aggregate(db, item, client)
+
+        db.refresh(existing)
+        assert run.outcome == "applied"
+        assert db.scalar(select(func.count(EventMention.id))) == 2
+        assert existing.canonical_anchors == {
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+            "competition": "LPL",
+            "series_format": "BO3",
+        }
+
+
+def test_created_esports_match_persists_explicit_occurrence_identity() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="new match identity")
+        db.add(source)
+        db.flush()
+        item = _item(
+            db,
+            source=source,
+            external_id="new-blg-tes-match",
+            title="8 月 16 日 BLG 对阵 TES",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+        )
+        db.commit()
+        decision = _create_decision(
+            product="lol_esports",
+            family="esports_match",
+            title="BLG 对阵 TES（8 月 16 日）",
+            summary="BLG 与 TES 于 8 月 16 日进行 BO3。",
+            evidence="8 月 16 日 BLG 对阵 TES",
+        )
+        decision["match_identity"] = {
+            "participants": ["BLG", "TES"],
+            "competition": "LPL",
+            "match_date": "2026-08-16",
+            "series_format": "BO3",
+            "external_match_id": "lpl-2026-0816-blg-tes",
+        }
+        client = StaticClient(_result(decision))
+
+        run = _aggregate(db, item, client)
+
+        event = db.scalar(select(Event))
+        mention = db.scalar(select(EventMention))
+        assert run.outcome == "applied"
+        assert event is not None
+        assert mention is not None
+        assert run.aggregation_policy_version == AGGREGATION_POLICY_VERSION
+        assert event.aggregation_policy_version == AGGREGATION_POLICY_VERSION
+        assert mention.aggregation_policy_version == AGGREGATION_POLICY_VERSION
+        assert event.canonical_anchors["patch_version"] == "26.17"
+        assert event.canonical_anchors["participants"] == ["BLG", "TES"]
+        assert event.canonical_anchors["match_date"] == "2026-08-16"
+        assert event.canonical_anchors["external_match_id"] == "lpl-2026-0816-blg-tes"
+
+
+def test_missing_incoming_match_date_does_not_block_semantic_attach() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="missing match date")
+        db.add(source)
+        db.flush()
+        seed_item = _item(
+            db,
+            source=source,
+            external_id="dated-match",
+            title="BLG 对阵 TES",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+        )
+        db.commit()
+        existing, _ = create_event(
+            db,
+            normalized_item_id=seed_item.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={
+                "participants": ["BLG", "TES"],
+                "match_date": "2026-08-16",
+            },
+            title="BLG 对阵 TES",
+            current_summary="BLG 与 TES 将于 8 月 16 日比赛。",
+            evidence_excerpt="BLG 对阵 TES",
+        )
+        item = _item(
+            db,
+            source=source,
+            external_id="undated-result",
+            title="BLG 对阵 TES 赛果",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+        )
+        db.commit()
+        client = StaticClient(
+            _result(
+                _esports_attach_decision(
+                    event_id=existing.id,
+                    match_identity={"participants": ["BLG", "TES"]},
+                    candidate_match_identity={
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                    },
+                )
+            )
+        )
+
+        run = _aggregate(db, item, client)
+
+        assert run.outcome == "applied"
+        assert db.scalar(select(func.count(EventMention.id))) == 2
+
+
+@pytest.mark.parametrize(
+    ("existing", "incoming", "expected_field"),
+    [
+        (
+            {"external_match_id": "lpl-100"},
+            {"external_match_id": "lpl-101"},
+            "external_match_id",
+        ),
+        ({"stage": "Group Stage"}, {"stage": "Playoffs"}, "stage"),
+        ({"round": "Upper Round 1"}, {"round": "Lower Round 2"}, "round"),
+        (
+            {"scheduled_at": "2026-08-14T23:00:00+08:00"},
+            {"scheduled_at": "2026-08-16T19:00:00+08:00"},
+            "match_date",
+        ),
+    ],
+)
+def test_esports_match_explicit_identity_conflicts_are_deterministic(
+    existing: dict[str, object], incoming: dict[str, object], expected_field: str
+) -> None:
+    assert expected_field in str(esports_match_identity_conflict(existing, incoming))
+
+
+def test_esports_match_missing_identity_field_is_not_a_hard_conflict() -> None:
+    assert (
+        esports_match_identity_conflict(
+            {"match_date": "2026-08-16", "round": "Upper Round 1"},
+            {"participants": ["BLG", "TES"]},
+        )
+        is None
+    )
+
+
 def test_multi_mention_failure_rolls_back_all_membership_writes() -> None:
     engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
@@ -640,7 +948,10 @@ def test_running_event_aggregation_run_cannot_be_reused_for_another_model_call()
             normalized_item_revision=item.current_revision,
             status="running",
             current_stage="model_decision",
-            idempotency_key=f"{item.id}:{item.current_revision}:event-aggregation-v6-lifecycle-cohesion",
+            idempotency_key=(
+                f"{item.id}:{item.current_revision}:"
+                "event-aggregation-v7-match-occurrence-boundary"
+            ),
         )
         db.add(existing_run)
         db.commit()
@@ -681,9 +992,10 @@ def test_stale_running_run_reuses_persisted_decision_without_duplicate_membershi
             normalized_item_revision=item.current_revision,
             status="running",
             current_stage="apply_membership",
-            aggregation_policy_version="event-aggregation-v6-lifecycle-cohesion",
+            aggregation_policy_version="event-aggregation-v7-match-occurrence-boundary",
             idempotency_key=(
-                f"{item.id}:{item.current_revision}:event-aggregation-v6-lifecycle-cohesion"
+                f"{item.id}:{item.current_revision}:"
+                "event-aggregation-v7-match-occurrence-boundary"
             ),
             model_call_count=1,
             candidate_snapshot=[],
@@ -720,7 +1032,7 @@ def test_stale_previous_revision_run_does_not_block_current_revision() -> None:
             status="running",
             current_stage="model_decision",
             idempotency_key=(
-                f"{item.id}:1:event-aggregation-v6-lifecycle-cohesion"
+                f"{item.id}:1:event-aggregation-v7-match-occurrence-boundary"
             ),
         )
         db.add(old_run)

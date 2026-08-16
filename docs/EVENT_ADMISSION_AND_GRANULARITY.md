@@ -1,6 +1,6 @@
 # Event Filtering, Recall, and Granularity
 
-> Policy version: `event-aggregation-v6-lifecycle-cohesion`
+> Policy version: `event-aggregation-v7-match-occurrence-boundary`
 
 ## Minimal filter
 
@@ -32,6 +32,21 @@ series, launch window, status and follow-up path remain `key_facts` of one Event
 routine balance changes and a same-batch skin lineup without encoding those examples as Python
 policy. A separately named release with its own status and follow-up path may become another Event.
 Python validates structure and routing, not semantic identity or a message-type-specific count.
+
+### Esports match occurrence boundary
+
+`esports_match` is one concrete match or series occurrence. A preview, live update and result for
+that occurrence belong to the same Event, but the same participants meeting again belong to a new
+Event. The model considers participants, competition, stage/round, match date or scheduled time,
+series format and an official external match ID when available. Participants alone do not establish
+identity, and projection updates cannot turn an old match Event into a later match.
+
+The workflow records explicit match identity facts in `canonical_anchors` and applies a narrow hard
+conflict guard to attach decisions. For older candidates with missing structured anchors, the same
+model response also extracts facts explicitly present in the candidate title, summary and key facts.
+When both sides provide incompatible match dates, external match IDs, stages or rounds, attach is
+rejected. A field missing on either side is not a hard conflict and the semantic decision remains
+with the model. Message publication timestamps are never treated as match dates.
 
 Family-specific examples are evaluation data, not Python policy. See
 `services/api/evals/event_aggregation_v2_cases.json`.

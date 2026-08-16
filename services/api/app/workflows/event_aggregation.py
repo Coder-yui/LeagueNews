@@ -10,6 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.domain.event_admission import AdmissionDecision, minimal_event_filter
+from app.domain.esports_match_identity import (
+    esports_match_identity_conflict,
+    merge_match_identity,
+)
 from app.domain.event_families import EventSpace, product_supports_family
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun
@@ -34,6 +38,10 @@ STALE_RUNNING_RUN_AFTER = timedelta(seconds=settings.pipeline_worker_lease_secon
 
 class SupersededEventAggregationError(RuntimeError):
     """The requested NormalizedItem revision is no longer the current projection."""
+
+
+class EsportsMatchIdentityConflictError(ValueError):
+    """An attach attempted to cross a known esports match occurrence boundary."""
 
 
 def _run_key(item: NormalizedItem) -> str:
@@ -412,6 +420,36 @@ def _validate_repost_actions(item: NormalizedItem, result: EventAggregationResul
         raise ValueError("repost messages cannot create events")
 
 
+def _decision_match_identity(decision: EventMentionDecision) -> dict[str, Any]:
+    if decision.match_identity is None:
+        return {}
+    return decision.match_identity.model_dump(mode="json", exclude_none=True)
+
+
+def _decision_candidate_match_identity(
+    decision: EventMentionDecision,
+) -> dict[str, Any]:
+    if decision.candidate_match_identity is None:
+        return {}
+    return decision.candidate_match_identity.model_dump(mode="json", exclude_none=True)
+
+
+def _validate_esports_match_attach(event: Event, decision: EventMentionDecision) -> None:
+    if decision.event_family != "esports_match":
+        return
+    candidate_identity = merge_match_identity(
+        event.canonical_anchors or {}, _decision_candidate_match_identity(decision)
+    )
+    conflict = esports_match_identity_conflict(
+        candidate_identity, _decision_match_identity(decision)
+    )
+    if conflict:
+        raise EsportsMatchIdentityConflictError(
+            f"mention[{decision.mention_index}] cannot attach to esports_match Event "
+            f"{event.id}: {conflict}"
+        )
+
+
 def apply_membership_transaction(
     db: Session,
     *,
@@ -449,13 +487,20 @@ def apply_membership_transaction(
                 raise ValueError("create mention is missing new_event")
             if decision.event_family is None:
                 raise ValueError("create mention is missing event_family")
+            canonical_anchors = dict(seed.canonical_anchors)
+            if decision.event_family == "esports_match":
+                canonical_anchors = merge_match_identity(
+                    canonical_anchors,
+                    _decision_match_identity(decision),
+                    overwrite=True,
+                )
             event, _created = create_event(
                 db,
                 normalized_item_id=item.id,
                 mention_index=decision.mention_index,
                 event_family=decision.event_family,
                 products=[resolved_products[decision.mention_index]],
-                canonical_anchors=seed.canonical_anchors,
+                canonical_anchors=canonical_anchors,
                 title=seed.title,
                 current_summary=seed.summary,
                 relation=decision.relation,
@@ -472,10 +517,26 @@ def apply_membership_transaction(
         else:
             if decision.event_family is None:
                 raise ValueError("attach mention is missing event_family")
-            event = db.get(Event, int(decision.event_id or 0))
+            event = db.scalar(
+                select(Event)
+                .where(Event.id == int(decision.event_id or 0))
+                .with_for_update()
+            )
             if event is None:
                 raise ValueError(f"candidate event {decision.event_id} disappeared")
+            _validate_esports_match_attach(event, decision)
             proposal = decision.projection
+            canonical_anchors = None
+            if decision.event_family == "esports_match":
+                enriched_anchors = merge_match_identity(
+                    event.canonical_anchors or {},
+                    _decision_candidate_match_identity(decision),
+                )
+                enriched_anchors = merge_match_identity(
+                    enriched_anchors, _decision_match_identity(decision)
+                )
+                if enriched_anchors != (event.canonical_anchors or {}):
+                    canonical_anchors = enriched_anchors
             event, _added = add_event_mention(
                 db,
                 event_id=event.id,
@@ -490,6 +551,7 @@ def apply_membership_transaction(
                 title=proposal.title if proposal else None,
                 current_summary=proposal.summary if proposal else None,
                 latest_development=proposal.latest_development if proposal else None,
+                canonical_anchors=canonical_anchors,
                 key_facts=proposal.key_facts if proposal else None,
                 commit=False,
                 use_savepoint=False,

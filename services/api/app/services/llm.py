@@ -11,6 +11,10 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.config import settings
+from app.domain.esports_match_identity import (
+    esports_match_identity_conflict,
+    merge_match_identity,
+)
 from app.domain.importance import (
     AudienceRegion,
     CompetitionRegion,
@@ -388,6 +392,32 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                     return (
                         f"mention[{mention.mention_index}] attach 的 product 必须与候选 Event 完全一致"
                     )
+                if mention.event_family == "esports_match":
+                    incoming_identity = (
+                        mention.match_identity.model_dump(mode="json", exclude_none=True)
+                        if mention.match_identity is not None
+                        else {}
+                    )
+                    extracted_candidate_identity = (
+                        mention.candidate_match_identity.model_dump(
+                            mode="json", exclude_none=True
+                        )
+                        if mention.candidate_match_identity is not None
+                        else {}
+                    )
+                    candidate_identity = merge_match_identity(
+                        candidate.get("canonical_anchors") or {},
+                        extracted_candidate_identity,
+                    )
+                    conflict = esports_match_identity_conflict(
+                        candidate_identity, incoming_identity
+                    )
+                    if conflict:
+                        return (
+                            f"mention[{mention.mention_index}] 不能 attach 到 candidate Event "
+                            f"{mention.event_id}：这是不同的具体比赛场次（{conflict}）。"
+                            "请根据当前消息改为 create 或 ignore；不得用 projection 改写旧比赛。"
+                        )
             return None
 
         prompt = """你是 LeagueNews 的事件聚合编辑器。输入是一条已经完成翻译、摘要、分类和实体
@@ -444,7 +474,10 @@ event_family 语义边界：
   即使奖励是外观也不因此改成 cosmetic_release。
 - commercial_offer 是商店、付费商品或限时销售变化；service_incident 是具体故障、热修或服务异常；
   platform_service 是平台能力或服务产品本身的发布/变化。
-- esports_match 是一场具体比赛的完整生命周期，包括赛前确定的对阵与时间、进行中更新和赛果；
+- esports_match 是一场具体比赛/series occurrence 的完整生命周期，包括赛前确定的对阵与时间、
+  进行中更新和赛果；它不是两支队伍之间抽象的对阵关系。同两队不同日期、不同 stage/round 或不同
+  official external match id 的比赛必须是不同 Event；双方相同仅是召回信号，绝不是 attach 依据。
+  同一场比赛的赛前、进行中和赛果应 attach 到同一 Event。
   esports_schedule 只用于赛事日历/赛程体系本身，或延期、改期、场地、对阵、赛制等实质安排变化，
   不能因为消息是赛前预告就把具体比赛改成 esports_schedule。
 - roster_change 是选手/教练/阵容变动；esports_rules 是赛事规则和竞赛制度变化。
@@ -459,6 +492,15 @@ event_family 语义边界：
   与 mention.product 完全一致。
 - create 不引用 event_id，必须提供最小 new_event.title 和 new_event.summary。
   canonical_anchors 仅是可选描述/召回特征，不需要完整，也不得虚构。
+- esports_match 的 create/attach 必须在 match_identity 中提取当前消息明确给出的比赛身份信息，包括
+  participants、competition、stage、round、match_date、scheduled_at、series_format、external_match_id；
+  没有证据的字段保持缺失，不能猜造。match_date 使用比赛发生日期而不是消息 published_at。
+  判断 attach 时，双方都有值且 match_date、external_match_id、stage 或 round 明确冲突就是硬冲突，
+  必须 create/ignore；一侧字段缺失不是冲突，继续结合其他语义判断。不得通过 projection 把旧比赛
+  Event 改写成新场次。
+- esports_match 的 attach 还必须在 candidate_match_identity 中从所引用候选的 anchors、标题、摘要和
+  key facts 提取候选明确给出的同类身份信息。该对象描述候选而非当前消息；即使旧候选的 anchors 尚未
+  结构化日期，也要忠实提取候选展示信息中明确存在的日期。没有证据的字段仍保持缺失。
 - ignore 不引用 Event。
 - create/attach 的 evidence_excerpt 必须来自当前消息。
 - relation、source_role、materiality 描述当前 mention。只有 materiality=material_update 的 attach 才能

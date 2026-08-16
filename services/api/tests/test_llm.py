@@ -550,6 +550,88 @@ def test_event_aggregation_retries_attach_with_candidate_family_mismatch() -> No
         )
 
 
+def test_event_aggregation_retries_esports_match_occurrence_conflict_as_create() -> None:
+    wrong_attach = json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "action": "attach",
+                    "event_id": 17,
+                    "product": "lol_esports",
+                    "event_family": "esports_match",
+                    "relation": "reports",
+                    "source_role": "unknown",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "8 月 16 日 BLG 对阵 TES",
+                    "match_identity": {
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                        "series_format": "BO3",
+                    },
+                    "candidate_match_identity": {
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-14",
+                        "series_format": "BO3",
+                    },
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    corrected_create = json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "action": "create",
+                    "product": "lol_esports",
+                    "event_family": "esports_match",
+                    "relation": "reports",
+                    "source_role": "unknown",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "8 月 16 日 BLG 对阵 TES",
+                    "match_identity": {
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                        "series_format": "BO3",
+                    },
+                    "new_event": {
+                        "title": "BLG 对阵 TES（8 月 16 日）",
+                        "summary": "BLG 与 TES 于 8 月 16 日进行 BO3。",
+                    },
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    client, completions = _client_with_responses([wrong_attach, corrected_create])
+
+    result = asyncio.run(
+        client.aggregate_events(
+            message={"title": "8 月 16 日 BLG 对阵 TES"},
+            possible_event_families=["esports_match"],
+            candidates=[
+                {
+                    "event_id": 17,
+                    "event_family": "esports_match",
+                    "products": ["lol_esports"],
+                    "canonical_anchors": {
+                        "participants": ["BLG", "TES"],
+                        "series_format": "BO3",
+                    },
+                    "title": "BLG 对阵 TES（8 月 14 日）",
+                }
+            ],
+        )
+    )
+
+    assert len(completions.calls) == 2
+    assert result.mentions[0].action == "create"
+    assert result.mentions[0].match_identity is not None
+    assert result.mentions[0].match_identity.match_date.isoformat() == "2026-08-16"
+
+
 def test_importance_prompt_uses_editorial_policy_contract() -> None:
     response = json.dumps(
         {

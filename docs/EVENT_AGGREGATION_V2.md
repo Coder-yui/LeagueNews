@@ -14,7 +14,7 @@ published NormalizedItem
   → products + topics → possible event families
   → product/family/entity/recency candidate retrieval (bounded)
   → one LLM semantic coreference decision
-  → structural validation
+  → structural validation + esports match occurrence conflict guard
   → atomic Event/EventMention membership persistence
   → importance, credibility, heat and presentation projections
 ```
@@ -22,7 +22,11 @@ published NormalizedItem
 The LLM chooses `attach`, `create`, or `ignore` for each meaningful mention. It may provide
 evidence and optional presentation updates, but it does not output product/topic/message-type
 classification, deterministic event identities, market/week keys, match keys or numeric identity
-signatures.
+signatures. For `esports_match`, it also extracts optional occurrence facts for the current mention
+and, on attach, the candidate: participants, competition, stage/round, match date, scheduled time,
+series format and an official external match ID. Candidate extraction can fill metadata absent from
+older Events. These facts are compatibility metadata in `canonical_anchors`, not a second Event
+identity.
 
 Before that decision, the model groups the whole message by independent real-world lifecycle. A
 shared release batch, version or series, launch window, status and follow-up path forms one group;
@@ -60,8 +64,10 @@ membership.
 
 Python verifies schema, contiguous mention indexes, candidate membership, routed family
 compatibility, evidence presence, idempotency, model-call audit, transaction atomicity and
-projection refresh. It does not impose message-type or event-family mention limits and does not
-verify event identity, patch/match/market/week signatures, or semantic equivalence of two messages.
+projection refresh. It does not impose message-type or event-family mention limits or generally
+verify semantic equivalence. The narrow exception is `esports_match`: when both the mention and
+candidate state incompatible match dates, external match IDs, stages or rounds, Python rejects the
+attach. Missing occurrence fields remain a semantic model decision.
 
 ## Removed duplicate NLP
 
@@ -70,7 +76,8 @@ parsers for weekly rotations, mythic-shop market/week, esports team pairs, relat
 signatures and strong-anchor identity are not part of Event Aggregation. Remaining regexes belong
 to upstream Message Processing/OCR or generic token overlap and are not event identity rules. The
 aggregation path does not use upstream hotfix signals or message-type branches to determine Event
-count or identity.
+count or identity. The `esports_match` guard compares model-extracted structured facts; it does not
+parse team names or derive match dates from message publication timestamps.
 
 ## Evaluation boundary
 

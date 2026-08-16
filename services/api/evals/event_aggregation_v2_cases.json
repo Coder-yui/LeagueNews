@@ -48,6 +48,47 @@
       "notes": "Score formatting and article detail must not split one real match."
     },
     {
+      "case_id": "same-teams-same-date-match-lifecycle",
+      "category": "attach",
+      "items": [
+        {"normalized_item_id": 2001, "expected": [{"action": "create", "event_key": "2026-08-16-blg-tes-bo3", "event_family": "esports_match"}]},
+        {"normalized_item_id": 2002, "expected": [{"action": "attach", "event_key": "2026-08-16-blg-tes-bo3", "event_family": "esports_match"}]},
+        {"normalized_item_id": 2003, "expected": [{"action": "attach", "event_key": "2026-08-16-blg-tes-bo3", "event_family": "esports_match"}]}
+      ],
+      "risks": ["false_split", "missed_attach"],
+      "notes": "The preview, live update and result are one concrete series occurrence on 2026-08-16."
+    },
+    {
+      "case_id": "same-teams-different-match-date",
+      "category": "occurrence_boundary",
+      "items": [
+        {"normalized_item_id": 2011, "expected": [{"action": "create", "event_key": "2026-08-14-blg-tes-bo3", "event_family": "esports_match"}]},
+        {"normalized_item_id": 2012, "expected": [{"action": "create", "event_key": "2026-08-16-blg-tes-bo3", "event_family": "esports_match"}]}
+      ],
+      "risks": ["false_merge", "wrong_attach"],
+      "notes": "Identical participants, product, family and similar text do not merge distinct match dates."
+    },
+    {
+      "case_id": "same-day-same-teams-different-round",
+      "category": "occurrence_boundary",
+      "items": [
+        {"normalized_item_id": 2021, "expected": [{"action": "create", "event_key": "2026-08-16-blg-tes-upper-round1", "event_family": "esports_match"}]},
+        {"normalized_item_id": 2022, "expected": [{"action": "create", "event_key": "2026-08-16-blg-tes-lower-round2", "event_family": "esports_match"}]}
+      ],
+      "risks": ["false_merge", "wrong_attach"],
+      "notes": "Explicitly different rounds or series on the same date are separate occurrences."
+    },
+    {
+      "case_id": "match-date-missing-on-followup",
+      "category": "attach",
+      "preexisting_event_keys": ["2026-08-16-blg-tes-bo3"],
+      "items": [
+        {"normalized_item_id": 2031, "expected": [{"action": "attach", "event_key": "2026-08-16-blg-tes-bo3", "event_family": "esports_match"}]}
+      ],
+      "risks": ["false_split", "missed_attach"],
+      "notes": "A missing date is not a hard conflict when the remaining evidence identifies the same match."
+    },
+    {
       "case_id": "daily-results-and-schedule-roundup",
       "category": "multi_mention",
       "preexisting_event_keys": [

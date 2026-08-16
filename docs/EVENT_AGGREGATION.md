@@ -2,7 +2,7 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v6-lifecycle-cohesion`
+> Policy version: `event-aggregation-v7-match-occurrence-boundary`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
@@ -44,6 +44,12 @@ metadata; they are not a parallel identity mechanism.
   concurrent and stale workers without blocking a newer revision.
 - A mention is unique per item revision, mention index and aggregation policy version.
 - Attach can reference only an Event in the bounded candidate payload.
+- An `esports_match` Event represents one concrete match or series occurrence, not the recurring
+  relationship between its participants. Explicit `match_date`, `external_match_id`, `stage`, or
+  `round` conflicts reject attach after the model decision and again before membership is written.
+  The same model response extracts explicit candidate facts to cover older Events whose anchors are
+  incomplete. Missing identity fields are not conflicts. Known occurrence metadata is stored in
+  `canonical_anchors`; it remains descriptive membership metadata and never replaces `event_id`.
 - Candidate retrieval hard-gates explicit products and routed event families; entities and text
   overlap only rank candidates within that space.
 - `possible_event_families` is derived from upstream `products + topics`; the model cannot create

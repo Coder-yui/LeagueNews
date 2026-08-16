@@ -11,14 +11,19 @@ from sqlalchemy.orm import Session, attributes
 import app.models  # noqa: F401
 from app.core.database import Base
 from app.domain.event_admission import derive_event_space, minimal_event_filter
-from app.domain.esports_match_identity import esports_match_identity_conflict
+from app.domain.esports_match_identity import (
+    esports_match_has_subject,
+    esports_match_identity_conflict,
+    match_identity_from_anchors,
+    match_identity_from_message_entities,
+)
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
-from app.services.event_candidates import recall_event_candidates
+from app.services.event_candidates import esports_match_identity_gate, recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import create_event
 from app.repositories.events import current_event_mention_conditions
@@ -166,7 +171,6 @@ def _esports_attach_decision(
     *,
     event_id: int,
     match_identity: dict[str, object],
-    candidate_match_identity: dict[str, object],
     latest_development: str | None = None,
 ) -> dict[str, object]:
     decision = {
@@ -180,7 +184,6 @@ def _esports_attach_decision(
         "materiality": "material_update",
         "evidence_excerpt": "BLG 对阵 TES",
         "match_identity": match_identity,
-        "candidate_match_identity": candidate_match_identity,
     }
     # Only a material_update with latest_development satisfies the unified material
     # projection contract; other call sites depend on this helper staying bare to
@@ -641,11 +644,6 @@ def test_esports_match_date_conflict_blocks_forced_attach_before_membership_writ
                         "match_date": "2026-08-16",
                         "series_format": "BO3",
                     },
-                    candidate_match_identity={
-                        "participants": ["BLG", "TES"],
-                        "match_date": "2026-08-14",
-                        "series_format": "BO3",
-                    },
                     latest_development="8 月 16 日赛果更新",
                 )
             )
@@ -717,10 +715,6 @@ def test_same_esports_match_date_attaches_and_enriches_missing_identity() -> Non
                         "competition": "LPL",
                         "match_date": "2026-08-16",
                         "series_format": "BO3",
-                    },
-                    candidate_match_identity={
-                        "participants": ["BLG", "TES"],
-                        "match_date": "2026-08-16",
                     },
                     latest_development="BLG 胜出",
                 )
@@ -830,10 +824,6 @@ def test_missing_incoming_match_date_does_not_block_semantic_attach() -> None:
                 _esports_attach_decision(
                     event_id=existing.id,
                     match_identity={"participants": ["BLG", "TES"]},
-                    candidate_match_identity={
-                        "participants": ["BLG", "TES"],
-                        "match_date": "2026-08-16",
-                    },
                     latest_development="获得赛果",
                 )
             )
@@ -1709,9 +1699,6 @@ def test_esports_match_lifecycle_score_updates_remain_one_event() -> None:
                 "match_identity": {
                     "participants": ["BLG", "TES"], "match_date": "2026-08-16",
                 },
-                "candidate_match_identity": {
-                    "participants": ["BLG", "TES"], "match_date": "2026-08-16",
-                },
                 "projection": {"latest_development": latest},
             }
 
@@ -1838,9 +1825,6 @@ def test_out_of_order_esports_material_update_keeps_newest_development() -> None
                         "match_identity": {
                             "participants": ["BLG", "TES"], "match_date": "2026-08-16",
                         },
-                        "candidate_match_identity": {
-                            "participants": ["BLG", "TES"], "match_date": "2026-08-16",
-                        },
                         "projection": {"latest_development": "1:1"},
                     }
                 )
@@ -1958,6 +1942,252 @@ def test_esports_recall_filters_family_in_sql_before_limit() -> None:
         assert target.id in ids
         assert len(candidates) <= 5
         assert all(candidate["event_family"] == "esports_match" for candidate in candidates)
+
+
+# ---------------------------------------------------------------------------
+# v12: identity gate + explicit match subject (participants as subject)
+# ---------------------------------------------------------------------------
+
+
+def _team_event(
+    db: Session,
+    *,
+    title: str,
+    anchors: dict[str, object],
+    now: datetime,
+) -> Event:
+    event = Event(
+        title=title, current_summary="比赛消息。",
+        event_family="esports_match", products=["lol_esports"],
+        canonical_anchors=dict(anchors),
+        first_seen_at=now, last_seen_at=now,
+    )
+    db.add(event)
+    db.flush()
+    return event
+
+
+def test_esports_match_participants_conflict_identity_gate_removes_candidate() -> None:
+    """JDG/LGD candidate + WBG/IG incoming: participants hard conflict -> gate drops it.
+
+    The candidate is recalled by the 7-day window but removed by the pre-LLM identity
+    gate, so it can never be attached (the apply fence also refuses it).
+    """
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="participants-conflict")
+        db.add(source)
+        db.flush()
+        event = _team_event(
+            db, title="JDG 对阵 LGD",
+            anchors={"participants": ["JDG", "LGD"], "match_date": "2026-08-16"},
+            now=now,
+        )
+        item = _item(
+            db, source=source, external_id="wbg-ig-result",
+            title="WBG 2:1 IG", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": "WBG", "canonical_name": "WBG"},
+                {"type": "team", "name": "IG", "canonical_name": "IG"},
+            ],
+            published_at=now + timedelta(hours=2),
+        )
+        db.commit()
+
+        recalled = recall_event_candidates(
+            db, item=item, possible_families=["esports_match"]
+        )
+        assert any(candidate["event_id"] == event.id for candidate in recalled)
+
+        gated = esports_match_identity_gate(
+            recalled,
+            incoming_identity=match_identity_from_message_entities(item.entities),
+        )
+        assert all(candidate["event_id"] != event.id for candidate in gated)
+
+        # Defense in depth: a forced attach to the dropped candidate fails at apply,
+        # because the candidate is no longer in the gated candidate set.
+        with pytest.raises(ValueError, match="non-candidate"):
+            _aggregate(
+                db, item,
+                StaticClient(
+                    _result(
+                        _esports_attach_decision(
+                            event_id=event.id,
+                            match_identity={"participants": ["WBG", "IG"]},
+                            latest_development="WBG 2:1 IG",
+                        )
+                    )
+                ),
+            )
+        run = db.scalar(select(EventAggregationRun))
+        assert run is not None
+        assert run.outcome == "apply_error"
+
+
+def test_esports_match_participants_same_date_missing_keeps_candidate() -> None:
+    """participants 相同但 date 缺失: no hard conflict, the candidate stays for LLM judgment."""
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="same-participants")
+        db.add(source)
+        db.flush()
+        event = _team_event(
+            db, title="BLG 对阵 TES",
+            anchors={"participants": ["BLG", "TES"]},
+            now=now,
+        )
+        item = _item(
+            db, source=source, external_id="blg-tes-result",
+            title="BLG 2:1 TES", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": "BLG", "canonical_name": "BLG"},
+                {"type": "team", "name": "TES", "canonical_name": "TES"},
+            ],
+            published_at=now + timedelta(hours=2),
+        )
+        db.commit()
+
+        recalled = recall_event_candidates(
+            db, item=item, possible_families=["esports_match"]
+        )
+        gated = esports_match_identity_gate(
+            recalled,
+            incoming_identity=match_identity_from_message_entities(item.entities),
+        )
+        assert any(candidate["event_id"] == event.id for candidate in gated)
+        assert esports_match_identity_conflict(
+            match_identity_from_anchors(event.canonical_anchors),
+            {"participants": ["BLG", "TES"]},
+        ) is None
+
+
+def test_esports_match_external_match_id_same_without_participants_compatible() -> None:
+    """participants 缺失但 external_match_id 相同: candidate is compatible."""
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="external-id")
+        db.add(source)
+        db.flush()
+        event = _team_event(
+            db, title="LPL 焦点战",
+            anchors={"external_match_id": "lpl-100"},
+            now=now,
+        )
+        item = _item(
+            db, source=source, external_id="lpl-100-result",
+            title="LPL 100 号比赛赛果", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[],
+            published_at=now + timedelta(hours=2),
+        )
+        db.commit()
+
+        recalled = recall_event_candidates(
+            db, item=item, possible_families=["esports_match"]
+        )
+        # No team entities -> incoming identity is empty -> gate is a no-op.
+        gated = esports_match_identity_gate(
+            recalled,
+            incoming_identity=match_identity_from_message_entities(item.entities),
+        )
+        assert any(candidate["event_id"] == event.id for candidate in gated)
+        # With an explicit incoming external_match_id the pair stays compatible.
+        assert esports_match_identity_conflict(
+            match_identity_from_anchors(event.canonical_anchors),
+            {"external_match_id": "lpl-100"},
+        ) is None
+
+
+def test_esports_match_participants_conflict_even_with_same_date_is_hard_conflict() -> None:
+    """participants 明确不同，即使日期相同也是 hard conflict."""
+    conflict = esports_match_identity_conflict(
+        {"participants": ["JDG", "LGD"], "match_date": "2026-08-16"},
+        {"participants": ["WBG", "IG"], "match_date": "2026-08-16"},
+    )
+    assert conflict is not None
+    assert conflict.startswith("participants")
+
+
+def test_esports_match_create_requires_match_subject() -> None:
+    """esports_match create needs participants or external_match_id; a bare identity fails."""
+    with pytest.raises(ValidationError, match="recognizable match subject"):
+        _result(
+            _esports_create_decision(
+                title="未知比赛", match_identity={},
+            )
+        )
+    # participants 满足最小 create identity contract。
+    ok = _result(
+        _esports_create_decision(
+            title="BLG 对阵 TES",
+            match_identity={"participants": ["BLG", "TES"]},
+        )
+    )
+    assert ok.mentions[0].action == "create"
+    assert ok.mentions[0].match_identity is not None
+
+
+def test_esports_match_schema_rejects_candidate_match_identity() -> None:
+    """The model schema no longer accepts a model-declared candidate identity."""
+    with pytest.raises(ValidationError, match="candidate_match_identity"):
+        _result({
+            **_esports_attach_decision(
+                event_id=123,
+                match_identity={"participants": ["BLG", "TES"]},
+            ),
+            "candidate_match_identity": {"participants": ["BLG", "TES"]},
+        })
+
+
+def test_empty_esports_match_shell_is_not_recalled() -> None:
+    """A shell esports_match (empty title, or no match subject) never enters the candidate pool."""
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="empty-shell")
+        db.add(source)
+        db.flush()
+        no_title = _team_event(
+            db, title="",
+            anchors={"participants": ["BLG", "TES"]},
+            now=now,
+        )
+        no_subject = _team_event(
+            db, title="BLG 对阵 TES",
+            anchors={"match_date": "2026-08-16"},
+            now=now,
+        )
+        valid = _team_event(
+            db, title="BLG 对阵 TES",
+            anchors={"participants": ["BLG", "TES"]},
+            now=now,
+        )
+        item = _item(
+            db, source=source, external_id="blg-tes-result",
+            title="BLG 2:1 TES", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": "BLG", "canonical_name": "BLG"},
+                {"type": "team", "name": "TES", "canonical_name": "TES"},
+            ],
+            published_at=now + timedelta(hours=2),
+        )
+        db.commit()
+
+        candidates = recall_event_candidates(
+            db, item=item, possible_families=["esports_match"]
+        )
+        ids = {candidate["event_id"] for candidate in candidates}
+        assert no_title.id not in ids
+        assert no_subject.id not in ids
+        assert valid.id in ids
+        assert not esports_match_has_subject(no_subject.canonical_anchors)
 
 
 # ---------------------------------------------------------------------------
@@ -2233,7 +2463,6 @@ def _esports_projection_attach(
     decision = _esports_attach_decision(
         event_id=event_id,
         match_identity=match_identity,
-        candidate_match_identity=dict(match_identity),
     )
     if materiality != "material_update":
         decision["materiality"] = materiality
@@ -2521,10 +2750,6 @@ def _esports_attach_response() -> str:
                         "participants": ["BLG", "TES"],
                         "match_date": "2026-08-16",
                     },
-                    "candidate_match_identity": {
-                        "participants": ["BLG", "TES"],
-                        "match_date": "2026-08-16",
-                    },
                     "projection": {"latest_development": "2:1 最终赛果"},
                 }
             ]
@@ -2617,9 +2842,12 @@ def test_v11_prompt_teaches_semantic_continuation_beyond_strong_evidence() -> No
         for msg in completions.calls[0]["messages"]
         if msg["role"] == "system"
     )
-    assert "验证门槛" in system_content
-    assert "semantic continuation evidence" in system_content
-    assert "仅凭 participants 相同不足以 attach" in system_content
+    # The shortened prompt still teaches the core semantic contract: candidates
+    # passed structural identity filtering, but the model must still judge the
+    # same-match lifecycle continuation, and participants alone are not enough.
+    assert "continuation-first" in system_content
+    assert "participants 相同本身不等于同一场" in system_content
+    assert "不能因为 score、title、winner、lifecycle status" in system_content
 
 
 def test_v11_same_day_different_scheduled_at_is_distinct_occurrence() -> None:
@@ -2701,7 +2929,6 @@ def test_v11_material_update_attach_requires_latest_development_projection() -> 
             **_esports_attach_decision(
                 event_id=123,
                 match_identity={"participants": ["BLG", "TES"]},
-                candidate_match_identity={"participants": ["BLG", "TES"]},
             ),
         })
     with pytest.raises(ValidationError, match="latest_development"):
@@ -2709,7 +2936,6 @@ def test_v11_material_update_attach_requires_latest_development_projection() -> 
             **_esports_attach_decision(
                 event_id=123,
                 match_identity={"participants": ["BLG", "TES"]},
-                candidate_match_identity={"participants": ["BLG", "TES"]},
             ),
             "projection": {"title": "只改标题，没有最新进展"},
         })
@@ -2717,7 +2943,6 @@ def test_v11_material_update_attach_requires_latest_development_projection() -> 
         **_esports_attach_decision(
             event_id=123,
             match_identity={"participants": ["BLG", "TES"]},
-            candidate_match_identity={"participants": ["BLG", "TES"]},
         ),
         "projection": {"latest_development": "2:1 最终赛果"},
     })
@@ -2736,7 +2961,6 @@ def test_v11_non_material_attach_rejects_projection() -> None:
                 **_esports_attach_decision(
                     event_id=123,
                     match_identity={"participants": ["BLG", "TES"]},
-                    candidate_match_identity={"participants": ["BLG", "TES"]},
                 ),
                 "materiality": materiality,
                 "projection": {"latest_development": "不应推进"},

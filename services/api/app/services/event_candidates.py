@@ -6,6 +6,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.event_families import product_supports_family
+from app.domain.esports_match_identity import (
+    esports_match_has_subject,
+    esports_match_identity_conflict,
+    match_identity_from_anchors,
+)
 from app.models.event import Event
 from app.models.normalized_item import NormalizedItem
 from app.services.event_semantics import semantic_projection
@@ -14,6 +19,49 @@ from app.services.event_semantics import semantic_projection
 RECALL_WINDOW_DAYS: Final = 365
 ESPORTS_MATCH_RECALL_WINDOW_DAYS: Final = 7
 _WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
+
+
+def esports_match_identity_gate(
+    candidates: list[dict[str, Any]],
+    *,
+    incoming_identity: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Remove esports_match candidates that structurally cannot be the incoming match.
+
+    This runs after recall and before the LLM decision. It compares the candidate's
+    *system-known* identity (from ``Event.canonical_anchors``) with the incoming match
+    identity and drops candidates that hard-conflict on explicit structured facts
+    (participants, external_match_id, match_date, scheduled_at, stage, round). The LLM
+    only sees candidates that could still be the same match; 7-day recall and this
+    identity gate are separate layers and must not be conflated. Candidate identity is
+    never re-declared by the model --- it comes from the Event's own anchors.
+    """
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if candidate.get("event_family") != "esports_match":
+            filtered.append(candidate)
+            continue
+        candidate_identity = match_identity_from_anchors(
+            candidate.get("canonical_anchors") or {}
+        )
+        if esports_match_identity_conflict(candidate_identity, incoming_identity):
+            continue
+        filtered.append(candidate)
+    return filtered
+
+
+def _is_recallable_event(event: Event) -> bool:
+    """An esports_match needs a valid title and a recognizable match subject.
+
+    A shell Event (empty title, or no participants / external_match_id) cannot
+    identify what match it is, so it must never enter the candidate pool as an attach
+    target; repair/rebuild deletes such invalid Events instead of leaving them behind.
+    """
+    if event.event_family != "esports_match":
+        return True
+    if not (event.title or "").strip():
+        return False
+    return esports_match_has_subject(event.canonical_anchors or {})
 
 
 def _recall_window_for(family: str) -> int:
@@ -124,6 +172,8 @@ def recall_event_candidates(
     ranked: list[tuple[float, Event, list[str]]] = []
 
     for event in events:
+        if not _is_recallable_event(event):
+            continue
         event_products = {str(product) for product in event.products}
         concrete_message_products = message_products - {"unknown"}
         if concrete_message_products:

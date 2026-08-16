@@ -1,7 +1,7 @@
 from typing import Final, Literal, get_args
 
 
-AGGREGATION_POLICY_VERSION: Final = "event-aggregation-v11-match-semantic-continuation"
+AGGREGATION_POLICY_VERSION: Final = "event-aggregation-v12-identity-gate-subject-continuation"
 IMPORTANCE_POLICY_VERSION: Final = "event-importance-v4-normalized-item-projection"
 CREDIBILITY_POLICY_VERSION: Final = "event-credibility-v1"
 HEAT_POLICY_VERSION: Final = "event-heat-v1"

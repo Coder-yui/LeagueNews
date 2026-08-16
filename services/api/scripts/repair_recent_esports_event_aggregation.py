@@ -13,6 +13,7 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, select, text
@@ -21,6 +22,13 @@ from sqlalchemy.orm import Session, selectinload
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
+from app.domain.esports_match_identity import (
+    esports_match_has_subject,
+    esports_match_identity_conflict,
+    match_identity_from_anchors,
+    match_identity_from_message_entities,
+)
+from app.domain.event_admission import minimal_event_filter
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.daily_report import DailyReport
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
@@ -29,6 +37,10 @@ from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.repositories.events import current_event_mention_conditions
 from app.services.daily_reports import generate_daily_report
+from app.services.event_candidates import (
+    esports_match_identity_gate,
+    recall_event_candidates,
+)
 from app.services.event_metrics import refresh_event_metrics
 from app.services.raw_item_versions import latest_normalized_item_condition
 from app.workflows.event_aggregation import aggregate_normalized_item
@@ -221,6 +233,7 @@ def rollback_selection(db: Session, selection: RepairSelection) -> dict[str, int
     db.flush()
 
     orphaned: set[int] = set()
+    invalid: set[int] = set()
     retained: set[int] = set()
     for event_id in selection.event_ids:
         current_mentions = list(
@@ -236,6 +249,20 @@ def rollback_selection(db: Session, selection: RepairSelection) -> dict[str, int
         if not current_mentions:
             orphaned.add(event_id)
             continue
+        event = db.get(Event, event_id)
+        if event is None:
+            orphaned.add(event_id)
+            continue
+        if event.event_family == "esports_match" and not _rebuilds_minimal_esports_match(
+            db, event_id, current_mentions
+        ):
+            # The remaining still-valid evidence cannot rebuild a minimal valid
+            # esports_match (a valid title and a recognizable match subject). Such
+            # a shell Event has no usable baseline and must not be kept as a normal
+            # Event participating in recall; delete it instead of leaving a shell.
+            # Deleting the Event cascades to its dangling remaining memberships.
+            invalid.add(event_id)
+            continue
         if not _has_restorable_projection(db, event_id, current_mentions):
             raise RuntimeError(
                 f"event {event_id} has remaining current mentions but no restorable "
@@ -245,6 +272,9 @@ def rollback_selection(db: Session, selection: RepairSelection) -> dict[str, int
 
     if orphaned:
         db.execute(delete(Event).where(Event.id.in_(orphaned)))
+        db.flush()
+    if invalid:
+        db.execute(delete(Event).where(Event.id.in_(invalid)))
         db.flush()
     if retained:
         refresh_event_metrics(db, retained)
@@ -259,7 +289,135 @@ def rollback_selection(db: Session, selection: RepairSelection) -> dict[str, int
         "mentions_removed": len(selection.mention_ids),
         "runs_removed": len(selection.run_ids),
         "events_deleted": len(orphaned),
+        "events_deleted_invalid_shell": len(invalid),
         "events_rebuilt": len(retained),
+    }
+
+
+def _rebuilds_minimal_esports_match(
+    db: Session, event_id: int, mentions: list[EventMention]
+) -> bool:
+    """Preview whether still-valid evidence can rebuild a minimal esports_match.
+
+    Rebuilds the projection from the remaining material mentions (the same replay
+    the metrics refresh performs) and requires both a valid title and a
+    recognizable match subject (participants or external_match_id). An Event that
+    fails this has no usable baseline and must be deleted in repair instead of
+    being left as an empty shell.
+    """
+    if not any(mention.materiality == "material_update" for mention in mentions):
+        return False
+    refresh_event_metrics(db, {event_id})
+    event = db.get(Event, event_id)
+    if event is None:
+        return False
+    if not (event.title or "").strip():
+        return False
+    return esports_match_has_subject(event.canonical_anchors or {})
+
+
+def audit_esports_identity(
+    db: Session,
+    *,
+    item_ids: tuple[int, ...],
+    event_ids: tuple[int, ...],
+) -> dict[str, object]:
+    """Audit repair targets across the match-identity layers.
+
+    Beyond strong-identity duplicates this covers the three structured identity
+    checks: invalid/empty esports_match projections, missing usable match
+    subjects, and the cross-participant conflicts the pre-LLM identity gate drops.
+    """
+    events = list(
+        db.scalars(
+            select(Event).where(
+                Event.id.in_(event_ids), Event.event_family == "esports_match"
+            )
+        )
+    )
+    invalid_empty_projection: list[int] = []
+    missing_subject: list[int] = []
+    by_identity: dict[tuple[Any, ...], list[int]] = {}
+    for event in events:
+        identity = match_identity_from_anchors(event.canonical_anchors or {})
+        if not (event.title or "").strip():
+            invalid_empty_projection.append(event.id)
+        if not esports_match_has_subject(identity):
+            missing_subject.append(event.id)
+        external = _normalized_scalar_audit(identity.get("external_match_id"))
+        if external:
+            key: tuple[Any, ...] = ("external", external)
+        else:
+            participants = _normalized_participants_audit(identity.get("participants"))
+            key = ("participants", tuple(sorted(participants)))
+        by_identity.setdefault(key, []).append(event.id)
+    strong_identity_duplicate_groups = [
+        {"identity": list(key), "event_ids": sorted(group)}
+        for key, group in by_identity.items()
+        if len(group) > 1
+    ]
+
+    cross_participant_conflicts: list[dict[str, object]] = []
+    for item_id in item_ids:
+        item = db.get(NormalizedItem, item_id)
+        if item is None:
+            continue
+        admission = minimal_event_filter(item)
+        if admission.decision == "skip":
+            continue
+        recalled = recall_event_candidates(
+            db,
+            item=item,
+            possible_families=admission.event_space.possible_families,
+            entity_hints=admission.entity_hints,
+        )
+        incoming_identity = match_identity_from_message_entities(item.entities)
+        gated = esports_match_identity_gate(
+            recalled, incoming_identity=incoming_identity
+        )
+        gated_ids = {int(candidate["event_id"]) for candidate in gated}
+        for candidate in recalled:
+            if candidate.get("event_family") != "esports_match":
+                continue
+            if int(candidate["event_id"]) in gated_ids:
+                continue
+            conflict = esports_match_identity_conflict(
+                match_identity_from_anchors(
+                    candidate.get("canonical_anchors") or {}
+                ),
+                incoming_identity,
+            )
+            if conflict and conflict.startswith("participants"):
+                cross_participant_conflicts.append(
+                    {
+                        "item_id": item_id,
+                        "event_id": candidate["event_id"],
+                        "reason": conflict,
+                    }
+                )
+
+    return {
+        "invalid_empty_projection_events": invalid_empty_projection,
+        "missing_match_subject_events": missing_subject,
+        "strong_identity_duplicate_groups": strong_identity_duplicate_groups,
+        "cross_participant_conflicts": cross_participant_conflicts,
+    }
+
+
+def _normalized_scalar_audit(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    normalized = " ".join(str(value).strip().casefold().split())
+    return normalized or None
+
+
+def _normalized_participants_audit(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {
+        " ".join(str(part).strip().casefold().split())
+        for part in value
+        if isinstance(part, str) and part.strip()
     }
 
 
@@ -385,6 +543,11 @@ async def main() -> None:
     with SessionLocal() as db:
         selection = inspect_selection(db, limit=args.limit)
         payload = selection_payload(selection, database=engine.url.database)
+        payload["identity_audit"] = audit_esports_identity(
+            db,
+            item_ids=selection.item_ids_newest_first,
+            event_ids=selection.event_ids,
+        )
     print(json.dumps(payload, ensure_ascii=False), flush=True)
     if len(selection.item_ids_newest_first) != args.limit:
         raise RuntimeError(

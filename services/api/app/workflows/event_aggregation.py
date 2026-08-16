@@ -12,6 +12,8 @@ from app.core.config import settings
 from app.domain.event_admission import AdmissionDecision, minimal_event_filter
 from app.domain.esports_match_identity import (
     esports_match_identity_conflict,
+    match_identity_from_anchors,
+    match_identity_from_message_entities,
     merge_match_identity,
 )
 from app.domain.event_families import EventSpace, product_supports_family
@@ -20,7 +22,7 @@ from app.models.event import Event, EventAggregationRun
 from app.models.normalized_item import NormalizedItem
 from app.repositories.events import event_ids_for_normalized_item
 from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
-from app.services.event_candidates import recall_event_candidates
+from app.services.event_candidates import esports_match_identity_gate, recall_event_candidates
 from app.services.event_semantics import semantic_projection
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import add_event_mention, create_event
@@ -426,14 +428,6 @@ def _decision_match_identity(decision: EventMentionDecision) -> dict[str, Any]:
     return decision.match_identity.model_dump(mode="json", exclude_none=True)
 
 
-def _decision_candidate_match_identity(
-    decision: EventMentionDecision,
-) -> dict[str, Any]:
-    if decision.candidate_match_identity is None:
-        return {}
-    return decision.candidate_match_identity.model_dump(mode="json", exclude_none=True)
-
-
 def _validate_esports_match_attach(
     event: Event,
     decision: EventMentionDecision,
@@ -442,13 +436,13 @@ def _validate_esports_match_attach(
 
     Semantic membership errors are caught by the model business validator; this
     keeps a narrow hard-conflict fence so a conflicting attach can never be
-    written even if it reaches the transaction.
+    written even if it reaches the transaction. Candidate identity is the
+    system's own ``Event.canonical_anchors`` --- the model never re-declares who
+    a candidate is.
     """
     if decision.event_family != "esports_match":
         return
-    candidate_identity = merge_match_identity(
-        event.canonical_anchors or {}, _decision_candidate_match_identity(decision)
-    )
+    candidate_identity = match_identity_from_anchors(event.canonical_anchors or {})
     conflict = esports_match_identity_conflict(
         candidate_identity, _decision_match_identity(decision)
     )
@@ -537,12 +531,12 @@ def apply_membership_transaction(
             proposal = decision.projection
             canonical_anchors = None
             if decision.event_family == "esports_match":
+                # Only the current mention's own occurrence facts enrich the Event
+                # anchors; candidate identity always comes from the system's stored
+                # anchors and is never re-declared by the model.
                 enriched_anchors = merge_match_identity(
                     event.canonical_anchors or {},
-                    _decision_candidate_match_identity(decision),
-                )
-                enriched_anchors = merge_match_identity(
-                    enriched_anchors, _decision_match_identity(decision)
+                    _decision_match_identity(decision),
                 )
                 if enriched_anchors != (event.canonical_anchors or {}):
                     canonical_anchors = enriched_anchors
@@ -633,12 +627,27 @@ async def aggregate_normalized_item(
             db, run, outcome="skipped_by_minimal_filter", admission=admission
         )
 
-    candidates = recall_event_candidates(
-        db,
-        item=item,
-        possible_families=admission.event_space.possible_families,
-        entity_hints=admission.entity_hints,
-    ) if reuse_draft is None else list(run.candidate_snapshot or [])
+    if reuse_draft is None:
+        recalled = recall_event_candidates(
+            db,
+            item=item,
+            possible_families=admission.event_space.possible_families,
+            entity_hints=admission.entity_hints,
+        )
+        # esports_match identity gate: before the LLM decision, drop candidates
+        # that structurally cannot be the same match as the incoming message
+        # (explicit participants / external_match_id / match_date / scheduled_at /
+        # stage / round conflicts). The LLM only sees candidates that could still
+        # be the same match; 7-day recall and this gate are separate layers. The
+        # incoming signal here is conservative (team entities only); the full
+        # incoming match_identity is checked again by the model business validator
+        # and the apply fence once the model supplies it.
+        candidates = esports_match_identity_gate(
+            recalled,
+            incoming_identity=match_identity_from_message_entities(item.entities),
+        )
+    else:
+        candidates = list(run.candidate_snapshot or [])
     run.candidate_snapshot = candidates
     message, truncation = _message_payload(item)
 

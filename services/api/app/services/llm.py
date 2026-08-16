@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.domain.esports_match_identity import (
     esports_match_identity_conflict,
     esports_match_same_occurrence_evidence,
-    merge_match_identity,
+    match_identity_from_anchors,
 )
 from app.domain.importance import (
     AudienceRegion,
@@ -462,16 +462,10 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                         if mention.match_identity is not None
                         else {}
                     )
-                    extracted_candidate_identity = (
-                        mention.candidate_match_identity.model_dump(
-                            mode="json", exclude_none=True
-                        )
-                        if mention.candidate_match_identity is not None
-                        else {}
-                    )
-                    candidate_identity = merge_match_identity(
-                        candidate.get("canonical_anchors") or {},
-                        extracted_candidate_identity,
+                    # Candidate identity comes from the system's own stored anchors;
+                    # the model never re-declares who a candidate is.
+                    candidate_identity = match_identity_from_anchors(
+                        candidate.get("canonical_anchors") or {}
                     )
                     conflict = esports_match_identity_conflict(
                         candidate_identity, incoming_identity
@@ -540,30 +534,18 @@ event_family 语义边界：
   platform_service 是平台能力或服务产品本身的发布/变化。
 - esports_match 是一场具体比赛/series occurrence 的实际发生生命周期，从比赛开始推进（进行中更新）
   延伸到最后赛果，以及直接由本场比赛产生的晋级/淘汰结果。它不是两支队伍之间抽象的对阵关系，也不是
-  赛前安排。同两队不同日期、不同 stage/round 或不同 official external match id 的比赛必须是不同
-  Event；双方 participant 相同仅是召回信号，绝不是确定性身份或 attach 依据。
-  esports_schedule 用于赛程体系本身：赛前预告、对阵安排、开赛时间、日历、延期/改期/场地/赛制等安排
-  变化；它只是安排层面的状态，可以独立于实际比赛 Event。实际比赛一旦发生并推进状态，就进入
-  esports_match，之后比分、胜负、赛果等必须延续同一 Event，不能再退化为 esports_schedule。
-  对 esports_match 采用 continuation-first：先检查 candidate 中是否已有本次比赛。注意，强正的同一场次
-  证据（external_match_id 一致；或 participants + match_date 一致；或 participants + 双方
-  scheduled_at 完整时间一致；或 participants + competition/stage/round 均一致，且无任何硬冲突）是
-  程序用于 deterministic 拒绝错误 create 的验证门槛，并不是你判断 attach 的唯一依据。你判断是否同一
-  场比赛应综合 semantic continuation evidence：participants 相同 + 明显的连续比赛状态（比分推进、状态
-  从进行中到结束、winner 确定）+ last_seen_at 时间接近 + competition/stage 上下文一致，即使缺少明确
-  structured 证据，也可判为同一场并 attach。仅凭 participants 相同不足以 attach，但 participants +
-  连续状态 + 近期候选 + 上下文一致可以构成合理 attach 理由。发生信息不足时，不要因为缺少 strong
-  structured 证据就自动 create；同两队短时间内的另一场比赛仍必须 create 新 Event。
-  比分变化、比赛从进行中变为结束、winner 从未知变为确定、晋级/淘汰结果产生，这些都是已有 Event 的
-  material_update，绝不能因为 score 变化、title 变化、winner 变化、lifecycle status 变化，或当前消息
-  包含“赛果/结束/击败/拿下”等字眼就 create 新 Event。只有明确是另一场比赛（有指向不同 occurrence 的
-  明确 match_date、scheduled_at、stage、round 或 external_match_id 冲突）时才 create。示例：
-  - 候选 BLG 1:1 TES（match_date 2026-08-16），当前 BLG 2:1 TES 比赛结束 → attach（materiality=
-    material_update），错误：create。
-  - 候选 BLG 1:0 TES 同一天，当前 BLG 1:1 TES → attach，错误：create。
-  - 候选 BLG 2-1 TES 赛果（match_date 2026-08-16），当前另一条 BLG 胜出但仍指同一天同一场 → attach。
-  - 候选 2026-08-14 BLG vs TES，当前 2026-08-16 BLG vs TES 且明确 match_date → create 新 Event。
-  同场状态推进 ≠ 新 Event；新比赛 occurrence = 新 Event。
+  赛前安排。esports_schedule 用于赛程体系本身：赛前预告、对阵安排、开赛时间、日历、延期/改期/场地/
+  赛制等安排变化；它只是安排层面的状态，可以独立于实际比赛 Event。实际比赛一旦发生并推进状态，就
+  进入 esports_match，之后比分、胜负、赛果等必须延续同一 Event，不能再退化为 esports_schedule。
+  对 esports_match 采用 continuation-first：candidates 已经通过程序的结构化身份兼容性过滤
+  （participants / external_match_id / match_date / scheduled_at / stage / round 明确冲突的候选已被
+  程序移除），但结构上兼容并不等于就是同一场，仍需要你判断是否同一场比赛生命周期的 continuation：
+  - 同场比分推进、状态从进行中到结束、winner 确定、晋级/淘汰结果产生 → attach 到候选 Event，绝不能
+    create；这些是已有 Event 的 material_update。不能因为 score、title、winner、lifecycle status
+    变化，或“赛果/结束/击败/拿下”等字眼就 create 新 Event。
+  - 只有你有正向理由确认这是另一场 occurrence（明确不同的比赛）时才 create；不要因为缺少强结构化
+    字段就机械 create。
+  - participants 相同本身不等于同一场。
 - roster_change 是选手/教练/阵容变动；esports_rules 是赛事规则和竞赛制度变化。
 - universe_release、media_release、corporate_change、security_enforcement 按其字面现实变化使用；没有更
   合适 family 的命名发展才用 other_named_development。
@@ -584,10 +566,8 @@ event_family 语义边界：
   是程序 deterministic 验证依据；你的 attach 判断还应综合 participants + 连续比赛状态 + 时间接近 +
   上下文一致等语义证据。双方都有值且 match_date、scheduled_at、external_match_id、stage 或 round
   明确冲突就是硬冲突，必须 create/ignore；一侧字段缺失不是冲突，继续结合其他语义判断。不得通过
-  projection 把旧比赛 Event 改写成新场次。
-- esports_match 的 attach 还必须在 candidate_match_identity 中从所引用候选的 anchors、标题、摘要和
-  key facts 提取候选明确给出的同类身份信息。该对象描述候选而非当前消息；即使旧候选的 anchors 尚未
-  结构化日期，也要忠实提取候选展示信息中明确存在的日期。没有证据的字段仍保持缺失。
+  projection 把旧比赛 Event 改写成新场次。候选的身份来自系统已存储的 anchors，你只能读取候选
+  candidate_events 中给出的身份信息，不得重新声明或补齐候选身份。
 - ignore 不引用 Event。
 - create/attach 的 evidence_excerpt 必须来自当前消息。
 - relation、source_role、materiality 描述当前 mention。只有 materiality=material_update 的 attach 才能

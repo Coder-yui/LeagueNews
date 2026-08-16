@@ -2,7 +2,7 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v11-match-semantic-continuation`
+> Policy version: `event-aggregation-v12-identity-gate-subject-continuation`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
@@ -77,7 +77,14 @@ metadata; they are not a parallel identity mechanism.
   overlap only rank candidates within that space.
 - `possible_event_families` is derived from upstream `products + topics`; the model cannot create
   or attach a family outside that routed space.
-- Create requires a minimal title and summary but no deterministic identity shape.
+- Create requires a minimal title and summary. `esports_match` create additionally requires a
+  recognizable match subject (participants or external_match_id); an empty match_identity is rejected.
+- `candidate_match_identity` has been removed from the schema. Candidate identity is exclusively
+  read from system-stored `Event.canonical_anchors`; the model cannot re-declare candidate identity.
+- `esports_match` candidate recall is followed by a structured **identity gate** that removes
+  candidates with hard identity conflicts (participants, external_match_id, match_date, scheduled_at,
+  stage, or round explicitly incompatible) before the LLM decision. The LLM only sees structurally
+  compatible candidates. This gate is a separate layer from 7-day recall.
 - All membership writes for one model result commit atomically or roll back together.
 - A `running` aggregation run is still an active-ownership signal while its
   `updated_at` is within the configured Pipeline Worker lease (5 minutes by default). A later invocation exits without an LLM call;

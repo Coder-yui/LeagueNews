@@ -28,6 +28,7 @@ from app.repositories.events import current_event_mention_conditions
 from app.services.raw_item_versions import latest_normalized_item_condition
 from scripts.repair_recent_esports_event_aggregation import (
     RepairSelection,
+    audit_esports_identity,
     regenerate_published_reports,
     reaggregate_items,
     rollback_selection,
@@ -181,6 +182,11 @@ async def main() -> None:
     with SessionLocal() as db:
         selection = inspect_all_selection(db)
         payload = selection_payload(selection, database=engine.url.database)
+        payload["identity_audit"] = audit_esports_identity(
+            db,
+            item_ids=selection.item_ids_newest_first,
+            event_ids=selection.event_ids,
+        )
     print(json.dumps(payload, ensure_ascii=False), flush=True)
     if not selection.item_ids_newest_first:
         raise RuntimeError("no current published esports-match messages were selected")

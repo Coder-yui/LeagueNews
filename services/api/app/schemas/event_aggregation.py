@@ -4,6 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.event_types import EventFamily, EventMateriality, EventRelation, EventSourceRole
+from app.domain.esports_match_identity import esports_match_has_subject
 from app.domain.message_taxonomy import Product
 
 
@@ -78,7 +79,6 @@ class EventMentionDecision(BaseModel):
     materiality: EventMateriality = "material_update"
     evidence_excerpt: str = Field(default="", max_length=2000)
     match_identity: EsportsMatchIdentity | None = None
-    candidate_match_identity: EsportsMatchIdentity | None = None
     new_event: NewEventSeed | None = None
     projection: EventProjectionProposal | None = None
 
@@ -86,9 +86,7 @@ class EventMentionDecision(BaseModel):
     def validate_action_contract(self) -> "EventMentionDecision":
         if self.action != "ignore" and self.event_family is None:
             raise ValueError("create/attach requires event_family")
-        if self.event_family != "esports_match" and (
-            self.match_identity is not None or self.candidate_match_identity is not None
-        ):
+        if self.event_family != "esports_match" and self.match_identity is not None:
             raise ValueError("match identity metadata is only valid for esports_match")
         if (
             self.action != "ignore"
@@ -97,13 +95,17 @@ class EventMentionDecision(BaseModel):
         ):
             raise ValueError("esports_match create/attach requires match_identity")
         if (
-            self.action == "attach"
+            self.action == "create"
             and self.event_family == "esports_match"
-            and self.candidate_match_identity is None
+            and self.match_identity is not None
+            and not esports_match_has_subject(
+                self.match_identity.model_dump(mode="json", exclude_none=True)
+            )
         ):
-            raise ValueError("esports_match attach requires candidate_match_identity")
-        if self.action != "attach" and self.candidate_match_identity is not None:
-            raise ValueError("candidate_match_identity is only valid for attach")
+            raise ValueError(
+                "esports_match create requires a recognizable match subject: "
+                "participants or external_match_id"
+            )
         if self.action == "create":
             if self.event_id is not None:
                 raise ValueError("create cannot reference event_id")
@@ -132,7 +134,6 @@ class EventMentionDecision(BaseModel):
                 or self.new_event is not None
                 or self.projection is not None
                 or self.match_identity is not None
-                or self.candidate_match_identity is not None
             ):
                 raise ValueError("ignore cannot reference or change an event")
         if self.action != "ignore" and not self.evidence_excerpt.strip():

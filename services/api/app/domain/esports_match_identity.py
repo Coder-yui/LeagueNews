@@ -2,6 +2,8 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any
 
+from app.domain.message_entities import canonical_entity_name
+
 
 MATCH_IDENTITY_KEYS = (
     "participants",
@@ -63,6 +65,28 @@ def esports_match_identity_conflict(
             "external_match_id 明确冲突："
             f"candidate={existing_identity['external_match_id']!s}, "
             f"message={incoming_identity['external_match_id']!s}"
+        )
+
+    # participants is the explicit match subject. When both identities name a full
+    # participant set and the sets are genuinely distinct (neither is a subset of the
+    # other), the candidate cannot be the same match regardless of any other field.
+    # One side missing participants stays unknown rather than a conflict; identical
+    # participants are only a positive compatibility signal, never proof of the same
+    # occurrence. The subset guard keeps an incidental third-team mention in a message
+    # (e.g. "参考 JDG 上一场的表现") from wrongly discarding a compatible candidate.
+    existing_participants = _normalized_participants(existing_identity.get("participants"))
+    incoming_participants = _normalized_participants(incoming_identity.get("participants"))
+    if (
+        existing_participants
+        and incoming_participants
+        and existing_participants != incoming_participants
+        and not existing_participants.issubset(incoming_participants)
+        and not incoming_participants.issubset(existing_participants)
+    ):
+        return (
+            "participants 明确冲突："
+            f"candidate={sorted(existing_participants)}, "
+            f"message={sorted(incoming_participants)}"
         )
 
     existing_date = _match_date(existing_identity)
@@ -190,11 +214,65 @@ def esports_match_same_occurrence_evidence(
 def _normalized_participants(value: Any) -> set[str]:
     if not isinstance(value, list):
         return set()
-    return {
-        " ".join(str(part).strip().casefold().split())
-        for part in value
-        if isinstance(part, str) and part.strip()
-    }
+    normalized: set[str] = set()
+    for part in value:
+        if not isinstance(part, str) or not part.strip():
+            continue
+        canonical = canonical_entity_name("team", part)
+        token = " ".join(canonical.strip().casefold().split())
+        if token:
+            normalized.add(token)
+    return normalized
+
+
+def esports_match_has_subject(identity: Mapping[str, Any] | None) -> bool:
+    """A concrete esports_match needs a recognizable match subject.
+
+    A match Event is only meaningful when it names at least one explicit participant
+    (a normal match usually has two sides) or carries an explicit ``external_match_id``.
+    A create with neither is rejected, and an Event that lost both cannot keep
+    participating in aggregation.
+    """
+    match_identity = match_identity_from_anchors(identity)
+    if _normalized_participants(match_identity.get("participants")):
+        return True
+    if _normalized_scalar(match_identity.get("external_match_id")):
+        return True
+    return False
+
+
+def match_identity_from_message_entities(
+    entities: list[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Derive a conservative incoming match identity from already extracted entities.
+
+    ``NormalizedItem.entities`` is a list of extracted entity dicts. The only occurrence
+    facts reliably available *before* the LLM decision are the message's explicit team
+    entities, which become ``participants`` (a normal match usually has two sides).
+    Dates, stage/round, scheduled_at and external ids cannot be structured without the
+    model and stay unknown here; they are compared by the code fence at attach/apply
+    time once the model supplies ``match_identity``. This is a conservative pre-LLM
+    signal: with no team entities it returns an empty identity and the identity gate is
+    a no-op rather than a source of false conflicts.
+    """
+    if not isinstance(entities, list):
+        return {}
+    participants: list[str] = []
+    seen: set[str] = set()
+    for entity in entities:
+        if not isinstance(entity, Mapping):
+            continue
+        if str(entity.get("type") or "").strip().casefold() not in {"team", "club"}:
+            continue
+        name = entity.get("name") or entity.get("display_name") or entity.get("canonical_name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        key = " ".join(name.strip().casefold().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        participants.append(name.strip())
+    return {"participants": participants} if participants else {}
 
 
 def _normalized_scalar(value: Any) -> str | None:

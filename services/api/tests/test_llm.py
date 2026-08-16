@@ -570,11 +570,6 @@ def test_event_aggregation_retries_esports_match_occurrence_conflict_as_create()
                         "match_date": "2026-08-16",
                         "series_format": "BO3",
                     },
-                    "candidate_match_identity": {
-                        "participants": ["BLG", "TES"],
-                        "match_date": "2026-08-14",
-                        "series_format": "BO3",
-                    },
                 }
             ]
         },
@@ -619,6 +614,7 @@ def test_event_aggregation_retries_esports_match_occurrence_conflict_as_create()
                     "products": ["lol_esports"],
                     "canonical_anchors": {
                         "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-14",
                         "series_format": "BO3",
                     },
                     "title": "BLG 对阵 TES（8 月 14 日）",

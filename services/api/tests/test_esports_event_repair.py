@@ -81,7 +81,10 @@ def test_repair_rolls_back_all_current_membership_for_selected_match_messages() 
             mention_index=0,
             event_family="esports_match",
             products=["lol_esports"],
-            canonical_anchors={"match_date": "2026-08-16"},
+            canonical_anchors={
+                "participants": ["BLG", "TES"],
+                "match_date": "2026-08-16",
+            },
             title="BLG 对阵 TES",
             current_summary="赛前消息。",
             evidence_excerpt="BLG 对阵 TES",
@@ -142,6 +145,7 @@ def test_repair_rolls_back_all_current_membership_for_selected_match_messages() 
             "mentions_removed": 2,
             "runs_removed": 1,
             "events_deleted": 1,
+            "events_deleted_invalid_shell": 0,
             "events_rebuilt": 1,
         }
         assert db.scalar(select(func.count()).select_from(RawItem)) == 2
@@ -151,6 +155,82 @@ def test_repair_rolls_back_all_current_membership_for_selected_match_messages() 
         assert db.get(Event, match_event.id) is not None
         assert db.get(Event, unrelated_event.id) is None
         assert db.scalar(select(func.count()).select_from(EventAggregationRun)) == 0
+
+
+def test_repair_deletes_shell_esports_match_without_usable_subject() -> None:
+    """An esports_match that cannot rebuild a minimal valid projection after rollback
+    (no recognizable match subject) is deleted instead of being left as an empty shell."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="repair shell", connector_type="manual")
+        db.add(source)
+        db.flush()
+        keeper = _item(
+            db,
+            source=source,
+            external_id="shell-keeper",
+            published_at=datetime(2026, 8, 14, 8, tzinfo=UTC),
+        )
+        selected = _item(
+            db,
+            source=source,
+            external_id="shell-selected",
+            published_at=datetime(2026, 8, 16, 8, tzinfo=UTC),
+        )
+        db.commit()
+
+        shell_event, _ = create_event(
+            db,
+            normalized_item_id=keeper.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={"match_date": "2026-08-16"},
+            title="某场比赛",
+            current_summary="赛前消息。",
+            evidence_excerpt="某场比赛",
+        )
+        add_event_mention(
+            db,
+            event_id=shell_event.id,
+            normalized_item_id=selected.id,
+            mention_index=0,
+            relation="reports",
+            source_role="unknown",
+            materiality="material_update",
+            evidence_excerpt="某场比赛赛果",
+            current_summary="赛果消息。",
+        )
+        db.add(
+            EventAggregationRun(
+                normalized_item_id=selected.id,
+                normalized_item_revision=selected.current_revision,
+                status="completed",
+                outcome="applied",
+                aggregation_policy_version="event-aggregation-v12-identity-gate-subject-continuation",
+                idempotency_key=(
+                    f"{selected.id}:{selected.current_revision}:"
+                    "event-aggregation-v12-identity-gate-subject-continuation"
+                ),
+            )
+        )
+        db.commit()
+
+        selection = inspect_selection(db, limit=1)
+        assert selection.event_ids == (shell_event.id,)
+
+        result = rollback_selection(db, selection)
+        db.commit()
+
+        assert result == {
+            "mentions_removed": 1,
+            "runs_removed": 1,
+            "events_deleted": 0,
+            "events_deleted_invalid_shell": 1,
+            "events_rebuilt": 0,
+        }
+        assert db.get(Event, shell_event.id) is None
 
 
 def test_selection_token_changes_with_item_revision() -> None:

@@ -1,6 +1,6 @@
 # Event Filtering, Recall, and Granularity
 
-> Policy version: `event-aggregation-v7-match-occurrence-boundary`
+> Policy version: `event-aggregation-v8-match-time-boundary`
 
 ## Minimal filter
 

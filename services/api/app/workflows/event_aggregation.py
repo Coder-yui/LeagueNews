@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,9 +16,10 @@ from app.domain.esports_match_identity import (
 )
 from app.domain.event_families import EventSpace, product_supports_family
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
-from app.models.event import Event, EventAggregationRun
+from app.models.event import Event, EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
-from app.repositories.events import event_ids_for_normalized_item
+from app.models.raw_item import RawItem
+from app.repositories.events import current_event_mention_conditions, event_ids_for_normalized_item
 from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
 from app.services.event_candidates import recall_event_candidates
 from app.services.event_semantics import semantic_projection
@@ -42,6 +43,9 @@ class SupersededEventAggregationError(RuntimeError):
 
 class EsportsMatchIdentityConflictError(ValueError):
     """An attach attempted to cross a known esports match occurrence boundary."""
+
+
+ESPORTS_MATCH_MAX_MEMBER_GAP = timedelta(days=3)
 
 
 def _run_key(item: NormalizedItem) -> str:
@@ -434,7 +438,35 @@ def _decision_candidate_match_identity(
     return decision.candidate_match_identity.model_dump(mode="json", exclude_none=True)
 
 
-def _validate_esports_match_attach(event: Event, decision: EventMentionDecision) -> None:
+def _observed_at(item: NormalizedItem) -> datetime:
+    value = item.raw_item.published_at or item.raw_item.ingested_at
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _event_member_observed_at(db: Session, event_id: int) -> list[datetime]:
+    values = db.scalars(
+        select(func.coalesce(RawItem.published_at, RawItem.ingested_at))
+        .join(NormalizedItem, NormalizedItem.raw_item_id == RawItem.id)
+        .join(EventMention, EventMention.normalized_item_id == NormalizedItem.id)
+        .where(
+            EventMention.event_id == event_id,
+            *current_event_mention_conditions(),
+        )
+    )
+    return [
+        value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        for value in values
+    ]
+
+
+def _validate_esports_match_attach(
+    db: Session,
+    event: Event,
+    item: NormalizedItem,
+    decision: EventMentionDecision,
+) -> None:
     if decision.event_family != "esports_match":
         return
     candidate_identity = merge_match_identity(
@@ -448,6 +480,19 @@ def _validate_esports_match_attach(event: Event, decision: EventMentionDecision)
             f"mention[{decision.mention_index}] cannot attach to esports_match Event "
             f"{event.id}: {conflict}"
         )
+
+    # Explicit match identity is not always extracted from short score updates.
+    # Use the observed publication/ingestion date as a deterministic fallback so
+    # separate match occurrences cannot be merged through a weak candidate.
+    incoming_at = _observed_at(item)
+    for existing_at in _event_member_observed_at(db, event.id):
+        gap = abs(incoming_at - existing_at)
+        if gap > ESPORTS_MATCH_MAX_MEMBER_GAP:
+            raise EsportsMatchIdentityConflictError(
+                f"mention[{decision.mention_index}] cannot attach to esports_match Event "
+                f"{event.id}: existing member is {gap.days} days apart; "
+                f"match occurrence gap must be <= {ESPORTS_MATCH_MAX_MEMBER_GAP.days} days"
+            )
 
 
 def apply_membership_transaction(
@@ -524,7 +569,7 @@ def apply_membership_transaction(
             )
             if event is None:
                 raise ValueError(f"candidate event {decision.event_id} disappeared")
-            _validate_esports_match_attach(event, decision)
+            _validate_esports_match_attach(db, event, item, decision)
             proposal = decision.projection
             canonical_anchors = None
             if decision.event_family == "esports_match":

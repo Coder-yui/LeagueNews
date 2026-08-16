@@ -623,6 +623,59 @@ def test_esports_match_date_conflict_blocks_forced_attach_before_membership_writ
         assert run.outcome == "apply_error"
 
 
+def test_esports_match_observed_gap_blocks_missing_identity_attach() -> None:
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="match occurrence time gap")
+        db.add(source)
+        db.flush()
+        seed_item = _item(
+            db,
+            source=source,
+            external_id="blg-tes-aug05",
+            title="8 月 5 日 BLG 对阵 TES",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+            published_at=datetime(2026, 8, 5, 8, tzinfo=UTC),
+        )
+        db.commit()
+        existing, _ = create_event(
+            db,
+            normalized_item_id=seed_item.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={"participants": ["BLG", "TES"]},
+            title="BLG 对阵 TES（8 月 5 日）",
+            current_summary="BLG 与 TES 于 8 月 5 日进行 BO3。",
+            evidence_excerpt="8 月 5 日 BLG 对阵 TES",
+        )
+        item = _item(
+            db,
+            source=source,
+            external_id="blg-tes-aug16-undated",
+            title="BLG 对阵 TES 赛果",
+            products=["lol_esports"],
+            topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 8, tzinfo=UTC),
+        )
+        db.commit()
+        client = StaticClient(
+            _result(
+                _esports_attach_decision(
+                    event_id=existing.id,
+                    match_identity={"participants": ["BLG", "TES"]},
+                    candidate_match_identity={"participants": ["BLG", "TES"]},
+                )
+            )
+        )
+
+        with pytest.raises(EsportsMatchIdentityConflictError, match="days apart"):
+            _aggregate(db, item, client)
+
+        assert db.scalar(select(func.count(EventMention.id))) == 1
+
+
 def test_same_esports_match_date_attaches_and_enriches_missing_identity() -> None:
     engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
@@ -948,10 +1001,7 @@ def test_running_event_aggregation_run_cannot_be_reused_for_another_model_call()
             normalized_item_revision=item.current_revision,
             status="running",
             current_stage="model_decision",
-            idempotency_key=(
-                f"{item.id}:{item.current_revision}:"
-                "event-aggregation-v7-match-occurrence-boundary"
-            ),
+            idempotency_key=f"{item.id}:{item.current_revision}:{AGGREGATION_POLICY_VERSION}",
         )
         db.add(existing_run)
         db.commit()
@@ -992,11 +1042,8 @@ def test_stale_running_run_reuses_persisted_decision_without_duplicate_membershi
             normalized_item_revision=item.current_revision,
             status="running",
             current_stage="apply_membership",
-            aggregation_policy_version="event-aggregation-v7-match-occurrence-boundary",
-            idempotency_key=(
-                f"{item.id}:{item.current_revision}:"
-                "event-aggregation-v7-match-occurrence-boundary"
-            ),
+            aggregation_policy_version=AGGREGATION_POLICY_VERSION,
+            idempotency_key=f"{item.id}:{item.current_revision}:{AGGREGATION_POLICY_VERSION}",
             model_call_count=1,
             candidate_snapshot=[],
             decision_draft={"mentions": [_create_decision()]},
@@ -1032,7 +1079,7 @@ def test_stale_previous_revision_run_does_not_block_current_revision() -> None:
             status="running",
             current_stage="model_decision",
             idempotency_key=(
-                f"{item.id}:1:event-aggregation-v7-match-occurrence-boundary"
+                f"{item.id}:1:{AGGREGATION_POLICY_VERSION}"
             ),
         )
         db.add(old_run)

@@ -2,7 +2,7 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v7-match-occurrence-boundary`
+> Policy version: `event-aggregation-v8-match-time-boundary`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.

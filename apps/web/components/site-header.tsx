@@ -10,6 +10,7 @@ const navigation = [
   { href: "/messages", label: "消息", match: (pathname: string) => pathname.startsWith("/messages") },
   { href: "/events", label: "事件", match: (pathname: string) => pathname.startsWith("/events") },
   { href: "/daily", label: "日报", match: (pathname: string) => pathname.startsWith("/daily") },
+  { href: "/about", label: "关于", match: (pathname: string) => pathname.startsWith("/about") },
 ];
 
 export function SiteHeader() {

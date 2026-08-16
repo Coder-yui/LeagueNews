@@ -11,6 +11,7 @@ export function SiteFooter() {
         <Link href="/messages">消息归档</Link>
         <Link href="/events">事件追踪</Link>
         <Link href="/daily">每日日报</Link>
+        <Link href="/about">关于项目</Link>
       </nav>
       <small>LeagueNews 为独立资讯项目，与 Riot Games 无隶属关系。</small>
     </footer>

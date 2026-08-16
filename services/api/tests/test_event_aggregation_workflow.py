@@ -1,5 +1,7 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -20,7 +22,12 @@ from app.services.event_candidates import recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import create_event
 from app.repositories.events import current_event_mention_conditions
-from app.services.llm import LLMAnalysisError, esports_match_create_continuation_error
+from app.services.llm import (
+    LLMAnalysisError,
+    LLMClient,
+    esports_match_create_continuation_error,
+    execution_metadata,
+)
 from app.workflows.event_aggregation import (
     EsportsMatchIdentityConflictError,
     STALE_RUNNING_RUN_AFTER,
@@ -1888,3 +1895,672 @@ def test_esports_match_recall_window_is_seven_days_family_aware() -> None:
         )
         gameplay_ids = {candidate["event_id"] for candidate in gameplay_candidates}
         assert gameplay_old.id in gameplay_ids
+
+
+def test_esports_recall_filters_family_in_sql_before_limit() -> None:
+    """Family must be filtered in SQL before the limit so unrelated families cannot starve it.
+
+    Many fresh other-family events would otherwise fill the bounded candidate budget; the routed
+    ``esports_match`` candidate must still be recalled even under a small limit.
+    """
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="recall-family")
+        db.add(source)
+        db.flush()
+        events = [
+            Event(
+                title=f"其他家族 {index}", current_summary="",
+                event_family="gameplay_balance", products=["lol_pc"],
+                canonical_anchors={"patch_version": f"26.{index}"},
+                first_seen_at=now - timedelta(hours=index),
+                last_seen_at=now - timedelta(hours=index),
+            )
+            for index in range(30)
+        ]
+        target = Event(
+            title="BLG 对阵 TES", current_summary="",
+            event_family="esports_match", products=["lol_esports"],
+            canonical_anchors={"participants": ["BLG", "TES"]},
+            first_seen_at=now - timedelta(days=1),
+            last_seen_at=now - timedelta(days=1),
+        )
+        target.recall_score = 0.0
+        db.add_all([*events, target])
+        db.flush()
+        esports_message = _item(
+            db, source=source, external_id="recall-family-msg",
+            title="BLG 对阵 TES 赛果", products=["lol_esports"],
+            topics=["esports_matches"], published_at=now,
+        )
+        db.commit()
+
+        candidates = recall_event_candidates(
+            db, item=esports_message, possible_families=["esports_match"],
+            total_limit=5,
+        )
+        ids = {candidate["event_id"] for candidate in candidates}
+        # The esports_match candidate survives the SQL filter; other families cannot squeeze it out.
+        assert target.id in ids
+        assert len(candidates) <= 5
+        assert all(candidate["event_family"] == "esports_match" for candidate in candidates)
+
+
+# ---------------------------------------------------------------------------
+# v10: strong-positive same-occurrence evidence / ambiguity regression
+# ---------------------------------------------------------------------------
+
+
+def _esports_candidate(
+    *,
+    event_id: int,
+    anchors: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "event_id": event_id,
+        "event_family": "esports_match",
+        "products": ["lol_esports"],
+        "canonical_anchors": dict(anchors),
+        "title": "BLG 对阵 TES",
+        "current_summary": "BLG 与 TES 的比赛。",
+        "latest_development": "进行中",
+        "key_facts": [],
+        "lifecycle_status": "developing",
+        "last_seen_at": "2026-08-16T12:00:00+00:00",
+        "recall_score": 0.5,
+        "recall_reasons": ["family_hint"],
+    }
+
+
+def test_v10_case_a_same_external_match_id_rejects_create() -> None:
+    """Case A: an equal explicit external_match_id is strong same-occurrence evidence."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "external_match_id": "match-123",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "external_match_id": "match-123"},
+    )}
+    # No score, no result wording: structured external id alone is enough.
+    message = {"title": "BLG 对阵 TES 赛果", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    assert error is not None
+    assert "match-123" in error
+    assert "不能 create" in error
+
+
+def test_v10_case_b_same_explicit_match_date_rejects_create() -> None:
+    """Case B: participants + equal explicit match_date is strong evidence."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+    )}
+    message = {"title": "BLG 2:1 TES", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    assert error is not None
+    assert "2026-08-16" in error
+
+
+def test_v10_case_c_different_explicit_match_date_allows_create() -> None:
+    """Case C: explicitly different match_date is a different occurrence, create is legal."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-14"},
+    )}
+    message = {"title": "BLG 2:1 TES", "summary": "BLG 再胜一场", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    # A genuinely different recorded occurrence -> the model may create a new Event.
+    assert error is None
+
+
+def test_v10_case_e_participants_only_is_not_deterministic_proof() -> None:
+    """Case E: same participants with no other occurrence facts never hard-rejects create."""
+    mention = _continuation_mention(
+        match_identity={"participants": ["BLG", "TES"]},
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"]},
+    )}
+    message = {"title": "BLG 2:1 TES", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    # participants alone is a recall signal, never deterministic identity proof.
+    assert error is None
+
+
+def test_v10_case_d_missing_incoming_date_must_not_hard_reject() -> None:
+    """Case D: participants same but the incoming date is missing is NOT a proof.
+
+    The candidate has a date, the incoming message only names the two teams and a
+    score. Absence of a conflict must never be upgraded into positive identity, so
+    the Python validator hands the semantic choice to the model.
+    """
+    mention = _continuation_mention(
+        match_identity={"participants": ["BLG", "TES"]},
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-14"},
+    )}
+    message = {"title": "BLG 2:1 TES", "summary": "BLG 获得本场胜利", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    # No strong positive evidence -> create must not be hard-rejected deterministically.
+    assert error is None
+
+
+def test_v10_case_f_same_date_different_round_conflict_allows_create() -> None:
+    """Case F: equal participants/date but a hard round conflict means a new occurrence."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+            "round": "lower-final",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+            "round": "upper-final",
+        },
+    )}
+    message = {"title": "败者组决赛 BLG 对阵 TES", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    assert error is None
+
+
+def test_v10_case_g_score_dash_format_does_not_bypass_protection() -> None:
+    """Case G: same-occurrence protection does not depend on the score regex (2-1 vs 2:1)."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+    )}
+    # A dash-formatted score would not have matched the old colon-only regex.
+    message = {"title": "BLG 2-1 TES", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    assert error is not None
+
+
+def test_v10_case_h_chinese_natural_language_result_does_not_bypass_protection() -> None:
+    """Case H: natural-language results do not rely on any Chinese keyword parser."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+    )}
+    message = {"title": "BLG让一追二击败TES", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    assert error is not None
+
+
+def test_v10_multiple_strong_evidence_candidates_are_ambiguous() -> None:
+    """When several candidates all share strong evidence, do not force a specific attach."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+        }
+    )
+    candidates = {
+        111: _esports_candidate(
+            event_id=111,
+            anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+        ),
+        222: _esports_candidate(
+            event_id=222,
+            anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+        ),
+    }
+    message = {"title": "BLG 2:1 TES", "content_form": "original"}
+
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message=message
+    )
+
+    # Ambiguous between two strong candidates -> model keeps semantic control.
+    assert error is None
+
+
+def test_v10_create_rejected_regardless_of_state_wording() -> None:
+    """If strong same-occurrence evidence exists, wording such as '晋级' is irrelevant to rejection."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "match_date": "2026-08-16",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+    )}
+    for wording in (
+        "BLG 战胜 TES 晋级下一轮",
+        "BLG 拿下关键一局",
+        "TES 被 BLG 淘汰出局",
+    ):
+        message = {"title": wording, "content_form": "original"}
+        error = esports_match_create_continuation_error(
+            mention, candidates=candidates, message=message
+        )
+        assert error is not None
+
+
+# ---------------------------------------------------------------------------
+# v10: projection chronology (mention-own patch, evidence-time replay)
+# ---------------------------------------------------------------------------
+
+
+def _esports_projection_attach(
+    *,
+    event_id: int,
+    match_identity: dict[str, object],
+    latest_development: str,
+    materiality: str = "material_update",
+) -> dict[str, object]:
+    decision = _esports_attach_decision(
+        event_id=event_id,
+        match_identity=match_identity,
+        candidate_match_identity=dict(match_identity),
+    )
+    if materiality != "material_update":
+        decision["materiality"] = materiality
+    else:
+        decision["projection"] = {"latest_development": latest_development}
+    return decision
+
+
+def _bump_revision(db: Session, item: NormalizedItem) -> None:
+    item.current_revision += 1
+
+
+def test_v10_projection_invalidation_restores_previous_material() -> None:
+    """Projection case: 10:00 1:1 -> 12:00 final; invalidating 12:00 restores 1:1."""
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="proj-invalidate")
+        db.add(source)
+        db.flush()
+        first = _item(
+            db, source=source, external_id="proj-1:1", title="BLG 1:1 TES",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 10, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, first, StaticClient(_result(_esports_create_decision(
+            title="BLG 对阵 TES", latest_development="1:1",
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            evidence="BLG 1:1 TES",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+
+        second = _item(
+            db, source=source, external_id="proj-final", title="BLG 2:1 TES 比赛结束",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, second, StaticClient(_result(_esports_projection_attach(
+            event_id=event.id,
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            latest_development="2:1 最终赛果",
+        ))))
+        db.refresh(event)
+        assert event.latest_development == "2:1 最终赛果"
+        assert event.latest_update_message_id == second.id
+
+        # Invalidate the 12:00 final evidence (revision advances away from it).
+        _bump_revision(db, second)
+        db.commit()
+        refresh_event_metrics(db, {event.id})
+        db.commit()
+        db.refresh(event)
+
+        assert event.latest_development == "1:1"
+        assert event.latest_update_message_id == first.id
+
+
+def test_v10_projection_out_of_order_then_invalidate_restores_old_evidence() -> None:
+    """Critical case: 12:00 final then 10:00 old 1:1; invalidating final restores 1:1.
+
+    The 10:00 revision must hold only its own '1:1' patch. It must NOT have baked the
+    global '2:1 最终赛果' into its snapshot, otherwise restoring after the final is
+    invalidated would resurrect the final state.
+    """
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="proj-ooo")
+        db.add(source)
+        db.flush()
+        newer = _item(
+            db, source=source, external_id="ooo-final", title="BLG 2:1 TES 比赛结束",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, newer, StaticClient(_result(_esports_create_decision(
+            title="BLG 对阵 TES", latest_development="2:1 最终赛果",
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            evidence="BLG 2:1 TES",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+
+        older = _item(
+            db, source=source, external_id="ooo-1:1", title="BLG 1:1 TES",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 10, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, older, StaticClient(_result(_esports_projection_attach(
+            event_id=event.id,
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            latest_development="1:1",
+        ))))
+        db.refresh(event)
+        # Out-of-order 10:00 must not regress the live projection.
+        assert event.latest_development == "2:1 最终赛果"
+
+        # Invalidate the 12:00 final evidence.
+        _bump_revision(db, newer)
+        db.commit()
+        refresh_event_metrics(db, {event.id})
+        db.commit()
+        db.refresh(event)
+
+        # The final must NOT resurrect from the older revision's snapshot.
+        assert event.latest_development == "1:1"
+        assert event.latest_update_message_id == older.id
+
+
+def test_v10_projection_same_evidence_time_uses_deterministic_winner() -> None:
+    """Tie-break: two material updates at the same evidence time share one winner."""
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="proj-tie")
+        db.add(source)
+        db.flush()
+        first = _item(
+            db, source=source, external_id="tie-seed", title="BLG 1:1 TES",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 10, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, first, StaticClient(_result(_esports_create_decision(
+            title="BLG 对阵 TES", latest_development="1:1",
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            evidence="BLG 1:1 TES",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+
+        same_time = datetime(2026, 8, 16, 12, tzinfo=UTC)
+        second = _item(
+            db, source=source, external_id="tie-b", title="BLG 2:1 TES 赛果",
+            products=["lol_esports"], topics=["esports_matches"], published_at=same_time,
+        )
+        db.commit()
+        _aggregate(db, second, StaticClient(_result(_esports_projection_attach(
+            event_id=event.id,
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            latest_development="2:1 赛果甲",
+        ))))
+        third = _item(
+            db, source=source, external_id="tie-c", title="BLG 2:1 TES 再确认",
+            products=["lol_esports"], topics=["esports_matches"], published_at=same_time,
+        )
+        db.commit()
+        _aggregate(db, third, StaticClient(_result(_esports_projection_attach(
+            event_id=event.id,
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            latest_development="2:1 赛果乙",
+        ))))
+        db.refresh(event)
+
+        # Higher mention.id wins on the evidence-time tie; latest_development and
+        # latest_update_message_id must be derived from that same deterministic winner.
+        assert event.latest_development == "2:1 赛果乙"
+        assert event.latest_update_message_id == third.id
+        assert event.last_material_update_at.replace(tzinfo=UTC) == same_time
+
+
+def test_v10_non_material_attach_does_not_advance_latest_projection() -> None:
+    """Projection case: corroboration_only/duplicate/context_only never advance latest."""
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="proj-nonmaterial")
+        db.add(source)
+        db.flush()
+        first = _item(
+            db, source=source, external_id="nm-seed", title="BLG 1:1 TES",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 10, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, first, StaticClient(_result(_esports_create_decision(
+            title="BLG 对阵 TES", latest_development="1:1",
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            evidence="BLG 1:1 TES",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+
+        for index, materiality in enumerate(
+            ("corroboration_only", "duplicate", "context_only")
+        ):
+            msg = _item(
+                db, source=source, external_id=f"nm-{index}", title=f"佐证 {index}",
+                products=["lol_esports"], topics=["esports_matches"],
+                published_at=datetime(2026, 8, 16, 11 + index, tzinfo=UTC),
+            )
+            db.commit()
+            _aggregate(db, msg, StaticClient(_result(_esports_projection_attach(
+                event_id=event.id,
+                match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+                latest_development="不应推进",
+                materiality=materiality,
+            ))))
+
+        db.refresh(event)
+        assert event.latest_development == "1:1"
+        assert event.latest_update_message_id == first.id
+        assert (
+            event.last_material_update_at.replace(tzinfo=UTC)
+            == datetime(2026, 8, 16, 10, tzinfo=UTC)
+        )
+
+
+# ---------------------------------------------------------------------------
+# v10: real LLM retry correction integration (create -> reject -> attach)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompletions:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        content = self.responses[len(self.calls) - 1]
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
+
+
+def _llm_client_with_responses(responses: list[str]) -> tuple[LLMClient, _FakeCompletions]:
+    client = LLMClient()
+    completions = _FakeCompletions(responses)
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    return client, completions
+
+
+def _esports_create_response() -> str:
+    return json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "action": "create",
+                    "event_id": None,
+                    "product": "lol_esports",
+                    "event_family": "esports_match",
+                    "relation": "reports",
+                    "source_role": "unknown",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "BLG 2:1 TES",
+                    "match_identity": {
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                    },
+                    "new_event": {
+                        "title": "BLG 对阵 TES",
+                        "summary": "BLG 2:1 战胜 TES。",
+                        "canonical_anchors": {
+                            "participants": ["BLG", "TES"],
+                            "match_date": "2026-08-16",
+                        },
+                        "latest_development": "2:1 最终赛果",
+                        "key_facts": [],
+                    },
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _esports_attach_response() -> str:
+    return json.dumps(
+        {
+            "mentions": [
+                {
+                    "mention_index": 0,
+                    "action": "attach",
+                    "event_id": 123,
+                    "product": "lol_esports",
+                    "event_family": "esports_match",
+                    "relation": "reports",
+                    "source_role": "unknown",
+                    "materiality": "material_update",
+                    "evidence_excerpt": "BLG 2:1 TES",
+                    "match_identity": {
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                    },
+                    "candidate_match_identity": {
+                        "participants": ["BLG", "TES"],
+                        "match_date": "2026-08-16",
+                    },
+                    "projection": {"latest_development": "2:1 最终赛果"},
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_v10_aggregate_events_retries_create_into_attach_with_business_feedback() -> None:
+    """Real retry correction loop: first create is rejected, second attach passes."""
+    candidates = [_esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+    )]
+    message = {
+        "title": "BLG 2:1 TES",
+        "summary": "BLG 战胜 TES 晋级下一轮",
+        "content_form": "original",
+    }
+
+    client, completions = _llm_client_with_responses(
+        [_esports_create_response(), _esports_attach_response()]
+    )
+    result = asyncio.run(
+        client.aggregate_events(
+            message=message,
+            possible_event_families=["esports_match"],
+            candidates=candidates,
+        )
+    )
+
+    assert len(completions.calls) == 2
+    mention = result.mentions[0]
+    assert mention.action == "attach"
+    assert mention.event_id == 123
+    assert execution_metadata(result)["retry_count"] == 1
+
+    # The second request must repeat the rejected assistant output and then a user
+    # correction that spells out the concrete business validation reason.
+    second_messages = completions.calls[1]["messages"]
+    assistant_contents = [
+        msg["content"] for msg in second_messages if msg["role"] == "assistant"
+    ]
+    user_contents = [msg["content"] for msg in second_messages if msg["role"] == "user"]
+    assert any(
+        json.loads(content)["mentions"][0]["action"] == "create"
+        for content in assistant_contents
+    )
+    correction = next(content for content in user_contents if "不能 create" in content)
+    assert "强正的" in correction or "同一场次" in correction
+    assert "material_update" in correction
+    assert "123" in correction

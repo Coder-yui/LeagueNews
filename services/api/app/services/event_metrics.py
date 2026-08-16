@@ -64,70 +64,93 @@ def refresh_event_importance(event: Event, mentions: list[EventMention]) -> None
 def _restore_event_projection(
     db: Session, event: Event, mentions: list[EventMention]
 ) -> None:
-    """Restore material-update fields from the newest still-valid evidence time.
+    """Replay each still-valid material-update projection patch by evidence time.
 
-    The selected snapshot is the one for the active material_update with the latest
-    ``_mention_time``, matching how ``last_material_update_at`` and
-    ``latest_update_message_id`` are derived. We must NOT select by ``EventRevision.
-    revision``: a late-reprocessed old message receives a higher revision even though
-    its evidence time is older, and picking it would regress ``latest_development``.
+    Each ``EventRevision`` stores the *mention's own* projection contribution
+    (``projection_patch``), never a whole-Event snapshot, so a late-reprocessed
+    old message can never bake the newest global projection into its own patch.
+    Restore rebuilds the projection by:
+
+    1. ordering the active material-update mentions by priority evidence time;
+    2. looking up the patch recorded for each mention's proof key;
+    3. replaying the patches in that order, applying only the fields present.
+
+    The order matches ``_refresh_references`` so ``latest_development`` and
+    ``latest_update_message_id`` are derived from the same deterministic winner
+    (``evidence_time``, then ``EventMention.id``). Selecting by ``EventRevision.
+    revision`` is intentionally avoided: a late-reprocessed old message receives a
+    higher revision but an older evidence time and must not regress the projection.
     """
     material_mentions = [
         mention for mention in mentions if mention.materiality == "material_update"
     ]
-    snapshots: list[tuple[tuple[int, int, int, str], dict[str, object]]] = []
-    if material_mentions:
-        # Proof key of an active material mention -> its evidence time. Keys are unique
-        # across active mentions, so selecting by key below is deterministic.
-        key_to_time = {
-            (
-                mention.normalized_item_id,
-                mention.normalized_item_revision,
-                mention.mention_index,
-                mention.aggregation_policy_version,
-            ): _mention_time(mention)
-            for mention in material_mentions
-        }
-        revisions = db.scalars(
-            select(EventRevision)
-            .where(EventRevision.event_id == event.id)
-            .order_by(EventRevision.revision)
+    if not material_mentions:
+        event.lifecycle_status = "stale"
+        return
+    material = sorted(
+        material_mentions,
+        key=lambda mention: (_mention_time(mention), mention.id),
+    )
+    material_keys = {
+        (
+            mention.normalized_item_id,
+            mention.normalized_item_revision,
+            mention.mention_index,
+            mention.aggregation_policy_version,
         )
-        for revision in revisions:
-            evidence = revision.evidence_snapshot or {}
-            key = (
-                evidence.get("normalized_item_id"),
-                evidence.get("normalized_item_revision"),
-                evidence.get("mention_index"),
-                evidence.get("aggregation_policy_version"),
-            )
-            snapshot = evidence.get("projection_snapshot")
-            if key in key_to_time and isinstance(snapshot, dict):
-                snapshots.append((key, snapshot))
+        for mention in material
+    }
+    # proof key -> the mention-scoped projection patch (legacy revisions fall back
+    # to a full snapshot recorded when they were written).
+    contribution_by_key: dict[
+        tuple[int, int, int, str], dict[str, object]
+    ] = {}
+    for revision in db.scalars(
+        select(EventRevision)
+        .where(EventRevision.event_id == event.id)
+        .order_by(EventRevision.revision)
+    ):
+        evidence = revision.evidence_snapshot or {}
+        key = (
+            evidence.get("normalized_item_id"),
+            evidence.get("normalized_item_revision"),
+            evidence.get("mention_index"),
+            evidence.get("aggregation_policy_version"),
+        )
+        if key not in material_keys:
+            continue
+        patch_candidate = evidence.get("projection_patch")
+        if isinstance(patch_candidate, dict) and patch_candidate:
+            contribution_by_key[key] = patch_candidate
+        else:
+            legacy = evidence.get("projection_snapshot")
+            if isinstance(legacy, dict):
+                contribution_by_key[key] = legacy
 
-    if snapshots:
-        _key, snapshot = max(snapshots, key=lambda value: key_to_time[value[0]])
-        event.title = str(snapshot.get("title") or event.title)
-        event.current_summary = str(
-            snapshot.get("current_summary") or event.current_summary
+    for mention in material:
+        key = (
+            mention.normalized_item_id,
+            mention.normalized_item_revision,
+            mention.mention_index,
+            mention.aggregation_policy_version,
         )
-        event.latest_development = str(
-            snapshot.get("latest_development") or ""
-        )
-        key_facts = snapshot.get("key_facts")
+        patch = contribution_by_key.get(key)
+        if not patch:
+            continue
+        if "title" in patch:
+            event.title = str(patch["title"])
+        if "current_summary" in patch:
+            event.current_summary = str(patch["current_summary"])
+        if "latest_development" in patch:
+            event.latest_development = str(patch["latest_development"])
+        if "lifecycle_status" in patch:
+            event.lifecycle_status = str(patch["lifecycle_status"])
+        key_facts = patch.get("key_facts")
         if isinstance(key_facts, list):
             event.key_facts = key_facts
-        canonical_anchors = snapshot.get("canonical_anchors")
+        canonical_anchors = patch.get("canonical_anchors")
         if isinstance(canonical_anchors, dict):
             event.canonical_anchors = canonical_anchors
-        lifecycle_status = snapshot.get("lifecycle_status")
-        event.lifecycle_status = (
-            str(lifecycle_status) if lifecycle_status else "developing"
-        )
-    else:
-        # Legacy revisions do not have a projection snapshot. Keep their stable
-        # label, but never let an old lifecycle status survive evidence removal.
-        event.lifecycle_status = "developing" if material_mentions else "stale"
 
 
 def _refresh_event_times(event: Event, mentions: list[EventMention]) -> None:

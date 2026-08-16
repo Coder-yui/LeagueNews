@@ -2,7 +2,7 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v9-match-continuation`
+> Policy version: `event-aggregation-v10-match-evidence-continuation`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
@@ -46,21 +46,26 @@ metadata; they are not a parallel identity mechanism.
 - Attach can reference only an Event in the bounded candidate payload.
 - `esports_match` uses **continuation-first**: once a match has entered this family, its score /
   result / live→finished state updates are `material_update`s of the **same** Event and must not
-  `create` a new one. A new Event is allowed only for a genuinely different occurrence (explicitly
-  different `match_date`, `external_match_id`, `stage`, `round` or `scheduled_at`) or when no
-  reasonably compatible candidate exists. The model business validator rejects a clear
-  continuation-`create` and feeds the reason back through the retry loop; the apply layer keeps a
-  hard fencing conflict guard. An `esports_match` Event represents one concrete match or series
-  occurrence, not the recurring relationship between its participants. Explicit `match_date`,
-  `external_match_id`, `stage`, or `round` conflicts reject attach after the model decision and
-  again before membership is written. Missing identity fields are not conflicts. Known occurrence
-  metadata is stored in `canonical_anchors`; it remains descriptive membership metadata and never
-  replaces `event_id`. Same participants are a strong signal but never a deterministic proof.
+  `create` a new one. A new Event is allowed only for a genuinely different occurrence. The model
+  business validator rejects a clear continuation-`create` only on **strong positive same-occurrence
+  evidence** (an equal explicit `external_match_id`, participants plus an equal explicit
+  `match_date`, or participants plus equal `competition`/`stage`/`round`, with no hard conflict) and
+  feeds the reason back through the retry loop. Absence of a hard conflict is **never** treated as
+  proof of the same occurrence: two matches between the same teams inside the window must stay
+  separate unless strong positive evidence says otherwise. The apply layer keeps a hard fencing
+  conflict guard (explicit `match_date`, `external_match_id`, `stage`, or `round` conflicts reject
+  attach after the model decision and again before membership is written; missing identity fields
+  are not conflicts). An `esports_match` Event represents one concrete match or series occurrence,
+  not the recurring relationship between its participants. Known occurrence metadata is stored in
+  `canonical_anchors`; it remains descriptive membership metadata and never replaces `event_id`.
+  Same participants are a recall signal only, never a deterministic proof.
 - `esports_schedule` carries pre-match fixtures / schedules / opening arrangements and may be a
-  separate Event from the in-progress `esports_match`.
-- Candidate retrieval is family-aware: `esports_match` recalls within the recent **7 days**;
-  other families keep the 365-day recall window. The 7-day bound is a search boundary only, never
-  a match identity rule.
+  separate Event from the in-progress `esports_match`. Once a match actually begins and pushes
+  state, it belongs to `esports_match` and those states must continue the same Event.
+- Candidate retrieval is family-aware and applies the routed-family gate **in SQL before the
+  bounded candidate limit**: `esports_match` recalls within the recent **7 days**; other families
+  keep the 365-day recall window. The 7-day bound is a search boundary only, never a match identity
+  rule.
 - Candidate retrieval hard-gates explicit products and routed event families; entities and text
   overlap only rank candidates within that space.
 - `possible_event_families` is derived from upstream `products + topics`; the model cannot create
@@ -80,12 +85,15 @@ metadata; they are not a parallel identity mechanism.
   `EventMention.normalized_item_revision == NormalizedItem.current_revision`. Historical mentions
   remain stored for audit, but metrics, counts, references, detail/timeline, event listing and
   report deduplication use only current mentions.
-- Material EventRevision evidence snapshots preserve the current title/summary and related
-  projection fields. When a NormalizedItem revision is invalidated, the projection is restored
-  from the newest still-valid snapshot and all derived metrics/references are recomputed. Legacy
-  revisions created before these snapshots do not contain enough information to rebuild a changed
-  title or summary reliably; the stable label is retained while lifecycle, counts, references and
-  metrics are reset from the remaining evidence.
+- Each material-update `EventRevision` records a **mention-specific projection patch**: only the
+  presentation fields that this mention actually provided (`title`, `current_summary`,
+  `latest_development`, `lifecycle_status`, `canonical_anchors`, `key_facts`). It never stores a
+  whole-Event snapshot taken after processing, so a late-reprocessed older message can never bake
+  the newest global projection into its own revision. On invalidation the projection is rebuilt by
+  replaying the still-valid material-update patches in evidence order (`evidence_time`, then
+  `EventMention.id`) — not by taking a max-revision snapshot. This makes revision invalidation
+  recover the true previous state deterministically. Legacy revisions written before these patches
+  fall back to their stored full snapshot when available.
 - Importance, credibility, heat, references and presentation are projections refreshed after
   membership; they do not choose or reject membership.
 

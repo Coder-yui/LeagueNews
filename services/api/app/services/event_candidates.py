@@ -70,29 +70,46 @@ def recall_event_candidates(
     if total_limit < 1:
         raise ValueError("candidate limit must be positive")
     observed_at = _observed_at(item)
-    oldest_esports = observed_at - timedelta(days=ESPORTS_MATCH_RECALL_WINDOW_DAYS)
-    oldest_general = observed_at - timedelta(days=RECALL_WINDOW_DAYS)
+    families = [str(family) for family in (possible_families or [])]
+    if families:
+        # Filter by routed family *in SQL*, before the candidate limit, so unrelated
+        # families cannot consume the bounded budget and starve the relevant family.
+        # Each family keeps its own recall window (7 days for esports_match).
+        family_windows = [
+            (Event.event_family == family)
+            & (
+                Event.last_seen_at.is_(None)
+                | (
+                    Event.last_seen_at
+                    >= observed_at - timedelta(days=_recall_window_for(family))
+                )
+            )
+            for family in families
+        ]
+        where_clauses = or_(*family_windows)
+    else:
+        oldest_esports = observed_at - timedelta(days=ESPORTS_MATCH_RECALL_WINDOW_DAYS)
+        oldest_general = observed_at - timedelta(days=RECALL_WINDOW_DAYS)
+        where_clauses = or_(
+            (
+                (Event.event_family == "esports_match")
+                & (
+                    Event.last_seen_at.is_(None)
+                    | (Event.last_seen_at >= oldest_esports)
+                )
+            ),
+            (
+                (Event.event_family != "esports_match")
+                & (
+                    Event.last_seen_at.is_(None)
+                    | (Event.last_seen_at >= oldest_general)
+                )
+            ),
+        )
     events = list(
         db.scalars(
             select(Event)
-            .where(
-                or_(
-                    (
-                        (Event.event_family == "esports_match")
-                        & (
-                            Event.last_seen_at.is_(None)
-                            | (Event.last_seen_at >= oldest_esports)
-                        )
-                    ),
-                    (
-                        (Event.event_family != "esports_match")
-                        & (
-                            Event.last_seen_at.is_(None)
-                            | (Event.last_seen_at >= oldest_general)
-                        )
-                    ),
-                )
-            )
+            .where(where_clauses)
             .order_by(Event.last_seen_at.desc(), Event.id.desc())
             .limit(500)
         )

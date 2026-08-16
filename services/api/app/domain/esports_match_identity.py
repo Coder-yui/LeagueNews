@@ -81,6 +81,75 @@ def esports_match_identity_conflict(
     return None
 
 
+def esports_match_same_occurrence_evidence(
+    existing: Mapping[str, Any] | None,
+    incoming: Mapping[str, Any] | None,
+) -> str | None:
+    """Return a strong positive same-occurrence reason, or None.
+
+    This is deliberately conservative. Only explicit, agreeing occurrence facts produce
+    evidence: an equal ``external_match_id``, participants plus an equal explicit date /
+    scheduled occurrence, or participants plus equal competition/stage/round. It never
+    treats "no conflict" as proof of the same match. Any hard conflict (date/stage/round/
+    external id differing) returns None. ``participants`` alone is never sufficient.
+    """
+    if esports_match_identity_conflict(existing, incoming):
+        return None
+    existing_identity = match_identity_from_anchors(existing)
+    incoming_identity = match_identity_from_anchors(incoming)
+
+    existing_participants = _normalized_participants(existing_identity.get("participants"))
+    incoming_participants = _normalized_participants(incoming_identity.get("participants"))
+    if not existing_participants or not incoming_participants:
+        return None
+    if existing_participants != incoming_participants:
+        return None
+
+    existing_external = _normalized_scalar(existing_identity.get("external_match_id"))
+    incoming_external = _normalized_scalar(incoming_identity.get("external_match_id"))
+    if existing_external and incoming_external and existing_external == incoming_external:
+        return f"external_match_id 一致：{existing_identity['external_match_id']!s}"
+
+    existing_date = _occurrence_date(existing_identity)
+    incoming_date = _occurrence_date(incoming_identity)
+    if existing_date and incoming_date and existing_date == incoming_date:
+        return f"match_date 一致：{existing_date}"
+
+    existing_comp = _normalized_scalar(existing_identity.get("competition"))
+    incoming_comp = _normalized_scalar(incoming_identity.get("competition"))
+    existing_stage = _normalized_scalar(existing_identity.get("stage"))
+    incoming_stage = _normalized_scalar(incoming_identity.get("stage"))
+    existing_round = _normalized_scalar(existing_identity.get("round"))
+    incoming_round = _normalized_scalar(incoming_identity.get("round"))
+    if (
+        existing_comp
+        and incoming_comp
+        and existing_comp == incoming_comp
+        and existing_stage
+        and incoming_stage
+        and existing_stage == incoming_stage
+        and existing_round
+        and incoming_round
+        and existing_round == incoming_round
+    ):
+        return (
+            f"competition/stage/round 一致："
+            f"{existing_identity['competition']!s}/{existing_identity['stage']!s}/"
+            f"{existing_identity['round']!s}"
+        )
+    return None
+
+
+def _normalized_participants(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {
+        " ".join(str(part).strip().casefold().split())
+        for part in value
+        if isinstance(part, str) and part.strip()
+    }
+
+
 def _normalized_scalar(value: Any) -> str | None:
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         return None

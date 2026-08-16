@@ -12,11 +12,13 @@ regex for free champions, shops, esports, patches, reposts, leaks or promotions.
 
 Recall is a bounded high-recall operation. It looks at recent Events and ranks them with generic
 signals: topic-to-family hints, product overlap, entity overlap, lightweight title/summary lexical
-overlap and recent activity. The recall lookback is family-aware: `esports_match` searches the
-recent **7 days**, while other families keep the 365-day window. This boundary is a search limit
-only — never a match identity rule, and message publication time is never treated as match
-identity. Product or anchor differences are not hard conflicts. Candidate metadata is context for
-the model and never proof of identity.
+overlap and recent activity. The routed event-family gate and its recall lookback are applied **in
+SQL before the bounded candidate limit**: `esports_match` searches the recent **7 days**, while other
+families keep the 365-day window. Applying the family filter first means unrelated families cannot
+consume the bounded candidate budget and starve the family that actually needs recall. This boundary
+is a search limit only — never a match identity rule, and message publication time is never treated
+as match identity. Product or anchor differences are not hard conflicts. Candidate metadata is
+context for the model and never proof of identity.
 
 ## Semantic granularity
 
@@ -48,10 +50,14 @@ Once a match has entered `esports_match`, membership is **continuation-first**: 
 winner becoming known, live→finished transitions and advancement/elimination results are
 `material_update`s of the same Event, not reasons to `create`. A new Event is justified only by a
 genuinely different occurrence (explicitly different match date, external match ID, stage, round or
-scheduled time) or by the absence of a reasonably compatible candidate. A model `create` that
-clearly continues an existing compatible match is rejected as a business validation error and the
-concrete reason is returned to the model through the retry loop. `esports_schedule` may carry the
-pre-match fixture separately.
+scheduled time) or by the absence of a reasonably compatible candidate. A model `create` is rejected
+as a business validation error — and the concrete reason is returned to the model through the retry
+loop — only when there is **strong positive same-occurrence evidence** (equal explicit external
+match ID; participants plus an equal explicit match date; or participants plus equal
+competition/stage/round; with no hard conflict). Absence of a hard conflict is never treated as
+proof of the same occurrence: two same-participant matches with no recorded occurrence facts are
+left to the model's semantic judgment, not force-merged. `esports_schedule` may carry the pre-match
+fixture separately.
 
 The workflow records explicit match identity facts in `canonical_anchors` and applies a narrow hard
 conflict guard to attach decisions. For older candidates with missing structured anchors, the same

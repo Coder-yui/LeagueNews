@@ -1,7 +1,6 @@
 import json
 import hashlib
 import os
-import re
 import time
 from collections.abc import Callable
 from typing import Literal, TypeVar, cast
@@ -14,6 +13,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from app.core.config import settings
 from app.domain.esports_match_identity import (
     esports_match_identity_conflict,
+    esports_match_same_occurrence_evidence,
     merge_match_identity,
 )
 from app.domain.importance import (
@@ -132,51 +132,6 @@ def execution_metadata(result: BaseModel) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-_MATCH_SCORE_PATTERN = re.compile(r"\d+\s*[:：]\s*\d+")
-# Mutable match state terms. They describe how far a match has progressed, not a
-# new match occurrence, so they strengthen the continuation signal for a create.
-_MATCH_STATE_TERMS = (
-    "结束",
-    "获胜",
-    "胜利",
-    "击败",
-    "晋级",
-    "淘汰",
-    "赛果",
-    "胜出",
-    "战胜",
-    "战果",
-    "拿下",
-    "赢下",
-)
-
-
-def _match_participants(value: object) -> set[str]:
-    if not isinstance(value, list):
-        return set()
-    return {
-        str(part).strip().casefold()
-        for part in value
-        if isinstance(part, str) and part.strip()
-    }
-
-
-def _is_match_state_update(message: dict[str, object], excerpt: str) -> bool:
-    """Detect whether the current message reports match progress, not a new fixture."""
-    haystack = " ".join(
-        str(value)
-        for value in (
-            excerpt,
-            message.get("title"),
-            message.get("summary"),
-        )
-        if value
-    )
-    if _MATCH_SCORE_PATTERN.search(haystack):
-        return True
-    return any(term in haystack for term in _MATCH_STATE_TERMS)
-
-
 def esports_match_create_continuation_error(
     mention: EventMentionDecision,
     *,
@@ -185,23 +140,22 @@ def esports_match_create_continuation_error(
 ) -> str | None:
     """Stop an esports_match create that clearly continues an existing match.
 
-    continuation-first: only when there is exactly one compatible candidate with
-    the same match subject, no hard occurrence conflict, and the current message
-    is a score / result progression do we reject create. This never forces attach
-    on participants alone when identity evidence is insufficient (multiple or
-    ambiguous candidates) and never mistakes a genuinely new occurrence.
+    continuation-first is enforced only on **strong positive same-occurrence
+    evidence** (see ``esports_match_same_occurrence_evidence``): an equal explicit
+    ``external_match_id``, participants plus an equal explicit match date, or
+    participants plus equal competition/stage/round, with no hard conflict. Absence
+    of a conflict is never treated as proof of the same occurrence, and ``message``
+    wording / score format plays no role here. When evidence is ambiguous (multiple
+    strong-evidence candidates, or none) the model keeps full semantic control.
     """
     if mention.action != "create" or mention.event_family != "esports_match":
         return None
     if mention.match_identity is None:
         return None
     incoming_identity = mention.match_identity.model_dump(mode="json", exclude_none=True)
-    incoming_participants = _match_participants(incoming_identity.get("participants"))
-    if len(incoming_participants) < 2:
-        return None
     product = str(mention.product) if mention.product is not None else None
 
-    compatible_ids: list[int] = []
+    same_evidence: dict[int, str] = {}
     for candidate_id, candidate in candidates.items():
         if candidate.get("event_family") != "esports_match":
             continue
@@ -210,30 +164,21 @@ def esports_match_create_continuation_error(
             if candidate_products != {product}:
                 continue
         anchors = candidate.get("canonical_anchors") or {}
-        candidate_participants = _match_participants(anchors.get("participants"))
-        if not candidate_participants:
-            continue
-        if candidate_participants != incoming_participants:
-            continue
-        conflict = esports_match_identity_conflict(anchors, incoming_identity)
-        if conflict:
-            continue
-        compatible_ids.append(int(candidate_id))
+        reason = esports_match_same_occurrence_evidence(anchors, incoming_identity)
+        if reason:
+            same_evidence[int(candidate_id)] = reason
 
-    # Multiple compatible candidates or an ambiguous match subject -> keep the
-    # model in control of the semantic choice instead of forcing attach.
-    if len(compatible_ids) != 1:
+    # Ambiguous (zero or many) strong-evidence candidates -> keep the model in
+    # control of the semantic choice instead of forcing attach.
+    if len(same_evidence) != 1:
         return None
-    if not _is_match_state_update(message, mention.evidence_excerpt):
-        return None
-
-    candidate = candidates[compatible_ids[0]]
+    candidate_id, reason = next(iter(same_evidence.items()))
+    candidate = candidates[candidate_id]
     return (
-        f"mention[{mention.mention_index}] 不能 create 新的 esports_match Event：当前消息描述的"
-        f"是已有比赛候选 Event {candidate['event_id']} 的比分/赛果推进。比分变化、比赛从进行中变为"
-        "结束、winner 从未知变为确定或晋级/淘汰结果都属于同一场比赛生命周期的 material_update，"
-        "不是新比赛。该候选与当前消息没有新场次冲突（无明确不同的 match_date、stage、round 或 "
-        "external_match_id）。请优先改为 attach 候选 Event "
+        f"mention[{mention.mention_index}] 不能 create 新的 esports_match Event：当前消息有强正的"
+        f"同一场次证据（{reason}），它延续的是候选 Event {candidate['event_id']} 的同一场比赛。"
+        "比分变化、比赛结束、winner 确定或晋级/淘汰结果都属于同一场比赛生命周期的 "
+        "material_update，不是新比赛。请优先改为 attach 候选 Event "
         f"{candidate['event_id']}；只有当前消息明确是另一场比赛时才 create。"
     )
 
@@ -589,23 +534,28 @@ event_family 语义边界：
   即使奖励是外观也不因此改成 cosmetic_release。
 - commercial_offer 是商店、付费商品或限时销售变化；service_incident 是具体故障、热修或服务异常；
   platform_service 是平台能力或服务产品本身的发布/变化。
-- esports_match 是一场具体比赛/series occurrence 的完整生命周期，包括赛前确定的对阵与时间、
-  进行中更新和赛果；它不是两支队伍之间抽象的对阵关系。同两队不同日期、不同 stage/round 或不同
-  official external match id 的比赛必须是不同 Event；双方相同仅是召回信号，绝不是 attach 依据。
-  同一场比赛的赛前、进行中和赛果应 attach 到同一 Event。对 esports_match 采用 continuation-first：
-  一旦进入 esports_match，比赛过程和赛果具有强生命周期连续性；先检查 candidate 中是否已有本次比赛，
-  有兼容候选且无新场次证据时必须优先 attach。
+- esports_match 是一场具体比赛/series occurrence 的实际发生生命周期，从比赛开始推进（进行中更新）
+  延伸到最后赛果，以及直接由本场比赛产生的晋级/淘汰结果。它不是两支队伍之间抽象的对阵关系，也不是
+  赛前安排。同两队不同日期、不同 stage/round 或不同 official external match id 的比赛必须是不同
+  Event；双方 participant 相同仅是召回信号，绝不是确定性身份或 attach 依据。
+  esports_schedule 用于赛程体系本身：赛前预告、对阵安排、开赛时间、日历、延期/改期/场地/赛制等安排
+  变化；它只是安排层面的状态，可以独立于实际比赛 Event。实际比赛一旦发生并推进状态，就进入
+  esports_match，之后比分、胜负、赛果等必须延续同一 Event，不能再退化为 esports_schedule。
+  对 esports_match 采用 continuation-first：先检查 candidate 中是否已有本次比赛，只有当存在强正的
+  同一场次证据时（例如 external_match_id 一致；或 participants + match_date 一致；或 participants +
+  competition/stage/round 均一致），且无任何硬冲突（match_date、stage、round 或 external_match_id
+  明确不同），才应优先 attach。仅凭 participants 相同或“没有发现明显冲突”绝不能断定是同一场；
+  同两队短时间内的另一场比赛必须 create 新 Event。
   比分变化、比赛从进行中变为结束、winner 从未知变为确定、晋级/淘汰结果产生，这些都是已有 Event 的
   material_update，绝不能因为 score 变化、title 变化、winner 变化、lifecycle status 变化，或当前消息
-  包含“赛果/结束”字眼就 create 新 Event。只有明确是另一场比赛（有明确不同的 match_date、stage、round
-  或 external_match_id 等新场次证据）时才 create。示例：
-  - 候选 BLG 1:1 TES，当前 BLG 2:1 TES 比赛结束 → attach（materiality=material_update），错误：create。
-  - 候选 BLG 1:0 TES，当前 BLG 1:1 TES → attach，错误：create。
+  包含“赛果/结束/击败/拿下”等字眼就 create 新 Event。只有明确是另一场比赛（有强正的同一场次证据之外、
+  反而指向不同 occurrence 的明确 match_date、stage、round 或 external_match_id）时才 create。示例：
+  - 候选 BLG 1:1 TES（match_date 2026-08-16），当前 BLG 2:1 TES 比赛结束 → attach（materiality=
+    material_update），错误：create。
+  - 候选 BLG 1:0 TES 同一天，当前 BLG 1:1 TES → attach，错误：create。
+  - 候选 BLG 2-1 TES 赛果（match_date 2026-08-16），当前另一条 BLG 胜出但仍指同一天同一场 → attach。
   - 候选 2026-08-14 BLG vs TES，当前 2026-08-16 BLG vs TES 且明确 match_date → create 新 Event。
   同场状态推进 ≠ 新 Event；新比赛 occurrence = 新 Event。
-  esports_schedule 只用于赛事日历/赛程体系本身，或延期、改期、场地、对阵、赛制等实质安排变化，
-  不能因为消息是赛前预告就把具体比赛改成 esports_schedule。赛前预告、开赛安排与比赛进行中的
-  Event 可以分开。
 - roster_change 是选手/教练/阵容变动；esports_rules 是赛事规则和竞赛制度变化。
 - universe_release、media_release、corporate_change、security_enforcement 按其字面现实变化使用；没有更
   合适 family 的命名发展才用 other_named_development。
@@ -621,7 +571,9 @@ event_family 语义边界：
 - esports_match 的 create/attach 必须在 match_identity 中提取当前消息明确给出的比赛身份信息，包括
   participants、competition、stage、round、match_date、scheduled_at、series_format、external_match_id；
   没有证据的字段保持缺失，不能猜造。match_date 使用比赛发生日期而不是消息 published_at。
-  判断 attach 时，双方都有值且 match_date、external_match_id、stage 或 round 明确冲突就是硬冲突，
+  仅凭 participants 相同不能建立同一场次；需要 external_match_id 一致、或 participants + match_date
+  一致、或 participants + competition/stage/round 一致，且无任何硬冲突，才构成强正的同一场次证据。
+  双方都有值且 match_date、external_match_id、stage 或 round 明确冲突就是硬冲突，
   必须 create/ignore；一侧字段缺失不是冲突，继续结合其他语义判断。不得通过 projection 把旧比赛
   Event 改写成新场次。
 - esports_match 的 attach 还必须在 candidate_match_identity 中从所引用候选的 anchors、标题、摘要和

@@ -534,7 +534,10 @@ def reconcile_affected_events(db, event_ids: set[int]) -> dict[str, int]:
                     snapshot.get("aggregation_policy_version"),
                 )
                 in current_keys
-                and isinstance(snapshot.get("projection_snapshot"), dict)
+                and (
+                    isinstance(snapshot.get("projection_patch"), dict)
+                    or isinstance(snapshot.get("projection_snapshot"), dict)
+                )
                 for snapshot in snapshots
             )
             if not can_restore_projection:

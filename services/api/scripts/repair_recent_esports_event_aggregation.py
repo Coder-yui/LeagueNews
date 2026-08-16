@@ -288,7 +288,10 @@ def _has_restorable_projection(
             evidence.get("mention_index"),
             evidence.get("aggregation_policy_version"),
         )
-        if key in material_keys and isinstance(evidence.get("projection_snapshot"), dict):
+        if key in material_keys and (
+            isinstance(evidence.get("projection_patch"), dict)
+            or isinstance(evidence.get("projection_snapshot"), dict)
+        ):
             return True
     return False
 

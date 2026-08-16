@@ -2,7 +2,7 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v8-match-time-boundary`
+> Policy version: `event-aggregation-v9-match-continuation`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
@@ -44,12 +44,23 @@ metadata; they are not a parallel identity mechanism.
   concurrent and stale workers without blocking a newer revision.
 - A mention is unique per item revision, mention index and aggregation policy version.
 - Attach can reference only an Event in the bounded candidate payload.
-- An `esports_match` Event represents one concrete match or series occurrence, not the recurring
-  relationship between its participants. Explicit `match_date`, `external_match_id`, `stage`, or
-  `round` conflicts reject attach after the model decision and again before membership is written.
-  The same model response extracts explicit candidate facts to cover older Events whose anchors are
-  incomplete. Missing identity fields are not conflicts. Known occurrence metadata is stored in
-  `canonical_anchors`; it remains descriptive membership metadata and never replaces `event_id`.
+- `esports_match` uses **continuation-first**: once a match has entered this family, its score /
+  result / live→finished state updates are `material_update`s of the **same** Event and must not
+  `create` a new one. A new Event is allowed only for a genuinely different occurrence (explicitly
+  different `match_date`, `external_match_id`, `stage`, `round` or `scheduled_at`) or when no
+  reasonably compatible candidate exists. The model business validator rejects a clear
+  continuation-`create` and feeds the reason back through the retry loop; the apply layer keeps a
+  hard fencing conflict guard. An `esports_match` Event represents one concrete match or series
+  occurrence, not the recurring relationship between its participants. Explicit `match_date`,
+  `external_match_id`, `stage`, or `round` conflicts reject attach after the model decision and
+  again before membership is written. Missing identity fields are not conflicts. Known occurrence
+  metadata is stored in `canonical_anchors`; it remains descriptive membership metadata and never
+  replaces `event_id`. Same participants are a strong signal but never a deterministic proof.
+- `esports_schedule` carries pre-match fixtures / schedules / opening arrangements and may be a
+  separate Event from the in-progress `esports_match`.
+- Candidate retrieval is family-aware: `esports_match` recalls within the recent **7 days**;
+  other families keep the 365-day recall window. The 7-day bound is a search boundary only, never
+  a match identity rule.
 - Candidate retrieval hard-gates explicit products and routed event families; entities and text
   overlap only rank candidates within that space.
 - `possible_event_families` is derived from upstream `products + topics`; the model cannot create

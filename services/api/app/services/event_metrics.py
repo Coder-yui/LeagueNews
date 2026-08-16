@@ -64,19 +64,28 @@ def refresh_event_importance(event: Event, mentions: list[EventMention]) -> None
 def _restore_event_projection(
     db: Session, event: Event, mentions: list[EventMention]
 ) -> None:
-    """Restore material-update fields from the newest still-valid revision snapshot."""
+    """Restore material-update fields from the newest still-valid evidence time.
+
+    The selected snapshot is the one for the active material_update with the latest
+    ``_mention_time``, matching how ``last_material_update_at`` and
+    ``latest_update_message_id`` are derived. We must NOT select by ``EventRevision.
+    revision``: a late-reprocessed old message receives a higher revision even though
+    its evidence time is older, and picking it would regress ``latest_development``.
+    """
     material_mentions = [
         mention for mention in mentions if mention.materiality == "material_update"
     ]
-    snapshots: list[tuple[int, dict[str, object]]] = []
+    snapshots: list[tuple[tuple[int, int, int, str], dict[str, object]]] = []
     if material_mentions:
-        valid_keys = {
+        # Proof key of an active material mention -> its evidence time. Keys are unique
+        # across active mentions, so selecting by key below is deterministic.
+        key_to_time = {
             (
                 mention.normalized_item_id,
                 mention.normalized_item_revision,
                 mention.mention_index,
                 mention.aggregation_policy_version,
-            )
+            ): _mention_time(mention)
             for mention in material_mentions
         }
         revisions = db.scalars(
@@ -93,11 +102,11 @@ def _restore_event_projection(
                 evidence.get("aggregation_policy_version"),
             )
             snapshot = evidence.get("projection_snapshot")
-            if key in valid_keys and isinstance(snapshot, dict):
-                snapshots.append((revision.revision, snapshot))
+            if key in key_to_time and isinstance(snapshot, dict):
+                snapshots.append((key, snapshot))
 
     if snapshots:
-        _revision, snapshot = max(snapshots, key=lambda value: value[0])
+        _key, snapshot = max(snapshots, key=lambda value: key_to_time[value[0]])
         event.title = str(snapshot.get("title") or event.title)
         event.current_summary = str(
             snapshot.get("current_summary") or event.current_summary

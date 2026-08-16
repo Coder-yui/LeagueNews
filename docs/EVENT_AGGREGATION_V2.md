@@ -14,7 +14,8 @@ published NormalizedItem
   → products + topics → possible event families
   → product/family/entity/recency candidate retrieval (bounded)
   → one LLM semantic coreference decision
-  → structural validation + esports match occurrence conflict guard
+  → structural validation + esports_match occurrence conflict guard
+  → esports_match continuation-first create/attach business validation
   → atomic Event/EventMention membership persistence
   → importance, credibility, heat and presentation projections
 ```
@@ -65,9 +66,55 @@ membership.
 Python verifies schema, contiguous mention indexes, candidate membership, routed family
 compatibility, evidence presence, idempotency, model-call audit, transaction atomicity and
 projection refresh. It does not impose message-type or event-family mention limits or generally
-verify semantic equivalence. The narrow exception is `esports_match`: when both the mention and
-candidate state incompatible match dates, external match IDs, stages or rounds, Python rejects the
-attach. Missing occurrence fields remain a semantic model decision.
+verify semantic equivalence. The two narrow `esports_match` exceptions:
+
+- **Attach guard (apply-time fence).** When both the mention and candidate state incompatible
+  match dates, external match IDs, stages or rounds, Python rejects the attach. Missing
+  occurrence fields remain a semantic model decision.
+- **Continuation-first create guard (model business validation).** For `esports_match`, a
+  `create` is rejected before persistence when there is exactly one compatible candidate with
+  the same match subject, no hard occurrence conflict, and the current message is a score /
+  result / state progression. This is a *business validation error* fed back to the model
+  through the retry loop, so the model can correct its membership choice. It is never a
+  deterministic forced attach: when identity evidence is ambiguous (multiple compatible
+  candidates, or a message that is not provably a state progression) the LLM keeps full
+  semantic control.
+
+## esports_match continuation-first
+
+Once a match has entered `esports_match`, its observed state is a single concrete occurrence's
+lifecycle. `0:0 → 1:0 → 1:1 → 2:1 → finished → final result` must remain **one** Event. Score
+changes, winner becoming known, live→finished transitions and advancement/elimination results are
+`material_update`s of the existing match, never reasons to `create`. The only conditions that
+justify a new `esports_match` Event are a genuinely different occurrence — explicitly different
+`match_date`, `stage`, `round`, `scheduled_at` or `external_match_id` — or the absence of any
+reasonably compatible existing candidate.
+
+- `esports_schedule` carries pre-match fixtures, schedules and opening arrangements, and may be a
+  separate Event from the in-progress match.
+- Same participants are a strong *continuation signal*, never a deterministic identity proof.
+  Two matches between the same teams on different dates/rounds remain different Events.
+- `match_identity`/`candidate_match_identity` are occurrence-compatibility metadata inside
+  `canonical_anchors`; they are used for hard-conflict fencing and model context, not a second
+  Event identity. `event_id` remains the only identity.
+
+## Candidate recall by family
+
+Candidate retrieval is family-aware: `esports_match` uses a recent **7-day** search boundary
+(`last_seen_at`), while every other family keeps the original recall window (365 days). The
+7-day bound and its recency score are a *search boundary only* — never a match identity rule.
+Two clearly distinct matches inside 7 days still create two Events; one match is never merged
+across the boundary. Message publication time is never treated as match identity.
+
+## latest_development projection
+
+`latest_development`, `last_material_update_at` and `latest_update_message_id` all point at the
+same thing: the latest **still-valid material_update by evidence time** (`published_at`,
+falling back to `ingested_at`). This is not the last-processed message nor the largest revision.
+A late-reprocessed older message receives a higher `EventRevision.revision` but an older evidence
+time, so the projection restore selects the newest evidence time (not the max revision), and a
+revision invalidation can deterministically rebuild the correct projection from the still-valid
+material-update evidence.
 
 ## Removed duplicate NLP
 

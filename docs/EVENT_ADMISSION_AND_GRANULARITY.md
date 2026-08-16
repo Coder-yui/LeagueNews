@@ -1,6 +1,6 @@
 # Event Filtering, Recall, and Granularity
 
-> Policy version: `event-aggregation-v8-match-time-boundary`
+> Policy version: `event-aggregation-v9-match-continuation`
 
 ## Minimal filter
 
@@ -12,8 +12,11 @@ regex for free champions, shops, esports, patches, reposts, leaks or promotions.
 
 Recall is a bounded high-recall operation. It looks at recent Events and ranks them with generic
 signals: topic-to-family hints, product overlap, entity overlap, lightweight title/summary lexical
-overlap and recent activity. Product or anchor differences are not hard conflicts. Candidate
-metadata is context for the model and never proof of identity.
+overlap and recent activity. The recall lookback is family-aware: `esports_match` searches the
+recent **7 days**, while other families keep the 365-day window. This boundary is a search limit
+only — never a match identity rule, and message publication time is never treated as match
+identity. Product or anchor differences are not hard conflicts. Candidate metadata is context for
+the model and never proof of identity.
 
 ## Semantic granularity
 
@@ -41,12 +44,25 @@ Event. The model considers participants, competition, stage/round, match date or
 series format and an official external match ID when available. Participants alone do not establish
 identity, and projection updates cannot turn an old match Event into a later match.
 
+Once a match has entered `esports_match`, membership is **continuation-first**: score changes,
+winner becoming known, live→finished transitions and advancement/elimination results are
+`material_update`s of the same Event, not reasons to `create`. A new Event is justified only by a
+genuinely different occurrence (explicitly different match date, external match ID, stage, round or
+scheduled time) or by the absence of a reasonably compatible candidate. A model `create` that
+clearly continues an existing compatible match is rejected as a business validation error and the
+concrete reason is returned to the model through the retry loop. `esports_schedule` may carry the
+pre-match fixture separately.
+
 The workflow records explicit match identity facts in `canonical_anchors` and applies a narrow hard
 conflict guard to attach decisions. For older candidates with missing structured anchors, the same
 model response also extracts facts explicitly present in the candidate title, summary and key facts.
 When both sides provide incompatible match dates, external match IDs, stages or rounds, attach is
 rejected. A field missing on either side is not a hard conflict and the semantic decision remains
 with the model. Message publication timestamps are never treated as match dates.
+
+`latest_development` (together with `last_material_update_at` and `latest_update_message_id`) is
+derived from the newest still-valid material update by evidence time, not from processing order or
+the largest revision, so a late-reprocessed older message never rolls the projection backward.
 
 Family-specific examples are evaluation data, not Python policy. See
 `services/api/evals/event_aggregation_v2_cases.json`.

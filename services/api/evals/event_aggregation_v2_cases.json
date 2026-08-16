@@ -56,7 +56,7 @@
         {"normalized_item_id": 2003, "expected": [{"action": "attach", "event_key": "2026-08-16-blg-tes-bo3", "event_family": "esports_match"}]}
       ],
       "risks": ["false_split", "missed_attach"],
-      "notes": "The preview, live update and result are one concrete series occurrence on 2026-08-16."
+      "notes": "The preview, live update and result are one concrete series occurrence on 2026-08-16. Result/live score progress is a material_update of the existing Event, never a new esports_match create (continuation-first cross same-teams-different-match-date)."
     },
     {
       "case_id": "same-teams-different-match-date",

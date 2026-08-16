@@ -364,19 +364,29 @@ def add_event_mention(
             mentions.append(mention)
         if materiality == "material_update":
             event.last_material_update_at = _later(event.last_material_update_at, observed_at)
-            event.latest_update_message_id = item.id
+            # Only a message that is at least as recent as the current material
+            # evidence may advance the latest-update fields/projection on the live
+            # row. A late-reprocessed older message must never regress them; the
+            # definitive selection is recomputed from evidence time by
+            # refresh_event_metrics anyway.
+            is_latest_evidence = (
+                event.last_material_update_at is None
+                or observed_at >= event.last_material_update_at
+            )
+            if is_latest_evidence:
+                event.latest_update_message_id = item.id
             event.current_revision += 1
-            if title is not None:
+            if is_latest_evidence and title is not None:
                 event.title = title
-            if current_summary is not None:
+            if is_latest_evidence and current_summary is not None:
                 event.current_summary = current_summary
-            if latest_development is not None:
+            if is_latest_evidence and latest_development is not None:
                 event.latest_development = latest_development
-            if lifecycle_status is not None:
+            if is_latest_evidence and lifecycle_status is not None:
                 event.lifecycle_status = lifecycle_status
-            if canonical_anchors is not None:
+            if is_latest_evidence and canonical_anchors is not None:
                 event.canonical_anchors = dict(canonical_anchors)
-            if key_facts is not None:
+            if is_latest_evidence and key_facts is not None:
                 event.key_facts = list(key_facts)
             db.add(
                 EventRevision(

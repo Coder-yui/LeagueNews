@@ -2,7 +2,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.event_families import product_supports_family
@@ -12,7 +12,22 @@ from app.services.event_semantics import semantic_projection
 
 
 RECALL_WINDOW_DAYS: Final = 365
+ESPORTS_MATCH_RECALL_WINDOW_DAYS: Final = 7
 _WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
+
+
+def _recall_window_for(family: str) -> int:
+    """The candidate search boundary is family aware: 7 days for esports_match.
+
+    This is a recall boundary only, never a match identity rule. Two matches
+    inside the window can still be distinct Events when they are clearly
+    different occurrences.
+    """
+    return (
+        ESPORTS_MATCH_RECALL_WINDOW_DAYS
+        if family == "esports_match"
+        else RECALL_WINDOW_DAYS
+    )
 
 
 def _tokens(value: str) -> set[str]:
@@ -55,11 +70,29 @@ def recall_event_candidates(
     if total_limit < 1:
         raise ValueError("candidate limit must be positive")
     observed_at = _observed_at(item)
-    oldest = observed_at - timedelta(days=RECALL_WINDOW_DAYS)
+    oldest_esports = observed_at - timedelta(days=ESPORTS_MATCH_RECALL_WINDOW_DAYS)
+    oldest_general = observed_at - timedelta(days=RECALL_WINDOW_DAYS)
     events = list(
         db.scalars(
             select(Event)
-            .where(Event.last_seen_at.is_(None) | (Event.last_seen_at >= oldest))
+            .where(
+                or_(
+                    (
+                        (Event.event_family == "esports_match")
+                        & (
+                            Event.last_seen_at.is_(None)
+                            | (Event.last_seen_at >= oldest_esports)
+                        )
+                    ),
+                    (
+                        (Event.event_family != "esports_match")
+                        & (
+                            Event.last_seen_at.is_(None)
+                            | (Event.last_seen_at >= oldest_general)
+                        )
+                    ),
+                )
+            )
             .order_by(Event.last_seen_at.desc(), Event.id.desc())
             .limit(500)
         )
@@ -113,7 +146,8 @@ def recall_event_candidates(
                 score += similarity * 30
                 reasons.append("text_overlap")
         age_days = abs((observed_at - _event_time(event)).total_seconds()) / 86_400
-        score += max(0.0, 20 * (1 - age_days / RECALL_WINDOW_DAYS))
+        window = _recall_window_for(str(event.event_family))
+        score += max(0.0, 20 * (1 - age_days / window))
         reasons.append("recent_activity")
         ranked.append((score, event, reasons))
 

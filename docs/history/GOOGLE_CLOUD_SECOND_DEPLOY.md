@@ -152,6 +152,14 @@ Scheduler，只保留 PostgreSQL。导出基线：
 - 云端飞书精选与告警通道均已启用；两个 Webhook 分别接受了一条明确标注的生产测试消息。
   对账后 notification outbox 保持 70 条 sent、无 pending，未重放历史消息。Webhook 和 Cookie
   内容均未写入本记录或 Git。
+- 为避免只抽查部分 Source 就判断接入成功，随后临时暂停自动到期领取，对全部 25 个非手工
+  Source 逐个执行真实采集；同 connector 严格串行且相邻运行至少间隔 60 秒。全部 Source 的
+  最终一次运行均为 completed、`truncated=false`，证明最新批次已扫描到现有水位或数据源边界。
+  正常计划恢复后，25 个 Source 均独立配置为每 120 分钟最多 10 条，而不是 connector 共享配额。
+- 全量接入验证最终新增 33 条 RawItem；33 个 Pipeline Job 全部 completed，33 个 NormalizedItem
+  全部 published，事件聚合结果为 24 个 applied、8 个 ignored、1 个 skipped_by_minimal_filter。
+  本批内容没有触发 OCR 阶段。贴吧验证期间的两条 collection failure 告警均由云端飞书成功发送，
+  最终 outbox 无 pending 或 failed。
 - 切换完成后删除了上一版 `76f8b87` 的 API/Web 镜像和退出的旧 migrate 容器；服务器只保留当前
   固定 SHA 的 LeagueNews 镜像，Git 和 GHCR 固定标签仍可用于回滚。
 

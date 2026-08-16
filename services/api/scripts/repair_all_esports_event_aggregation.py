@@ -80,7 +80,14 @@ def inspect_all_selection(db: Session) -> RepairSelection:
     )
     current_revision_by_id = dict(item_revisions)
     mentions = list(
-        db.scalars(select(EventMention).where(EventMention.normalized_item_id.in_(item_ids)))
+        db.scalars(
+            select(EventMention)
+            .join(Event, Event.id == EventMention.event_id)
+            .where(
+                EventMention.normalized_item_id.in_(item_ids),
+                Event.event_family == "esports_match",
+            )
+        )
     )
     current_mentions = [
         mention

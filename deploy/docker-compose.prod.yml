@@ -46,7 +46,7 @@ x-api-service: &api-service
     - media_data:/data/media
     - ${SECRETS_DIR:-../.secrets}/x-cookies.json:/run/secrets/x-cookies.json:ro
     - ${SECRETS_DIR:-../.secrets}/weibo-cookies.json:/run/secrets/weibo-cookies.json:ro
-    - ${SECRETS_DIR:-../.secrets}/weibo-browser-profile:/data/weibo-profile
+    - weibo_api_profile:/data/weibo-profile
   init: true
   restart: unless-stopped
   depends_on:
@@ -157,7 +157,7 @@ services:
       - media_data:/data/media
       - ${SECRETS_DIR:-../.secrets}/x-cookies.json:/run/secrets/x-cookies.json:ro
       - ${SECRETS_DIR:-../.secrets}/weibo-cookies.json:/run/secrets/weibo-cookies.json:ro
-      - ${SECRETS_DIR:-../.secrets}/weibo-browser-profile:/data/weibo-profile
+      - weibo_scheduler_profile:/data/weibo-profile
     init: true
     restart: unless-stopped
     depends_on:
@@ -217,5 +217,7 @@ services:
 volumes:
   postgres_data:
   media_data:
+  weibo_api_profile:
+  weibo_scheduler_profile:
   caddy_data:
   caddy_config:

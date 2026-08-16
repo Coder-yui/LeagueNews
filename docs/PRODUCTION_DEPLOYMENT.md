@@ -9,7 +9,8 @@
 - Next.js、FastAPI、自动管线 Worker、采集调度器分别运行。
 - PostgreSQL、API 和 Web 不直接暴露宿主机端口。
 - PostgreSQL 数据、媒体文件和 Caddy 证书使用 Docker Volume 持久化。
-- X Cookie、微博 Cookie 和浏览器运行目录从服务器 `.secrets` 挂载，不进入 Git。
+- X Cookie 和微博 Cookie 从服务器 `.secrets` 只读挂载，不进入 Git；API 与采集调度器的
+  Chromium 运行目录分别使用独立的 Docker managed volume。
 
 ## 1. 服务器和域名
 
@@ -36,10 +37,10 @@
 git clone <your-github-repository-url> league-news
 cd league-news
 cp .env.production.example .env.production
-mkdir -p .secrets/weibo-browser-profile
+mkdir -p .secrets
 touch .secrets/x-cookies.json
 printf '[]\n' > .secrets/weibo-cookies.json
-chmod 700 .secrets .secrets/weibo-browser-profile
+chmod 700 .secrets
 chmod 600 .env.production
 chmod 644 .secrets/x-cookies.json .secrets/weibo-cookies.json
 ```
@@ -81,9 +82,10 @@ Git 不包含数据库业务数据、媒体文件或平台登录会话。正式�
 
 - `apps/web/public/media` 的全部内容；
 - `.secrets/x-cookies.json`；
-- 从已登录浏览器导出的 `.secrets/weibo-cookies.json`；
-- `.secrets/weibo-browser-profile` 只作为云端 Chromium 的运行目录，不应被视为可移植的
-  登录凭据。
+- 从已登录浏览器导出的 `.secrets/weibo-cookies.json`。
+
+不需要也不应把本机的 Chromium Profile 复制到服务器。微博需要迁移的登录凭据是导出的
+Cookie JSON；生产 Chromium runtime profile 由 Docker managed volume 管理。
 
 在服务器只启动 PostgreSQL：
 
@@ -126,18 +128,27 @@ Set-Location E:\leagueNews\services\api
 
 把生成的 `.secrets/weibo-cookies.json` 上传到服务器同名位置，权限设为 `644`，使容器内
 非 root 用户能够通过只读挂载读取；父目录仍保持 `700`。同时把本地登录时的完整
-User-Agent 填入生产 `WEIBO_BROWSER_USER_AGENT`。容器每次启动浏览器上下文都会重新注入
-Cookie，避免 API 与调度器容器各自的 Profile 加密状态不一致。
+User-Agent 填入生产 `WEIBO_BROWSER_USER_AGENT`。API 与 `collection-scheduler` 读取同一份
+只读 Cookie JSON，并在每次启动浏览器上下文时注入 Cookie。
+
+Chromium runtime profile 不从宿主机 `.secrets` 挂载。API 使用 `weibo_api_profile`，
+`collection-scheduler` 使用 `weibo_scheduler_profile`，两者都挂载到各自容器内的
+`/data/weibo-profile`。镜像在切换到非 root `app` 用户前创建该目录并设置所有权；Docker
+首次初始化 named volume 时继承这个目录，因此无需放宽宿主机权限或让容器以 root 运行。
+两个服务的 profile 相互独立，人工采集和定时采集并行启动时不会竞争同一个 Chromium
+`user-data-dir`。
 
 Cookie 文件属于账号凭据。不要打印内容、提交 Git 或长期放在 `/tmp`；迁移完成后删除中间
-副本。上线前至少对一个微博 Source 执行低 `limit` 实际采集验证。
+副本。部署完成后至少对一个微博 Source 执行一次低 `limit` 实际采集，确认 Cookie 注入、
+Chromium 启动和采集结果都正常。
 
 ## 4.1 容器权限边界
 
 - `pipeline-worker` 只接收数据库、媒体、LLM 和自身租约配置，不挂载 X/微博 Cookie 或
   浏览器 Profile。
 - `collection-scheduler` 接收数据库、媒体和平台采集凭据，不接收 LLM API Key；同一进程还托管
-  独立的日报定时任务，默认按北京时间次日 00:00 生成刚结束日期的日报。
+  独立的日报定时任务，默认按北京时间次日 00:00 生成刚结束日期的日报。其微博 Chromium
+  runtime profile 与 API 的人工采集 profile 使用不同的 Docker managed volume。
 - `migrate` 只接收数据库、媒体路径和迁移目录。
 - `api` 暂时同时保留 LLM 与 Connector 凭据，因为当前管理 API 仍同步支持人工 AI 流程和
   手工 Connector 运行。以后把手工采集改为持久化 collection request、由 Scheduler 执行后，
@@ -151,7 +162,12 @@ chmod +x deploy/scripts/*.sh
 ```
 
 部署脚本默认依次执行配置校验、拉取 GitHub Container Registry 镜像、数据库迁移和服务
-启动。只有显式设置 `DEPLOY_BUILD_LOCAL=true` 时才会在服务器本机构建。检查：
+启动。脚本通过 Docker Compose 解析 `.env.production` 中的 `DEPLOY_BUILD_LOCAL`：
+
+- `DEPLOY_BUILD_LOCAL=false` 或未设置：拉取 GHCR production image，这是推荐方式；
+- `DEPLOY_BUILD_LOCAL=true`：在生产服务器本地构建 API 和 Web 镜像。
+
+检查：
 
 ```bash
 docker compose --env-file .env.production \

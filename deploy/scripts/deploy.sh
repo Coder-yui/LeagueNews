@@ -12,10 +12,27 @@ fi
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet
 
-if [ "${DEPLOY_BUILD_LOCAL:-false}" = "true" ]; then
+DEPLOY_BUILD_LOCAL_VALUE=$(
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --environment |
+    awk -F= '
+      $1 == "DEPLOY_BUILD_LOCAL" {
+        print substr($0, length($1) + 2)
+        found = 1
+        exit
+      }
+      END {
+        if (!found) print "false"
+      }
+    '
+)
+
+if [ "$DEPLOY_BUILD_LOCAL_VALUE" = "true" ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build api web
-else
+elif [ "$DEPLOY_BUILD_LOCAL_VALUE" = "false" ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" pull api web
+else
+  echo "DEPLOY_BUILD_LOCAL must be either true or false (got: $DEPLOY_BUILD_LOCAL_VALUE)" >&2
+  exit 2
 fi
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-build --remove-orphans

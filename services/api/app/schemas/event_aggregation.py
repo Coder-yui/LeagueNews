@@ -120,6 +120,12 @@ class EventMentionDecision(BaseModel):
                 raise ValueError("attach cannot include new_event")
             if self.materiality != "material_update" and self.projection is not None:
                 raise ValueError("non-material attach cannot change the event projection")
+            if self.materiality == "material_update" and (
+                self.projection is None or self.projection.latest_development is None
+            ):
+                raise ValueError(
+                    "material_update attach requires projection with latest_development"
+                )
         else:
             if (
                 self.event_id is not None

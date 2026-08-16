@@ -81,6 +81,19 @@ def _restore_event_projection(
     revision`` is intentionally avoided: a late-reprocessed old message receives a
     higher revision but an older evidence time and must not regress the projection.
     """
+    # A clean baseline: the projection must be rebuilt purely from still-valid
+    # material patches below. Never carry forward evidence-derived fields left by a
+    # mention that has since been invalidated (e.g. an invalidated create's
+    # canonical_anchors / key_facts / latest_development). title and current_summary
+    # are non-nullable stable columns, so fall back to empty strings when no valid
+    # patch restores them.
+    event.title = ""
+    event.current_summary = ""
+    event.latest_development = ""
+    event.lifecycle_status = "developing"
+    event.canonical_anchors = {}
+    event.key_facts = []
+
     material_mentions = [
         mention for mention in mentions if mention.materiality == "material_update"
     ]

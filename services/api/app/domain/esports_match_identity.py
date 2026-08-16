@@ -65,10 +65,41 @@ def esports_match_identity_conflict(
             f"message={incoming_identity['external_match_id']!s}"
         )
 
-    existing_date = _occurrence_date(existing_identity)
-    incoming_date = _occurrence_date(incoming_identity)
+    existing_date = _match_date(existing_identity)
+    incoming_date = _match_date(incoming_identity)
     if existing_date and incoming_date and existing_date != incoming_date:
         return f"match_date 明确冲突：candidate={existing_date}, message={incoming_date}"
+
+    # scheduled_at compares full normalized datetimes, never degenerate to a date,
+    # so two matches on the same day at different times stay distinct occurrences.
+    existing_scheduled = _occurrence_datetime(existing_identity)
+    incoming_scheduled = _occurrence_datetime(incoming_identity)
+    if (
+        existing_scheduled
+        and incoming_scheduled
+        and existing_scheduled != incoming_scheduled
+    ):
+        return (
+            "scheduled_at 明确冲突："
+            f"candidate={existing_scheduled.isoformat()}, "
+            f"message={incoming_scheduled.isoformat()}"
+        )
+
+    # One side may only carry a match_date while the other only has scheduled_at.
+    # That can still prove a date-level conflict, but never exact scheduled_at equality.
+    if not (existing_date and incoming_date) and not (
+        existing_scheduled and incoming_scheduled
+    ):
+        existing_day = existing_date or (
+            existing_scheduled.date().isoformat() if existing_scheduled else None
+        )
+        incoming_day = incoming_date or (
+            incoming_scheduled.date().isoformat() if incoming_scheduled else None
+        )
+        if existing_day and incoming_day and existing_day != incoming_day:
+            return (
+                f"occurrence 日期明确冲突：candidate={existing_day}, message={incoming_day}"
+            )
 
     for key in ("stage", "round"):
         existing_value = _normalized_scalar(existing_identity.get(key))
@@ -87,16 +118,28 @@ def esports_match_same_occurrence_evidence(
 ) -> str | None:
     """Return a strong positive same-occurrence reason, or None.
 
-    This is deliberately conservative. Only explicit, agreeing occurrence facts produce
-    evidence: an equal ``external_match_id``, participants plus an equal explicit date /
-    scheduled occurrence, or participants plus equal competition/stage/round. It never
-    treats "no conflict" as proof of the same match. Any hard conflict (date/stage/round/
-    external id differing) returns None. ``participants`` alone is never sufficient.
+    This is deliberately conservative and is the gate Python uses to
+    deterministically reject an erroneous ``create``. Only explicit, agreeing
+    occurrence facts produce evidence: an equal ``external_match_id`` (independent
+    of participants), participants plus an equal explicit match_date, participants
+    plus equal scheduled_at (full datetime, not date), or participants plus equal
+    competition/stage/round. It never treats "no conflict" as proof of the same
+    match. Any hard conflict (match_date/scheduled_at/date/stage/round/external id
+    differing) returns None. ``participants`` alone is never sufficient. This rule
+    is deliberately stricter than the LLM's semantic continuation judgment, which
+    may still decide to attach based on continuous lifecycle + recency + context.
     """
     if esports_match_identity_conflict(existing, incoming):
         return None
     existing_identity = match_identity_from_anchors(existing)
     incoming_identity = match_identity_from_anchors(incoming)
+
+    # external_match_id is decisive on its own: an equal explicit id is strong
+    # evidence even when participants are absent, and a differing id is a conflict.
+    existing_external = _normalized_scalar(existing_identity.get("external_match_id"))
+    incoming_external = _normalized_scalar(incoming_identity.get("external_match_id"))
+    if existing_external and incoming_external and existing_external == incoming_external:
+        return f"external_match_id 一致：{existing_identity['external_match_id']!s}"
 
     existing_participants = _normalized_participants(existing_identity.get("participants"))
     incoming_participants = _normalized_participants(incoming_identity.get("participants"))
@@ -105,15 +148,19 @@ def esports_match_same_occurrence_evidence(
     if existing_participants != incoming_participants:
         return None
 
-    existing_external = _normalized_scalar(existing_identity.get("external_match_id"))
-    incoming_external = _normalized_scalar(incoming_identity.get("external_match_id"))
-    if existing_external and incoming_external and existing_external == incoming_external:
-        return f"external_match_id 一致：{existing_identity['external_match_id']!s}"
-
-    existing_date = _occurrence_date(existing_identity)
-    incoming_date = _occurrence_date(incoming_identity)
+    existing_date = _match_date(existing_identity)
+    incoming_date = _match_date(incoming_identity)
     if existing_date and incoming_date and existing_date == incoming_date:
         return f"match_date 一致：{existing_date}"
+
+    existing_scheduled = _occurrence_datetime(existing_identity)
+    incoming_scheduled = _occurrence_datetime(incoming_identity)
+    if (
+        existing_scheduled
+        and incoming_scheduled
+        and existing_scheduled == incoming_scheduled
+    ):
+        return f"scheduled_at 一致：{existing_scheduled.isoformat()}"
 
     existing_comp = _normalized_scalar(existing_identity.get("competition"))
     incoming_comp = _normalized_scalar(incoming_identity.get("competition"))
@@ -157,16 +204,25 @@ def _normalized_scalar(value: Any) -> str | None:
     return normalized or None
 
 
-def _occurrence_date(identity: Mapping[str, Any]) -> str | None:
+def _match_date(identity: Mapping[str, Any]) -> str | None:
+    """Extract only an explicit match_date, never folding scheduled_at into a date."""
     value = identity.get("match_date")
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, str) and value.strip():
         return value.strip()
+    return None
 
-    scheduled_at = identity.get("scheduled_at")
-    if isinstance(scheduled_at, datetime):
-        return scheduled_at.date().isoformat()
-    if isinstance(scheduled_at, str) and len(scheduled_at.strip()) >= 10:
-        return scheduled_at.strip()[:10]
+
+def _occurrence_datetime(identity: Mapping[str, Any]) -> datetime | None:
+    """Extract scheduled_at as a full normalized datetime."""
+    value = identity.get("scheduled_at")
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            normalized = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+        return normalized
     return None

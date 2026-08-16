@@ -2,7 +2,7 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v10-match-evidence-continuation`
+> Policy version: `event-aggregation-v11-match-semantic-continuation`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
@@ -46,19 +46,26 @@ metadata; they are not a parallel identity mechanism.
 - Attach can reference only an Event in the bounded candidate payload.
 - `esports_match` uses **continuation-first**: once a match has entered this family, its score /
   result / live→finished state updates are `material_update`s of the **same** Event and must not
-  `create` a new one. A new Event is allowed only for a genuinely different occurrence. The model
-  business validator rejects a clear continuation-`create` only on **strong positive same-occurrence
-  evidence** (an equal explicit `external_match_id`, participants plus an equal explicit
-  `match_date`, or participants plus equal `competition`/`stage`/`round`, with no hard conflict) and
-  feeds the reason back through the retry loop. Absence of a hard conflict is **never** treated as
-  proof of the same occurrence: two matches between the same teams inside the window must stay
-  separate unless strong positive evidence says otherwise. The apply layer keeps a hard fencing
-  conflict guard (explicit `match_date`, `external_match_id`, `stage`, or `round` conflicts reject
-  attach after the model decision and again before membership is written; missing identity fields
-  are not conflicts). An `esports_match` Event represents one concrete match or series occurrence,
-  not the recurring relationship between its participants. Known occurrence metadata is stored in
-  `canonical_anchors`; it remains descriptive membership metadata and never replaces `event_id`.
-  Same participants are a recall signal only, never a deterministic proof.
+  `create` a new one. A new Event is allowed only for a genuinely different occurrence. Python
+  (the model business validator and the apply-time fence) rejects a continuation-`create` only on a
+  **strong positive same-occurrence evidence** — an equal explicit `external_match_id` (decisive on
+  its own, even without participants), participants plus an equal explicit `match_date`, participants
+  plus an equal explicit `scheduled_at` (full datetime, never a bare date), or participants plus
+  equal `competition`/`stage`/`round` — with no hard occurrence conflict. This structured evidence is
+  a **deterministic guard threshold, not the LLM's attach threshold**: the model may still attach an
+  ambiguous candidate by **semantic continuation evidence** (equal participants + a continuous
+  lifecycle state — score advancing, live→finished, winner resolved — + a recent candidate + agreeing
+  competition/stage context), even when no strong structured fact is present. Absence of a hard
+  conflict is **never** treated as proof of the same occurrence, and same participants alone are never
+  enough; if occurrence information is insufficient, the model creates only when it has positive
+  reason this is a new match. The apply layer keeps a hard fencing conflict guard (explicit
+  `match_date`, `scheduled_at`, `external_match_id`, `stage`, or `round` conflicts reject attach after
+  the model decision and again before membership is written; missing identity fields are not
+  conflicts; one-sided `match_date` vs `scheduled_at` can still prove a date-level conflict but never
+  exact `scheduled_at` equality). An `esports_match` Event represents one concrete match or series
+  occurrence, not the recurring relationship between its participants. Known occurrence metadata is
+  stored in `canonical_anchors`; it remains descriptive membership metadata and never replaces
+  `event_id`. Same participants are a recall signal only, never a deterministic proof.
 - `esports_schedule` carries pre-match fixtures / schedules / opening arrangements and may be a
   separate Event from the in-progress `esports_match`. Once a match actually begins and pushes
   state, it belongs to `esports_match` and those states must continue the same Event.
@@ -89,13 +96,21 @@ metadata; they are not a parallel identity mechanism.
   presentation fields that this mention actually provided (`title`, `current_summary`,
   `latest_development`, `lifecycle_status`, `canonical_anchors`, `key_facts`). It never stores a
   whole-Event snapshot taken after processing, so a late-reprocessed older message can never bake
-  the newest global projection into its own revision. On invalidation the projection is rebuilt by
-  replaying the still-valid material-update patches in evidence order (`evidence_time`, then
-  `EventMention.id`) — not by taking a max-revision snapshot. This makes revision invalidation
-  recover the true previous state deterministically. Legacy revisions written before these patches
-  fall back to their stored full snapshot when available.
+  the newest global projection into its own revision. On invalidation the projection is **rebuilt
+  from a clean baseline** by replaying only the still-valid material-update patches in evidence
+  order (`evidence_time`, then `EventMention.id`) — not by max-revision selection and never by
+  incrementally overriding a stale `Event` row. A baseline cleared at the start of restore guarantees
+  that evidence-derived fields left by an invalidated mention (`canonical_anchors`, `key_facts`,
+  `latest_development`, `lifecycle_status`) cannot survive; stable non-nullable columns (`title`,
+  `current_summary`) fall back to empty strings when no valid patch restores them. Legacy revisions
+  written before these patches fall back to their stored full snapshot when available.
 - Importance, credibility, heat, references and presentation are projections refreshed after
   membership; they do not choose or reject membership.
+- `material_update` is the only materiality that carries a new development. Every `material_update`
+  attach must provide a projection that at least sets `latest_development`, so that
+  `latest_update_message_id` / `last_material_update_at` / `latest_development` all point at the same
+  latest still-valid material mention. `corroboration_only`, `duplicate` and `context_only` attaches
+  must not carry a projection and never advance those three fields.
 
 ## Evaluation
 

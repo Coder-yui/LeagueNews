@@ -527,6 +527,7 @@ def test_event_aggregation_retries_attach_with_candidate_family_mismatch() -> No
                     "source_role": "unknown",
                     "materiality": "material_update",
                     "evidence_excerpt": "候选引用",
+                    "projection": {"latest_development": "候选引用"},
                 }
             ]
         },

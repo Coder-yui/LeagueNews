@@ -167,8 +167,9 @@ def _esports_attach_decision(
     event_id: int,
     match_identity: dict[str, object],
     candidate_match_identity: dict[str, object],
+    latest_development: str | None = None,
 ) -> dict[str, object]:
-    return {
+    decision = {
         "mention_index": 0,
         "action": "attach",
         "event_id": event_id,
@@ -181,6 +182,12 @@ def _esports_attach_decision(
         "match_identity": match_identity,
         "candidate_match_identity": candidate_match_identity,
     }
+    # Only a material_update with latest_development satisfies the unified material
+    # projection contract; other call sites depend on this helper staying bare to
+    # exercise the schema rejection path.
+    if latest_development is not None:
+        decision["projection"] = {"latest_development": latest_development}
+    return decision
 
 
 def _esports_create_decision(
@@ -569,6 +576,7 @@ def test_attach_must_reference_this_request_candidate_set() -> None:
                     "source_role": "unknown",
                     "materiality": "material_update",
                     "evidence_excerpt": "一个新公告",
+                    "projection": {"latest_development": "一个新公告"},
                 }
             )
         )
@@ -638,6 +646,7 @@ def test_esports_match_date_conflict_blocks_forced_attach_before_membership_writ
                         "match_date": "2026-08-14",
                         "series_format": "BO3",
                     },
+                    latest_development="8 月 16 日赛果更新",
                 )
             )
         )
@@ -713,6 +722,7 @@ def test_same_esports_match_date_attaches_and_enriches_missing_identity() -> Non
                         "participants": ["BLG", "TES"],
                         "match_date": "2026-08-16",
                     },
+                    latest_development="BLG 胜出",
                 )
             )
         )
@@ -824,6 +834,7 @@ def test_missing_incoming_match_date_does_not_block_semantic_attach() -> None:
                         "participants": ["BLG", "TES"],
                         "match_date": "2026-08-16",
                     },
+                    latest_development="获得赛果",
                 )
             )
         )
@@ -847,7 +858,7 @@ def test_missing_incoming_match_date_does_not_block_semantic_attach() -> None:
         (
             {"scheduled_at": "2026-08-14T23:00:00+08:00"},
             {"scheduled_at": "2026-08-16T19:00:00+08:00"},
-            "match_date",
+            "scheduled_at",
         ),
     ],
 )
@@ -882,11 +893,12 @@ def test_multi_mention_failure_rolls_back_all_membership_writes() -> None:
                     "mention_index": 1,
                     "action": "attach",
                     "event_id": 999,
-                        "event_family": "gameplay_balance",
+                    "event_family": "gameplay_balance",
                     "relation": "reports",
                     "source_role": "unknown",
                     "materiality": "material_update",
                     "evidence_excerpt": "活动更新",
+                    "projection": {"latest_development": "活动更新"},
                 },
             )
         )
@@ -936,6 +948,7 @@ def test_official_repost_cannot_claim_responsible_official_role() -> None:
         decision["event_id"] = existing.id
         decision["new_event"] = None
         decision["source_role"] = "responsible_official"
+        decision["projection"] = {"latest_development": "转发事件"}
         client = StaticClient(_result(decision))
 
         _aggregate(db, item, client)
@@ -2564,3 +2577,265 @@ def test_v10_aggregate_events_retries_create_into_attach_with_business_feedback(
     assert "强正的" in correction or "同一场次" in correction
     assert "material_update" in correction
     assert "123" in correction
+
+
+# ---------------------------------------------------------------------------
+# v11: final semantics
+#  - LLM semantic continuation vs Python strong-evidence guard threshold
+#  - scheduled_at identity compares full datetime, never degenerate to a date
+#  - external_match_id is decisive on its own (works without participants)
+#  - clean projection-restore baseline (invalidated mention evidence never survives)
+#  - material_update requires a latest_development projection; non-material never has one
+# ---------------------------------------------------------------------------
+
+
+def test_v11_prompt_teaches_semantic_continuation_beyond_strong_evidence() -> None:
+    """Item 1: strong structured evidence is Python's deterministic guard threshold, not
+    the LLM's attach threshold. The prompt must let the model attach from lifecycle
+    semantics even when no strong structured fact is present."""
+    candidates = [_esports_candidate(
+        event_id=123,
+        anchors={"participants": ["BLG", "TES"]},
+    )]
+    message = {
+        "title": "BLG 2:1 TES 比赛结束",
+        "summary": "比分从 1:1 推进到 2:1，比赛结束",
+        "content_form": "original",
+    }
+    client, completions = _llm_client_with_responses([_esports_attach_response()])
+    result = asyncio.run(
+        client.aggregate_events(
+            message=message,
+            possible_event_families=["esports_match"],
+            candidates=candidates,
+        )
+    )
+    # The model is free to attach on lifecycle semantics; no deterministic rejection.
+    assert result.mentions[0].action == "attach"
+    system_content = next(
+        msg["content"]
+        for msg in completions.calls[0]["messages"]
+        if msg["role"] == "system"
+    )
+    assert "验证门槛" in system_content
+    assert "semantic continuation evidence" in system_content
+    assert "仅凭 participants 相同不足以 attach" in system_content
+
+
+def test_v11_same_day_different_scheduled_at_is_distinct_occurrence() -> None:
+    """Item 2: same participants, candidate scheduled 10:00 vs incoming 18:00 on the same
+    day -> different occurrence (create is legal). scheduled_at must not degenerate to a date."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "scheduled_at": "2026-08-16T18:00:00+00:00",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={
+            "participants": ["BLG", "TES"],
+            "scheduled_at": "2026-08-16T10:00:00+00:00",
+        },
+    )}
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message={}
+    )
+    assert error is None
+
+
+def test_v11_identical_scheduled_at_is_strong_same_occurrence() -> None:
+    """Item 3: same participants + identical full scheduled_at -> strong same-occurrence evidence."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "scheduled_at": "2026-08-16T18:00:00+00:00",
+        }
+    )
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={
+            "participants": ["BLG", "TES"],
+            "scheduled_at": "2026-08-16T18:00:00+00:00",
+        },
+    )}
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message={}
+    )
+    assert error is not None
+    assert "scheduled_at 一致" in error
+
+
+def test_v11_external_match_id_alone_is_strong_without_participants() -> None:
+    """Item 8: an equal explicit external_match_id is strong evidence even when participants
+    are absent; participants must not gate it."""
+    mention = _continuation_mention(match_identity={"external_match_id": "match-123"})
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"external_match_id": "match-123"},
+    )}
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message={}
+    )
+    assert error is not None
+    assert "external_match_id 一致" in error
+
+
+def test_v11_different_external_match_id_is_hard_conflict() -> None:
+    """Item 9: explicitly different external_match_id is a hard conflict -> create is legal."""
+    mention = _continuation_mention(match_identity={"external_match_id": "match-123"})
+    candidates = {123: _esports_candidate(
+        event_id=123,
+        anchors={"external_match_id": "match-999"},
+    )}
+    error = esports_match_create_continuation_error(
+        mention, candidates=candidates, message={}
+    )
+    assert error is None
+
+
+def test_v11_material_update_attach_requires_latest_development_projection() -> None:
+    """Item 6: a material_update attach must carry a projection with latest_development."""
+    with pytest.raises(ValidationError, match="latest_development"):
+        _result({
+            **_esports_attach_decision(
+                event_id=123,
+                match_identity={"participants": ["BLG", "TES"]},
+                candidate_match_identity={"participants": ["BLG", "TES"]},
+            ),
+        })
+    with pytest.raises(ValidationError, match="latest_development"):
+        _result({
+            **_esports_attach_decision(
+                event_id=123,
+                match_identity={"participants": ["BLG", "TES"]},
+                candidate_match_identity={"participants": ["BLG", "TES"]},
+            ),
+            "projection": {"title": "只改标题，没有最新进展"},
+        })
+    ok = _result({
+        **_esports_attach_decision(
+            event_id=123,
+            match_identity={"participants": ["BLG", "TES"]},
+            candidate_match_identity={"participants": ["BLG", "TES"]},
+        ),
+        "projection": {"latest_development": "2:1 最终赛果"},
+    })
+    assert ok.mentions[0].projection is not None
+    assert ok.mentions[0].projection.latest_development == "2:1 最终赛果"
+
+
+def test_v11_non_material_attach_rejects_projection() -> None:
+    """Item 7: corroboration_only/duplicate/context_only attach must not carry a projection,
+    so they can never advance latest_update_message_id / last_material_update_at /
+    latest_development (behavioural no-advance is covered by
+    test_v10_non_material_attach_does_not_advance_latest_projection)."""
+    for materiality in ("corroboration_only", "duplicate", "context_only"):
+        with pytest.raises(ValidationError, match="non-material attach"):
+            _result({
+                **_esports_attach_decision(
+                    event_id=123,
+                    match_identity={"participants": ["BLG", "TES"]},
+                    candidate_match_identity={"participants": ["BLG", "TES"]},
+                ),
+                "materiality": materiality,
+                "projection": {"latest_development": "不应推进"},
+            })
+
+
+def test_v11_invalidating_creator_mention_clears_stale_projection() -> None:
+    """Item 4: creator mention A provides title/summary/anchors/latest; attach B only updates
+    latest_development. Invalidating A must NOT leave A's presentation evidence behind: the
+    restored projection is rebuilt from a clean baseline and only B's still-valid patch survives."""
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="proj-creator-invalid")
+        db.add(source)
+        db.flush()
+        creator = _item(
+            db, source=source, external_id="creator-A", title="BLG 1:1 TES",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 10, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, creator, StaticClient(_result(_esports_create_decision(
+            title="BLG 对阵 TES 首局", latest_development="1:1 开始",
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            evidence="BLG 1:1 TES",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+        assert event.canonical_anchors.get("participants") == ["BLG", "TES"]
+
+        followup = _item(
+            db, source=source, external_id="followup-B", title="BLG 2:1 TES 结果",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, followup, StaticClient(_result(_esports_projection_attach(
+            event_id=event.id,
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            latest_development="2:1 最终赛果",
+        ))))
+        db.refresh(event)
+
+        # Invalidate the creator evidence; only B's latest_development stays valid.
+        _bump_revision(db, creator)
+        db.commit()
+        refresh_event_metrics(db, {event.id})
+        db.commit()
+        db.refresh(event)
+
+        assert event.latest_development == "2:1 最终赛果"
+        # No stale A projection may survive.
+        assert event.title == ""
+        assert event.current_summary == ""
+        assert event.canonical_anchors == {}
+        assert event.key_facts == []
+
+
+def test_v11_out_of_order_and_invalidation_keep_projection_correct() -> None:
+    """Item 5: late-reprocessed older message + invalidation of the newest message must
+    restore only still-valid evidence, thanks to the clean restore baseline."""
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="proj-ooo-baseline")
+        db.add(source)
+        db.flush()
+        newer = _item(
+            db, source=source, external_id="ooo-new", title="BLG 2:1 TES 比赛结束",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, newer, StaticClient(_result(_esports_create_decision(
+            title="BLG 对阵 TES", latest_development="2:1 最终赛果",
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            evidence="BLG 2:1 TES",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+
+        older = _item(
+            db, source=source, external_id="ooo-old", title="BLG 1:1 TES",
+            products=["lol_esports"], topics=["esports_matches"],
+            published_at=datetime(2026, 8, 16, 10, tzinfo=UTC),
+        )
+        db.commit()
+        _aggregate(db, older, StaticClient(_result(_esports_projection_attach(
+            event_id=event.id,
+            match_identity={"participants": ["BLG", "TES"], "match_date": "2026-08-16"},
+            latest_development="1:1",
+        ))))
+        # Out-of-order older message must not regress the live projection.
+        assert event.latest_development == "2:1 最终赛果"
+
+        _bump_revision(db, newer)
+        db.commit()
+        refresh_event_metrics(db, {event.id})
+        db.commit()
+        db.refresh(event)
+
+        assert event.latest_development == "1:1"
+        assert event.latest_update_message_id == older.id

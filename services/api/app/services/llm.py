@@ -140,13 +140,17 @@ def esports_match_create_continuation_error(
 ) -> str | None:
     """Stop an esports_match create that clearly continues an existing match.
 
-    continuation-first is enforced only on **strong positive same-occurrence
-    evidence** (see ``esports_match_same_occurrence_evidence``): an equal explicit
-    ``external_match_id``, participants plus an equal explicit match date, or
-    participants plus equal competition/stage/round, with no hard conflict. Absence
-    of a conflict is never treated as proof of the same occurrence, and ``message``
-    wording / score format plays no role here. When evidence is ambiguous (multiple
-    strong-evidence candidates, or none) the model keeps full semantic control.
+    continuation-first is enforced by Python only on **strong positive
+    same-occurrence evidence** (see ``esports_match_same_occurrence_evidence``): an
+    equal explicit ``external_match_id``, participants plus an equal explicit match
+    date or scheduled_at (full datetime), or participants plus equal
+    competition/stage/round, with no hard conflict. This is a deterministic guard,
+    intentionally stricter than the LLM's own attach judgment --- the model may still
+    choose to attach an ambiguous candidate from continuous lifecycle + recency +
+    context semantics. Absence of a conflict is never treated as proof of the same
+    occurrence, and ``message`` wording / score format plays no role here. When the
+    strong evidence is ambiguous (multiple candidates, or none) the model keeps full
+    semantic control and creates only when it has positive reason this is a new match.
     """
     if mention.action != "create" or mention.event_family != "esports_match":
         return None
@@ -541,15 +545,19 @@ event_family 语义边界：
   esports_schedule 用于赛程体系本身：赛前预告、对阵安排、开赛时间、日历、延期/改期/场地/赛制等安排
   变化；它只是安排层面的状态，可以独立于实际比赛 Event。实际比赛一旦发生并推进状态，就进入
   esports_match，之后比分、胜负、赛果等必须延续同一 Event，不能再退化为 esports_schedule。
-  对 esports_match 采用 continuation-first：先检查 candidate 中是否已有本次比赛，只有当存在强正的
-  同一场次证据时（例如 external_match_id 一致；或 participants + match_date 一致；或 participants +
-  competition/stage/round 均一致），且无任何硬冲突（match_date、stage、round 或 external_match_id
-  明确不同），才应优先 attach。仅凭 participants 相同或“没有发现明显冲突”绝不能断定是同一场；
-  同两队短时间内的另一场比赛必须 create 新 Event。
+  对 esports_match 采用 continuation-first：先检查 candidate 中是否已有本次比赛。注意，强正的同一场次
+  证据（external_match_id 一致；或 participants + match_date 一致；或 participants + 双方
+  scheduled_at 完整时间一致；或 participants + competition/stage/round 均一致，且无任何硬冲突）是
+  程序用于 deterministic 拒绝错误 create 的验证门槛，并不是你判断 attach 的唯一依据。你判断是否同一
+  场比赛应综合 semantic continuation evidence：participants 相同 + 明显的连续比赛状态（比分推进、状态
+  从进行中到结束、winner 确定）+ last_seen_at 时间接近 + competition/stage 上下文一致，即使缺少明确
+  structured 证据，也可判为同一场并 attach。仅凭 participants 相同不足以 attach，但 participants +
+  连续状态 + 近期候选 + 上下文一致可以构成合理 attach 理由。发生信息不足时，不要因为缺少 strong
+  structured 证据就自动 create；同两队短时间内的另一场比赛仍必须 create 新 Event。
   比分变化、比赛从进行中变为结束、winner 从未知变为确定、晋级/淘汰结果产生，这些都是已有 Event 的
   material_update，绝不能因为 score 变化、title 变化、winner 变化、lifecycle status 变化，或当前消息
-  包含“赛果/结束/击败/拿下”等字眼就 create 新 Event。只有明确是另一场比赛（有强正的同一场次证据之外、
-  反而指向不同 occurrence 的明确 match_date、stage、round 或 external_match_id）时才 create。示例：
+  包含“赛果/结束/击败/拿下”等字眼就 create 新 Event。只有明确是另一场比赛（有指向不同 occurrence 的
+  明确 match_date、scheduled_at、stage、round 或 external_match_id 冲突）时才 create。示例：
   - 候选 BLG 1:1 TES（match_date 2026-08-16），当前 BLG 2:1 TES 比赛结束 → attach（materiality=
     material_update），错误：create。
   - 候选 BLG 1:0 TES 同一天，当前 BLG 1:1 TES → attach，错误：create。
@@ -571,20 +579,22 @@ event_family 语义边界：
 - esports_match 的 create/attach 必须在 match_identity 中提取当前消息明确给出的比赛身份信息，包括
   participants、competition、stage、round、match_date、scheduled_at、series_format、external_match_id；
   没有证据的字段保持缺失，不能猜造。match_date 使用比赛发生日期而不是消息 published_at。
-  仅凭 participants 相同不能建立同一场次；需要 external_match_id 一致、或 participants + match_date
-  一致、或 participants + competition/stage/round 一致，且无任何硬冲突，才构成强正的同一场次证据。
-  双方都有值且 match_date、external_match_id、stage 或 round 明确冲突就是硬冲突，
-  必须 create/ignore；一侧字段缺失不是冲突，继续结合其他语义判断。不得通过 projection 把旧比赛
-  Event 改写成新场次。
+  强正的同一场次证据（external_match_id 一致、或 participants + match_date 一致、或 participants +
+  双方 scheduled_at 完整时间一致、或 participants + competition/stage/round 一致，且无任何硬冲突）
+  是程序 deterministic 验证依据；你的 attach 判断还应综合 participants + 连续比赛状态 + 时间接近 +
+  上下文一致等语义证据。双方都有值且 match_date、scheduled_at、external_match_id、stage 或 round
+  明确冲突就是硬冲突，必须 create/ignore；一侧字段缺失不是冲突，继续结合其他语义判断。不得通过
+  projection 把旧比赛 Event 改写成新场次。
 - esports_match 的 attach 还必须在 candidate_match_identity 中从所引用候选的 anchors、标题、摘要和
   key facts 提取候选明确给出的同类身份信息。该对象描述候选而非当前消息；即使旧候选的 anchors 尚未
   结构化日期，也要忠实提取候选展示信息中明确存在的日期。没有证据的字段仍保持缺失。
 - ignore 不引用 Event。
 - create/attach 的 evidence_excerpt 必须来自当前消息。
 - relation、source_role、materiality 描述当前 mention。只有 materiality=material_update 的 attach 才能
-  提交 projection；materiality=corroboration_only、duplicate 或 context_only 时 projection 必须为 null
-  或省略，不能同时输出任何标题、摘要、最新进展或 key facts 更新。
-- attach 的 projection 可选，只用于当前 Event 的展示标题、摘要、最新进展或 key facts；它不能改变
+  提交 projection，且必须至少提供 latest_development（表述本消息带来的最新发展）；materiality=
+  corroboration_only、duplicate 或 context_only 时 projection 必须为 null 或省略，不能同时输出任何
+  标题、摘要、最新进展或 key facts 更新。
+- attach 的 projection 用于当前 Event 的展示标题、摘要、最新进展或 key facts；它不能改变
   membership 决定。create 的初始展示字段放在 new_event。
 - 展示字段使用简体中文。
 只输出符合 schema 的 JSON。"""

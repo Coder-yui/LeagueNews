@@ -180,6 +180,58 @@ async def test_successful_run_uses_watermark_and_schedules_next_run(
 
 
 @pytest.mark.anyio
+async def test_truncated_run_uses_configured_retry_delay(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(db)
+    schedule = upsert_collection_schedule(
+        db,
+        source=source,
+        payload=CollectionScheduleUpdate(
+            enabled=True,
+            interval_minutes=60,
+            fetch_limit=5,
+        ),
+    )
+    monkeypatch.setattr(settings, "collection_truncated_retry_minutes", 60)
+
+    async def fake_run_connector(
+        session: Session,
+        **_: object,
+    ) -> ConnectorRun:
+        run = ConnectorRun(
+            source_id=source.id,
+            connector_type=source.connector_type,
+            status="completed",
+            truncated=True,
+            finished_at=datetime.now(UTC),
+        )
+        session.add(run)
+        session.commit()
+        return run
+
+    monkeypatch.setattr(scheduler_service, "run_connector", fake_run_connector)
+    claim = claim_due_schedule(db)
+    assert claim is not None
+    before = datetime.now(UTC)
+    await execute_claimed_schedule(
+        db,
+        schedule_id=claim[0],
+        lease_token=claim[1],
+    )
+
+    db.expire_all()
+    finished = db.get(SourceCollectionSchedule, schedule.id)
+    assert finished is not None
+    assert finished.next_run_at is not None
+    assert finished.next_run_at.replace(tzinfo=UTC) >= before + timedelta(
+        minutes=59,
+        seconds=50,
+    )
+
+
+@pytest.mark.anyio
 async def test_failed_run_records_error_and_uses_retry_delay(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,

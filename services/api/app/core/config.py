@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     collection_scheduler_lease_minutes: int = 30
     collection_scheduler_heartbeat_seconds: int = 60
     collection_run_timeout_seconds: int = 300
+    collection_truncated_retry_minutes: int = 1
     daily_report_automation_enabled: bool = True
     daily_report_generation_grace_minutes: int = 15
     daily_report_scheduler_poll_seconds: float = 30.0
@@ -108,6 +109,10 @@ class Settings(BaseSettings):
             )
         if self.collection_run_timeout_seconds <= 0:
             raise ValueError("collection_run_timeout_seconds must be greater than 0")
+        if self.collection_truncated_retry_minutes <= 0:
+            raise ValueError(
+                "collection_truncated_retry_minutes must be greater than 0"
+            )
         if self.collection_scheduler_heartbeat_seconds >= collection_lease_seconds:
             raise ValueError(
                 "collection_scheduler_heartbeat_seconds must be less than "

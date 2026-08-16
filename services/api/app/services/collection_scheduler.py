@@ -287,7 +287,11 @@ async def execute_claimed_schedule(
     else:
         schedule.consecutive_failures += 1
     delay = (
-        (1 if succeeded and run is not None and run.truncated else schedule.interval_minutes)
+        (
+            settings.collection_truncated_retry_minutes
+            if succeeded and run is not None and run.truncated
+            else schedule.interval_minutes
+        )
         if succeeded
         else schedule.retry_delay_minutes
     )

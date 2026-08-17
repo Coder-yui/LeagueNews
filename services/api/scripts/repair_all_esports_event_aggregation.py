@@ -22,7 +22,7 @@ from app.core.database import SessionLocal, engine
 from app.domain.event_admission import minimal_event_filter
 from app.domain.event_families import possible_event_families
 from app.models.daily_report import DailyReport
-from app.models.event import Event, EventAggregationRun, EventMention
+from app.models.event import EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
@@ -112,13 +112,15 @@ def inspect_all_selection(db: Session) -> RepairSelection:
         (item_id, item_by_id[item_id].current_revision) for item_id in item_ids
     )
     current_revision_by_id = dict(item_revisions)
+    # Roll back the WHOLE item, not just esports_match memberships: re-aggregation
+    # re-decides every family for the message, so any surviving non-match mention
+    # (schedule, roster, ...) would be duplicated by the fresh run. Production
+    # evidence: a match-family-only rollback left original schedule mentions in
+    # place and the re-run attached the same item to the same event twice.
     mentions = list(
         db.scalars(
-            select(EventMention)
-            .join(Event, Event.id == EventMention.event_id)
-            .where(
-                EventMention.normalized_item_id.in_(item_ids),
-                Event.event_family == "esports_match",
+            select(EventMention).where(
+                EventMention.normalized_item_id.in_(item_ids)
             )
         )
     )

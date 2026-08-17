@@ -12,7 +12,10 @@ from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.services.events import add_event_mention, create_event
-from scripts.repair_all_esports_event_aggregation import all_esports_item_ids
+from scripts.repair_all_esports_event_aggregation import (
+    all_esports_item_ids,
+    inspect_all_selection,
+)
 from scripts.repair_recent_esports_event_aggregation import (
     audit_esports_match_events,
     inspect_selection,
@@ -508,6 +511,51 @@ def test_full_repair_selects_routed_items_without_mentions() -> None:
         # selected; the gameplay message routed outside the esports space is not.
         assert ignored_match.id in selected
         assert gameplay_item.id not in selected
+
+
+def test_full_repair_rolls_back_all_families_for_selected_items() -> None:
+    """Full repair rolls back the WHOLE item, not just esports_match memberships.
+
+    Re-aggregation re-decides every family for the message, so any surviving
+    non-match mention (schedule, roster, ...) would be duplicated by the fresh
+    run: production evidence showed the same item attached to the same schedule
+    event twice after a match-family-only rollback. The selection must therefore
+    include every current mention of the routed items.
+    """
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="full repair all families", connector_type="manual")
+        db.add(source)
+        db.flush()
+        mixed = _item(
+            db, source=source, external_id="mixed-routing",
+            published_at=datetime(2026, 8, 16, 8, tzinfo=UTC),
+        )
+        db.commit()
+
+        schedule_event, _created = create_event(
+            db,
+            normalized_item_id=mixed.id,
+            mention_index=0,
+            event_family="esports_schedule",
+            products=["lol_esports"],
+            canonical_anchors={"competition": "LPL"},
+            title="LPL 赛程安排",
+            current_summary="赛程公告。",
+            evidence_excerpt="LPL 赛程安排",
+        )
+        db.commit()
+        schedule_mention = db.scalar(
+            select(EventMention).where(EventMention.event_id == schedule_event.id)
+        )
+
+        selection = inspect_all_selection(db)
+
+        assert selection.item_ids_newest_first == (mixed.id,)
+        assert schedule_mention is not None
+        assert schedule_mention.id in selection.mention_ids
+        assert schedule_event.id in selection.event_ids
 
 
 def test_post_repair_audit_scopes_to_reaggregated_items_but_compares_family() -> None:

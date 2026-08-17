@@ -1,4 +1,4 @@
-"""Reaggregate every current published message in an esports-match Event.
+"""Reaggregate every current published message routed to the esports-match space.
 
 This operator tool is dry-run by default and never edits RawItem or
 NormalizedItem rows. It intentionally reuses the bounded repair's rollback,
@@ -19,18 +19,21 @@ from sqlalchemy.orm import Session, selectinload
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
+from app.domain.event_admission import minimal_event_filter
+from app.domain.event_families import possible_event_families
 from app.models.daily_report import DailyReport
 from app.models.event import Event, EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
-from app.repositories.events import current_event_mention_conditions
 from app.services.raw_item_versions import latest_normalized_item_condition
 from scripts.repair_recent_esports_event_aggregation import (
     RepairSelection,
-    audit_esports_identity,
+    audit_esports_match_events,
+    post_repair_audit,
     regenerate_published_reports,
     reaggregate_items,
+    repair_failure_reason,
     rollback_selection,
     selection_payload,
 )
@@ -41,21 +44,50 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def all_esports_item_ids(db: Session) -> list[int]:
+    """Select every current published item routed to the esports_match space.
+
+    The selection is upstream-routing based (products + topics -> event space
+    contains ``esports_match``), never membership based: messages that were
+    previously mis-ignored, failed with model errors, or never produced an
+    EventMention are still selected and re-examined.
+    """
+    routing_rows = db.execute(
+        select(NormalizedItem.id, NormalizedItem.products, NormalizedItem.topics)
+        .join(RawItem, RawItem.id == NormalizedItem.raw_item_id)
+        .where(
+            NormalizedItem.publication_status == "published",
+            latest_normalized_item_condition(),
+        )
+    )
+    routed_ids = [
+        int(row[0])
+        for row in routing_rows
+        if "esports_match"
+        in possible_event_families(row[1] or [], row[2] or [])
+    ]
+
     observed_at = func.coalesce(RawItem.published_at, RawItem.ingested_at)
     rows = db.execute(
         select(NormalizedItem.id, observed_at.label("observed_at"), RawItem.id)
         .join(RawItem, RawItem.id == NormalizedItem.raw_item_id)
-        .join(EventMention, EventMention.normalized_item_id == NormalizedItem.id)
-        .join(Event, Event.id == EventMention.event_id)
-        .where(
-            Event.event_family == "esports_match",
-            *current_event_mention_conditions(),
-            latest_normalized_item_condition(),
-        )
-        .group_by(NormalizedItem.id, observed_at, RawItem.id)
+        .where(NormalizedItem.id.in_(routed_ids))
         .order_by(observed_at.desc(), RawItem.id.desc(), NormalizedItem.id.desc())
     )
-    return [int(row[0]) for row in rows]
+    ordered_ids = [int(row[0]) for row in rows]
+
+    # Keep only items the minimal filter would actually process (published and
+    # semantically non-empty), so the repair never re-runs skip-only messages.
+    processable: list[int] = []
+    for item in db.scalars(
+        select(NormalizedItem)
+        .where(NormalizedItem.id.in_(ordered_ids))
+        .options(selectinload(NormalizedItem.raw_item))
+    ):
+        admission = minimal_event_filter(item)
+        if admission.decision == "process":
+            processable.append(item.id)
+    processable_set = set(processable)
+    return [item_id for item_id in ordered_ids if item_id in processable_set]
 
 
 def _shanghai_date(value: datetime) -> date:
@@ -182,10 +214,9 @@ async def main() -> None:
     with SessionLocal() as db:
         selection = inspect_all_selection(db)
         payload = selection_payload(selection, database=engine.url.database)
-        payload["identity_audit"] = audit_esports_identity(
+        payload["identity_audit"] = audit_esports_match_events(
             db,
-            item_ids=selection.item_ids_newest_first,
-            event_ids=selection.event_ids,
+            event_ids=set(selection.event_ids) or None,
         )
     print(json.dumps(payload, ensure_ascii=False), flush=True)
     if not selection.item_ids_newest_first:
@@ -210,13 +241,23 @@ async def main() -> None:
 
     outcomes = await reaggregate_items(selection.item_ids_newest_first)
     regenerated = regenerate_published_reports(selection.published_report_dates)
+    # A full repair selects every esports-routed message, so the post-repair
+    # audit covers the whole esports_match family: false_merge = 0,
+    # strong_same_occurrence_duplicate = 0 and invalid_event = 0 are required
+    # for the repair to count as successful.
+    with SessionLocal() as db:
+        post_audit = post_repair_audit(
+            db, reaggregated_item_ids=set(selection.item_ids_newest_first)
+        )
     result = {
         "reaggregation": dict(outcomes),
         "daily_reports_regenerated": regenerated,
+        "post_repair_audit": post_audit,
     }
     print(json.dumps(result, ensure_ascii=False), flush=True)
-    if outcomes.get("failed") or outcomes.get("missing"):
-        raise RuntimeError(f"repair completed with reaggregation failures: {dict(outcomes)}")
+    failure = repair_failure_reason(outcomes, post_audit)
+    if failure:
+        raise RuntimeError(failure)
 
 
 if __name__ == "__main__":

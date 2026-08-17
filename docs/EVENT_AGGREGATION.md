@@ -2,7 +2,7 @@
 
 > Status: Event Aggregation V2 implemented
 >
-> Policy version: `event-aggregation-v12-identity-gate-subject-continuation`
+> Policy version: `event-aggregation-v13-gate-before-rank-evidence-identity`
 
 Event aggregation answers one question for each meaningful mention in a published
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
@@ -19,10 +19,13 @@ published NormalizedItem
   -> minimal_event_filter()             # process / skip
   -> products/topics event-space routing
   -> recall_event_candidates()          # product/family gated, bounded high recall
+                                         # esports_match: identity gate BEFORE ranking/top-N
   -> LLM aggregate_events()             # one logical message-level call
+                                         # pure esports_match routing uses the short
+                                         # esports_match prompt
   -> structural candidate validation
-  -> apply_membership_transaction()
-  -> refresh_event_metrics()
+  -> apply_membership_transaction()      # persists mention match_identity evidence
+  -> refresh_event_metrics()             # esports_match identity restored from valid evidence
 ```
 
 写入 membership 时同步刷新投影；时间相关的热度衰减由 Pipeline Worker 周期刷新。公开 GET API
@@ -77,14 +80,45 @@ metadata; they are not a parallel identity mechanism.
   overlap only rank candidates within that space.
 - `possible_event_families` is derived from upstream `products + topics`; the model cannot create
   or attach a family outside that routed space.
-- Create requires a minimal title and summary. `esports_match` create additionally requires a
-  recognizable match subject (participants or external_match_id); an empty match_identity is rejected.
+- Create requires a minimal title and summary. `esports_match` create additionally requires
+  **exactly 2 distinct normalized participants** as the match subject; an explicit
+  `external_match_id` is additional strong identity evidence but never substitutes for the two
+  sides. `esports_match` attach requires at least **1 explicit participant** (a follow-up may name
+  only one side); `match_identity={}` is rejected for both actions.
 - `candidate_match_identity` has been removed from the schema. Candidate identity is exclusively
   read from system-stored `Event.canonical_anchors`; the model cannot re-declare candidate identity.
-- `esports_match` candidate recall is followed by a structured **identity gate** that removes
-  candidates with hard identity conflicts (participants, external_match_id, match_date, scheduled_at,
-  stage, or round explicitly incompatible) before the LLM decision. The LLM only sees structurally
-  compatible candidates. This gate is a separate layer from 7-day recall.
+- `esports_match` candidate recall applies a structured **identity gate inside the recall loop,
+  before ranking and the top-N truncation**: candidates with a hard identity conflict against the
+  conservatively extracted incoming participants (two `role=core` team entities, or exactly two team
+  entities; otherwise unknown → no participant filtering) never consume a candidate slot, so the
+  true candidate ranked behind a batch of conflicting ones is still delivered to the LLM. The LLM
+  only sees structurally compatible candidates. This gate is a separate layer from the 7-day recall
+  boundary, and other families never pass through it.
+- When a multi-family routing includes `esports_match`, the final truncation is family-fair:
+  `esports_match` candidates keep a protected share of the bounded budget (half the limit) and the
+  sibling families fill the remaining slots with their original ranking. Without this, roster-style
+  sibling Events (an `esports_schedule` roundup lists every team in its anchors) outscore concrete
+  match Events on entity overlap and silently evict them from the top-N — the cross-family variant
+  of the pre-gate eviction. Pure single-family routing and every non-esports_match routing keep the
+  original global truncation.
+- The model's `match_identity` is evidence-grounded: an occurrence date (`match_date`/`scheduled_at`)
+  later than the message's publish day plus one day of timezone slack reports a future match — a
+  schedule, never a match lifecycle — and a `round` label that appears nowhere in the message text
+  is fabricated numbering. Both are rejected by the business validator with a retry request
+  (missing fields are always better than invented ones; same-day and yesterday inferences stay
+  legitimate). A fabricated future date otherwise hard-conflicts the true same-match candidates at
+  the identity gate and forces a false split.
+- A message routed purely to `esports_match` uses a dedicated short esports_match prompt; every
+  other routing keeps the general prompt and unchanged behavior.
+- Every `esports_match` create/attach mention persists the match identity it described at its own
+  evidence time in `EventMention.structured_fact_changes.match_identity`, so projection rebuilds and
+  audits never depend on the Event's final `canonical_anchors` alone.
+- On projection restore, `esports_match` identity is rebuilt by merging the still-valid material
+  mentions' stored identities in evidence order (hard conflicts are never silently merged): the
+  two participants are restored into `canonical_anchors`, an empty title falls back to the
+  deterministic `A 对阵 B`, and an empty summary falls back to `latest_development`. A recallable
+  `esports_match` Event always keeps a non-empty title and exactly 2 participants; Events that
+  cannot satisfy this after a valid-evidence rebuild are non-recallable and are deleted by repair.
 - All membership writes for one model result commit atomically or roll back together.
 - A `running` aggregation run is still an active-ownership signal while its
   `updated_at` is within the configured Pipeline Worker lease (5 minutes by default). A later invocation exits without an LLM call;

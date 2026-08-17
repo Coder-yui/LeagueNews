@@ -2,6 +2,7 @@ import json
 import hashlib
 import os
 import time
+from datetime import datetime
 from collections.abc import Callable
 from typing import Literal, TypeVar, cast
 from urllib.parse import urlsplit
@@ -15,6 +16,7 @@ from app.domain.esports_match_identity import (
     esports_match_identity_conflict,
     esports_match_same_occurrence_evidence,
     match_identity_from_anchors,
+    ungrounded_match_identity_fields,
 )
 from app.domain.importance import (
     AudienceRegion,
@@ -40,6 +42,7 @@ from app.domain.message_entities import EntityType
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
+    ESPORTS_MATCH_AGGREGATION_OPERATION,
     EVENT_AGGREGATION_OPERATION,
     IMPORTANCE_SCORING_OPERATION,
     KNOWLEDGE_ORGANIZATION_OPERATION,
@@ -55,6 +58,48 @@ class LLMConfigurationError(RuntimeError):
 
 class LLMAnalysisError(RuntimeError):
     """Raised when a provider response cannot be used as a news analysis."""
+
+
+ESPORTS_MATCH_AGGREGATION_PROMPT = """你是 LeagueNews 的电竞赛事聚合编辑器，正在判断具体比赛
+（esports_match）Event。输入是当前消息，以及已由程序完成结构化身份兼容性过滤的近期候选
+Event：participants / external_match_id / match_date / scheduled_at / stage / round 明确冲突的
+候选已被程序移除。你的任务是为消息中的每个比赛相关片段选择 attach、create 或 ignore。
+
+注意：候选结构兼容不代表一定是同一场比赛；你仍需根据比赛双方、比赛进程、比分变化、时间和
+赛事上下文判断是否为同一场比赛的 semantic continuation。
+
+动作语义：
+- attach：当前消息是候选同一场比赛的继续、比分推进、比赛过程、最终赛果、winner 确定，或由
+  本场直接产生的晋级/淘汰结果。
+- create：当前消息明确描述另一场具体比赛，且没有结构兼容的合适候选。
+- ignore：当前内容不足以形成或连接一个具体比赛 Event。
+
+必须遵守：
+- 同一场比赛：1:0 → 1:1 → 2:1 → final 始终是一个 Event；比分变化、比赛结束、winner 确定
+  都是已有 Event 的 material_update，绝不能 create 新 Event。
+- participants 相同本身不能证明是同一 occurrence；但 participants + 连续比赛状态 + 时间/赛事
+  上下文一致可以支持 attach。
+- 不要因为缺少 match_date / round 等强字段就机械 create；只有你有正向理由确认这是另一场比赛时
+  才 create。
+- 不得通过 projection 把旧 Event 改写成另一场比赛。
+- 候选的身份来自系统提供的 candidate_events/canonical_anchors，你只能读取，不得重新声明或补齐
+  候选身份；match_identity 只描述当前消息自身。
+
+输出规则：
+- mention_index 从 0 连续递增。
+- create 必须在 match_identity 中明确两支比赛双方（exactly 2 个 participants）；attach 至少
+  明确一支比赛方；match_identity 没有证据的字段保持缺失，不能猜造。participants 必须是两支
+  真实战队的名称，禁止使用“未知对手”“TBD”等占位词——对手未知时不足以 create，应 attach 已有
+  候选或 ignore。match_date 使用比赛发生日期而不是消息 published_at。
+- attach 必须引用 candidate_events 中的 event_id，且 event_family 为 esports_match；create 不
+  引用 event_id，必须提供 new_event.title 与 new_event.summary。
+- 单产品消息每个 create/attach mention 填该 product；跨产品消息逐 mention 选择所属产品；
+  ignore 不需要 product。
+- create/attach 的 evidence_excerpt 必须来自当前消息。
+- materiality=material_update 的 attach 必须提供 projection.latest_development（表述本消息带来
+  的最新发展）；corroboration_only、duplicate、context_only 的 attach 不得提供 projection。
+- 展示字段使用简体中文。
+只输出符合 schema 的 JSON。"""
 
 
 class ExtractedEntity(BaseModel):
@@ -427,7 +472,44 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                     "content_form=repost 不能 create Event；转载只能 attach 到候选 "
                     "Event 或 ignore"
                 )
+            message_text = " ".join(
+                str(value)
+                for value in (
+                    message.get("title"),
+                    message.get("summary"),
+                    message.get("content"),
+                )
+                if value
+            )
+            published_at_raw = message.get("published_at")
+            try:
+                published_at = (
+                    datetime.fromisoformat(str(published_at_raw))
+                    if published_at_raw
+                    else None
+                )
+            except ValueError:
+                published_at = None
             for mention in result.mentions:
+                if (
+                    mention.action in ("create", "attach")
+                    and mention.event_family == "esports_match"
+                    and mention.match_identity is not None
+                ):
+                    ungrounded = ungrounded_match_identity_fields(
+                        mention.match_identity.model_dump(
+                            mode="json", exclude_none=True
+                        ),
+                        message_published_at=published_at,
+                        text=message_text,
+                    )
+                    if ungrounded:
+                        reasons = "；".join(ungrounded.values())
+                        return (
+                            f"mention[{mention.mention_index}] 的 match_identity 包含消息"
+                            f"无法支持的虚构字段：{reasons}。请删除这些字段后重新输出："
+                            "没有证据的字段保持缺失，缺失好于虚构"
+                        )
                 if mention.action == "create":
                     continuation_error = esports_match_create_continuation_error(
                         mention,
@@ -478,6 +560,13 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                         )
             return None
 
+        # A message routed purely to esports_match gets a dedicated short prompt:
+        # cross-family grouping rules (cosmetics batches, gameplay balance, service
+        # incidents, ...) are irrelevant noise for concrete-match continuation.
+        # Every other routing keeps the general prompt and unchanged behavior.
+        esports_only = [str(family) for family in possible_event_families] == [
+            "esports_match"
+        ]
         prompt = """你是 LeagueNews 的事件聚合编辑器。输入是一条已经完成翻译、摘要、分类和实体
 提取的消息，以及由程序宽松召回的一组近期候选 Event。你的唯一核心任务是识别消息中的 0 到 N 个
 有意义事件 mention，并为每个 mention 选择 attach、create 或 ignore。一次响应处理整条消息；不要
@@ -578,6 +667,8 @@ event_family 语义边界：
   membership 决定。create 的初始展示字段放在 new_event。
 - 展示字段使用简体中文。
 只输出符合 schema 的 JSON。"""
+        if esports_only:
+            prompt = ESPORTS_MATCH_AGGREGATION_PROMPT
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
@@ -587,7 +678,11 @@ event_family 语义边界：
             },
             max_tokens=3200,
             schema=EventAggregationResult,
-            operation=EVENT_AGGREGATION_OPERATION,
+            operation=(
+                ESPORTS_MATCH_AGGREGATION_OPERATION
+                if esports_only
+                else EVENT_AGGREGATION_OPERATION
+            ),
             business_validator=validate_candidate_references,
         )
 

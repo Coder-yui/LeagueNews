@@ -283,6 +283,10 @@ def create_event(
                     ),
                 )
             )
+            # SessionLocal disables autoflush, so flush the revision here: the
+            # caller may refresh_event_metrics() in the same transaction before
+            # commit, and the projection replay must see this patch immediately.
+            db.flush()
         if commit:
             db.commit()
             db.refresh(event)
@@ -439,6 +443,10 @@ def add_event_mention(
                     ),
                 )
             )
+            # SessionLocal disables autoflush, so flush the revision here: the
+            # caller may refresh_event_metrics() in the same transaction before
+            # commit, and the projection replay must see this patch immediately.
+            db.flush()
         if commit:
             db.commit()
             db.refresh(event)

@@ -11,6 +11,11 @@ from app.domain.event_types import (
     HEAT_POLICY_VERSION,
     IMPORTANCE_POLICY_VERSION,
 )
+from app.domain.esports_match_identity import (
+    esports_match_identity_conflict,
+    merge_match_identity,
+    normalized_match_participants,
+)
 from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
@@ -164,6 +169,49 @@ def _restore_event_projection(
         canonical_anchors = patch.get("canonical_anchors")
         if isinstance(canonical_anchors, dict):
             event.canonical_anchors = canonical_anchors
+
+    if event.event_family == "esports_match":
+        _restore_esports_match_identity(event, material)
+
+
+def _restore_esports_match_identity(event: Event, material: list[EventMention]) -> None:
+    """Rebuild the concrete-match subject from still-valid evidence identities.
+
+    Each esports_match mention persists the match identity it described at its
+    own evidence time in ``structured_fact_changes.match_identity``. After the
+    patch replay above, this supplement restores the identity even when the
+    mentions that originally carried title/anchors were invalidated: merging the
+    still-valid identities in evidence-time order (never silently merging hard
+    conflicts) recovers the two participants, a deterministic title fallback
+    ("A 对阵 B") and a minimal summary fallback from latest_development. It
+    never calls the LLM and never invents an "Unknown Match" subject.
+    """
+    identity: dict[str, object] = {}
+    for mention in material:
+        fact_changes = mention.structured_fact_changes
+        mention_identity = (
+            fact_changes.get("match_identity")
+            if isinstance(fact_changes, dict)
+            else None
+        )
+        if not isinstance(mention_identity, dict) or not mention_identity:
+            continue
+        if esports_match_identity_conflict(identity, mention_identity):
+            # Hard conflicts are never silently merged; keep the established
+            # identity. False merges surface through the repair audit.
+            continue
+        identity = merge_match_identity(identity, mention_identity)
+    participants = normalized_match_participants(identity.get("participants"))
+    if len(participants) == 2:
+        anchors = dict(event.canonical_anchors or {})
+        anchors["participants"] = participants
+        event.canonical_anchors = anchors
+        if not (event.title or "").strip():
+            event.title = f"{participants[0]} 对阵 {participants[1]}"
+    if not (event.current_summary or "").strip() and (
+        event.latest_development or ""
+    ).strip():
+        event.current_summary = event.latest_development
 
 
 def _refresh_event_times(event: Event, mentions: list[EventMention]) -> None:

@@ -13,12 +13,15 @@ published NormalizedItem
   → minimal process/skip filter
   → products + topics → possible event families
   → product/family/entity/recency candidate retrieval (bounded)
-  → esports_match identity gate (drop structurally incompatible candidates)
+  → esports_match identity gate (inside recall, BEFORE ranking/top-N)
   → one LLM semantic coreference decision
+      (pure esports_match routing uses the short esports_match prompt)
   → structural validation + esports_match occurrence conflict guard
   → esports_match continuation-first create/attach business validation
   → atomic Event/EventMention membership persistence
+      (each esports_match mention stores its own match_identity evidence)
   → importance, credibility, heat and presentation projections
+      (esports_match identity rebuilt from still-valid evidence identities)
 ```
 
 The LLM chooses `attach`, `create`, or `ignore` for each meaningful mention. It may provide
@@ -72,13 +75,19 @@ verify semantic equivalence. The narrow `esports_match` exceptions:
 - **Attach guard (apply-time fence).** When both the mention and candidate state incompatible
   match dates, external match IDs, stages or rounds, Python rejects the attach. Missing
   occurrence fields remain a semantic model decision.
-- **Identity gate (pre-LLM).** After `esports_match` candidate recall and before the LLM decision,
-  Python drops candidates with a hard identity conflict against the incoming message identity
-  (derived conservatively from message team entities): explicitly different participants,
-  `external_match_id`, `match_date`, `scheduled_at`, `stage` or `round`. A one-sided missing field
-  is *unknown*, never a conflict; equal participants are a positive compatibility signal but never
-  proof of the same occurrence. The LLM only sees candidates that could still be the same match.
-  This gate is a separate layer from the 7-day recall boundary.
+- **Identity gate (pre-LLM, before ranking/top-N).** `esports_match` identity filtering runs
+  **inside the recall loop, before ranking and the top-N truncation** — never after it: a
+  structurally conflicting candidate dropped only after the top-N cut has already consumed a slot
+  and silently evicted the true candidate ranked behind a batch of conflicting ones, forcing a
+  false split. The incoming signal is extracted conservatively from the message's own team
+  entities: exactly two `role=core` team entities are the current match subject; otherwise exactly
+  two team entities total; otherwise the incoming participants are *unknown* and no participant
+  filtering happens. Python drops candidates with a hard identity conflict against that signal:
+  explicitly different participants, `external_match_id`, `match_date`, `scheduled_at`, `stage` or
+  `round`. A one-sided missing field is *unknown*, never a conflict; equal participants are a
+  positive compatibility signal but never proof of the same occurrence. The LLM only sees
+  candidates that could still be the same match. This gate is a separate layer from the 7-day
+  recall boundary, and other families never pass through it.
 - **Continuation-first create guard (model business validation).** For `esports_match`, a
   `create` is rejected before persistence only when there is exactly one compatible candidate with
   **strong positive same-occurrence evidence** — an equal explicit `external_match_id` (decisive on
@@ -91,10 +100,13 @@ verify semantic equivalence. The narrow `esports_match` exceptions:
   structured evidence is the **Python deterministic guard threshold, not the LLM's attach
   threshold**; when evidence is ambiguous (zero or multiple strong-evidence candidates) the LLM
   keeps full semantic control and may still attach via semantic continuation.
-- **Create subject contract (model business validation).** `esports_match` create must carry a
-  recognizable match subject — sufficiently explicit participants (normally both sides) or an
-  explicit `external_match_id`. An empty `match_identity` is rejected so an identity-unknown
-  concrete match Event is never created; not every date/stage/round field is required.
+- **Subject contract (model business validation).** `esports_match` **create** must carry exactly
+  **2 distinct normalized participants** — an explicit `external_match_id` is additional strong
+  identity evidence but never substitutes for the two sides. `esports_match` **attach** must carry
+  at least **1 explicit participant** (a follow-up such as “JDG 拿下第一局” may name only one side).
+  `match_identity={}` is rejected for both actions, so an identity-unknown concrete match Event is
+  never created and no attach can join a concrete match without naming any side; not every
+  date/stage/round field is required.
 
 ## esports_match continuation-first
 
@@ -136,22 +148,38 @@ depends on structured occurrence facts, not its wording.
   from system-stored `canonical_anchors`; the model never re-declares or back-fills candidate
   identity.
 - **Participants conflict rule.** Participants are a match subject, compared through normalized
-  canonical entity names. When both sides explicitly provide complete participants and the
-  normalized participant sets differ — and neither set is a subset of the other — that is a **hard
-  identity conflict** (e.g. candidate JDG/LGD vs incoming WBG/IG is incompatible even on the same
-  date). A missing participants side is *unknown*, not a conflict; equal participants are a positive
-  compatibility signal but never proof of the same occurrence.
-- **Minimal create subject.** `esports_match` create requires a recognizable match subject:
-  sufficiently explicit participants (normally both sides) or an explicit `external_match_id`.
-  `match_identity={}` fails business validation and the model must retry or ignore.
-- **Shell events.** An `esports_match` Event needs a valid title and a recognizable match subject
-  (participants or `external_match_id`) to exist as a normal Event. A shell Event — empty title, or
-  no usable match subject — is never recalled as an attach candidate, and repair/rebuild deletes
-  such orphan/invalid Events instead of keeping an empty shell.
+  canonical entity names. When both sides explicitly provide participants and the normalized sets
+  differ, that is a **hard identity conflict** — candidate JDG/LGD vs incoming WBG/IG is
+  incompatible even on the same date. The only tolerated shape is one-sided follow-up evidence: a
+  single named side that belongs to the candidate's participants (“JDG 拿下第一局” against a
+  JDG/LGD candidate). A missing participants side is *unknown*, not a conflict; equal participants
+  are a positive compatibility signal but never proof of the same occurrence.
+- **Subject contract.** `esports_match` create requires exactly 2 distinct normalized participants;
+  attach requires at least 1 explicit participant; `match_identity={}` fails business validation
+  for both actions and the model must retry or ignore. An `external_match_id` is additional strong
+  evidence, never a substitute for the two sides.
+- **Short esports_match prompt.** A message whose `possible_event_families == ["esports_match"]` is
+  aggregated with a dedicated short prompt covering only concrete-match continuation semantics
+  (attach = continuation/score/result/winner/advancement of the same match; create = a clearly
+  different concrete match with no compatible candidate; ignore = insufficient content). Every
+  other routing keeps the general prompt and unchanged behavior.
+- **Mention identity evidence.** Every `esports_match` create/attach mention persists the match
+  identity it described at its own evidence time in
+  `EventMention.structured_fact_changes.match_identity`. Projection restore rebuilds the Event
+  identity by merging the still-valid material mentions' stored identities in evidence order (hard
+  conflicts are never silently merged), restores the two participants into `canonical_anchors`,
+  falls back an empty title to the deterministic `A 对阵 B`, and falls back an empty summary to
+  `latest_development` — never to an "Unknown Match" shell, never via an LLM call.
+- **Shell events.** An `esports_match` Event needs a non-empty title and exactly 2 match
+  participants to exist as a normal Event. A shell Event — empty title, participants ≠ exactly 2,
+  conflicting member identities, or no recoverable material evidence — is never recalled as an
+  attach candidate, and repair/rebuild deletes such orphan/invalid Events instead of keeping an
+  empty shell.
 - `esports_match_same_occurrence_evidence()` is the single helper deciding whether Python may
-  deterministic-reject a continuation `create`. It is deliberately conservative and never promotes
-  "no conflict" to "same match". `esports_match_identity_conflict()` and `esports_match_identity_gate()`
-  are the deterministic pre-LLM identity layer.
+  deterministic-reject a continuation `create` and whether the repair audit flags two Events as
+  strong same-occurrence duplicates. It is deliberately conservative and never promotes
+  "no conflict" to "same match". `esports_match_identity_conflict()` is the deterministic
+  identity-compatibility layer applied inside `esports_match` recall.
 
 ## Candidate recall by family
 

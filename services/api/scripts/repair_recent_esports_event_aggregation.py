@@ -13,7 +13,6 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, select, text
@@ -25,10 +24,11 @@ from app.core.database import SessionLocal, engine
 from app.domain.esports_match_identity import (
     esports_match_has_subject,
     esports_match_identity_conflict,
+    esports_match_same_occurrence_evidence,
     match_identity_from_anchors,
-    match_identity_from_message_entities,
+    normalized_match_participants,
+    placeholder_match_participants,
 )
-from app.domain.event_admission import minimal_event_filter
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.daily_report import DailyReport
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
@@ -37,10 +37,6 @@ from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.repositories.events import current_event_mention_conditions
 from app.services.daily_reports import generate_daily_report
-from app.services.event_candidates import (
-    esports_match_identity_gate,
-    recall_event_candidates,
-)
 from app.services.event_metrics import refresh_event_metrics
 from app.services.raw_item_versions import latest_normalized_item_condition
 from app.workflows.event_aggregation import aggregate_normalized_item
@@ -316,109 +312,173 @@ def _rebuilds_minimal_esports_match(
     return esports_match_has_subject(event.canonical_anchors or {})
 
 
-def audit_esports_identity(
+def _mention_match_identity(mention: EventMention) -> dict[str, object]:
+    fact_changes = mention.structured_fact_changes
+    identity = (
+        fact_changes.get("match_identity") if isinstance(fact_changes, dict) else None
+    )
+    return identity if isinstance(identity, dict) and identity else {}
+
+
+def audit_esports_match_events(
     db: Session,
     *,
-    item_ids: tuple[int, ...],
-    event_ids: tuple[int, ...],
+    event_ids: set[int] | None = None,
 ) -> dict[str, object]:
-    """Audit repair targets across the match-identity layers.
+    """Audit esports_match Events against the evidence identities they store.
 
-    Beyond strong-identity duplicates this covers the three structured identity
-    checks: invalid/empty esports_match projections, missing usable match
-    subjects, and the cross-participant conflicts the pre-LLM identity gate drops.
+    ``event_ids=None`` puts the whole family in scope. The three checks:
+
+    - false_merge: a still-valid member mention's stored match identity hard
+      conflicts with the Event's own identity (e.g. a WBG/IG member inside a
+      JDG/LGD Event). Members without a stored identity (legacy mentions) are
+      skipped, and candidates dropped by the pre-LLM identity gate are *not*
+      conflicts — that is normal filtering, not a data error.
+    - strong_same_occurrence_duplicate: two Events that carry strong positive
+      same-occurrence evidence against each other (equal external_match_id, or
+      same participants plus equal match_date / full scheduled_at /
+      competition+stage+round) with no hard conflict. Participants alone are
+      never a duplicate key: the same two teams can play on different days.
+    - invalid_event: empty title, participants != exactly 2, member identities
+      that hard conflict with each other, or no recoverable material evidence.
     """
+    scope_ids = (
+        None if event_ids is None else {int(value) for value in event_ids}
+    )
     events = list(
         db.scalars(
-            select(Event).where(
-                Event.id.in_(event_ids), Event.event_family == "esports_match"
-            )
+            select(Event).where(Event.event_family == "esports_match").order_by(Event.id)
         )
     )
-    invalid_empty_projection: list[int] = []
-    missing_subject: list[int] = []
-    by_identity: dict[tuple[Any, ...], list[int]] = {}
-    for event in events:
-        identity = match_identity_from_anchors(event.canonical_anchors or {})
-        if not (event.title or "").strip():
-            invalid_empty_projection.append(event.id)
-        if not esports_match_has_subject(identity):
-            missing_subject.append(event.id)
-        external = _normalized_scalar_audit(identity.get("external_match_id"))
-        if external:
-            key: tuple[Any, ...] = ("external", external)
-        else:
-            participants = _normalized_participants_audit(identity.get("participants"))
-            key = ("participants", tuple(sorted(participants)))
-        by_identity.setdefault(key, []).append(event.id)
-    strong_identity_duplicate_groups = [
-        {"identity": list(key), "event_ids": sorted(group)}
-        for key, group in by_identity.items()
-        if len(group) > 1
-    ]
+    in_scope = [event for event in events if scope_ids is None or event.id in scope_ids]
 
-    cross_participant_conflicts: list[dict[str, object]] = []
-    for item_id in item_ids:
-        item = db.get(NormalizedItem, item_id)
-        if item is None:
-            continue
-        admission = minimal_event_filter(item)
-        if admission.decision == "skip":
-            continue
-        recalled = recall_event_candidates(
-            db,
-            item=item,
-            possible_families=admission.event_space.possible_families,
-            entity_hints=admission.entity_hints,
-        )
-        incoming_identity = match_identity_from_message_entities(item.entities)
-        gated = esports_match_identity_gate(
-            recalled, incoming_identity=incoming_identity
-        )
-        gated_ids = {int(candidate["event_id"]) for candidate in gated}
-        for candidate in recalled:
-            if candidate.get("event_family") != "esports_match":
-                continue
-            if int(candidate["event_id"]) in gated_ids:
-                continue
-            conflict = esports_match_identity_conflict(
-                match_identity_from_anchors(
-                    candidate.get("canonical_anchors") or {}
-                ),
-                incoming_identity,
+    false_merge_violations: list[dict[str, object]] = []
+    invalid_events: list[dict[str, object]] = []
+    for event in in_scope:
+        identity = match_identity_from_anchors(event.canonical_anchors or {})
+        reasons: list[str] = []
+        if not (event.title or "").strip():
+            reasons.append("empty title")
+        participants = normalized_match_participants(identity.get("participants"))
+        if len(participants) != 2:
+            reasons.append(
+                f"participants != exactly 2: {identity.get('participants')!r}"
             )
-            if conflict and conflict.startswith("participants"):
-                cross_participant_conflicts.append(
+        placeholders = placeholder_match_participants(identity)
+        if placeholders:
+            reasons.append(f"placeholder participants: {placeholders}")
+
+        mentions = list(
+            db.scalars(
+                select(EventMention)
+                .join(EventMention.normalized_item)
+                .where(
+                    EventMention.event_id == event.id,
+                    *current_event_mention_conditions(),
+                )
+                .order_by(EventMention.id)
+            )
+        )
+        member_identities: list[tuple[EventMention, dict[str, object]]] = [
+            (mention, _mention_match_identity(mention))
+            for mention in mentions
+        ]
+        if not any(mention.materiality == "material_update" for mention in mentions):
+            reasons.append("no recoverable material evidence")
+        elif not _has_restorable_projection(db, event.id, mentions):
+            reasons.append("material evidence has no restorable projection patch")
+
+        for mention, member_identity in member_identities:
+            if not member_identity:
+                continue
+            conflict = esports_match_identity_conflict(identity, member_identity)
+            if conflict:
+                false_merge_violations.append(
                     {
-                        "item_id": item_id,
-                        "event_id": candidate["event_id"],
+                        "event_id": event.id,
+                        "normalized_item_id": mention.normalized_item_id,
+                        "mention_id": mention.id,
+                        "event_participants": identity.get("participants"),
+                        "member_participants": member_identity.get("participants"),
                         "reason": conflict,
+                    }
+                )
+        for index, (mention, member_identity) in enumerate(member_identities):
+            if not member_identity:
+                continue
+            for other_mention, other_identity in member_identities[index + 1 :]:
+                if not other_identity:
+                    continue
+                if esports_match_identity_conflict(member_identity, other_identity):
+                    reasons.append(
+                        "conflicting member identities: "
+                        f"mention {mention.id} vs mention {other_mention.id}"
+                    )
+        if reasons:
+            invalid_events.append({"event_id": event.id, "reasons": reasons})
+
+    # Duplicates: pairwise strong same-occurrence evidence. A pair is reported
+    # when at least one side is in scope, so a scoped audit still catches a new
+    # Event duplicating a legacy one.
+    all_identities = {
+        event.id: match_identity_from_anchors(event.canonical_anchors or {})
+        for event in events
+    }
+    strong_duplicate_groups: list[dict[str, object]] = []
+    for index, event in enumerate(events):
+        for other in events[index + 1 :]:
+            if (
+                scope_ids is not None
+                and event.id not in scope_ids
+                and other.id not in scope_ids
+            ):
+                continue
+            evidence = esports_match_same_occurrence_evidence(
+                all_identities[event.id], all_identities[other.id]
+            )
+            if evidence:
+                strong_duplicate_groups.append(
+                    {
+                        "event_ids": [event.id, other.id],
+                        "participants": all_identities[event.id].get("participants"),
+                        "reason": evidence,
                     }
                 )
 
     return {
-        "invalid_empty_projection_events": invalid_empty_projection,
-        "missing_match_subject_events": missing_subject,
-        "strong_identity_duplicate_groups": strong_identity_duplicate_groups,
-        "cross_participant_conflicts": cross_participant_conflicts,
+        "audited_events": len(in_scope),
+        "false_merge_violations": false_merge_violations,
+        "strong_same_occurrence_duplicate_groups": strong_duplicate_groups,
+        "invalid_events": invalid_events,
+        "clean": not (
+            false_merge_violations or strong_duplicate_groups or invalid_events
+        ),
     }
 
 
-def _normalized_scalar_audit(value: Any) -> str | None:
-    if isinstance(value, bool) or not isinstance(value, (str, int)):
-        return None
-    normalized = " ".join(str(value).strip().casefold().split())
-    return normalized or None
+def post_repair_audit(
+    db: Session, *, reaggregated_item_ids: set[int]
+) -> dict[str, object]:
+    """Audit the esports_match Events the reaggregation produced or touched.
 
-
-def _normalized_participants_audit(value: Any) -> set[str]:
-    if not isinstance(value, list):
-        return set()
-    return {
-        " ".join(str(part).strip().casefold().split())
-        for part in value
-        if isinstance(part, str) and part.strip()
-    }
+    Scoped to Events with a current mention from the reaggregated items; the
+    duplicate comparison inside additionally covers the whole family so a new
+    Event duplicating a legacy one is still caught.
+    """
+    affected = set(
+        int(value)
+        for value in db.scalars(
+            select(EventMention.event_id)
+            .join(Event, Event.id == EventMention.event_id)
+            .join(EventMention.normalized_item)
+            .where(
+                EventMention.normalized_item_id.in_(reaggregated_item_ids),
+                Event.event_family == "esports_match",
+                *current_event_mention_conditions(),
+            )
+        )
+    )
+    return audit_esports_match_events(db, event_ids=affected)
 
 
 def _has_restorable_projection(
@@ -511,6 +571,24 @@ def regenerate_published_reports(report_dates: tuple[date, ...]) -> list[str]:
     return regenerated
 
 
+def repair_failure_reason(
+    outcomes: Counter[str], post_audit: dict[str, object]
+) -> str | None:
+    """A repair only succeeds when no item failed and the post-repair audit is clean.
+
+    The post-repair audit must show false_merge = 0, strong same-occurrence
+    duplicates = 0 and invalid events = 0; anything else fails loudly with the
+    concrete findings instead of silently reporting success.
+    """
+    if outcomes.get("failed") or outcomes.get("missing"):
+        return f"repair completed with reaggregation failures: {dict(outcomes)}"
+    if not post_audit.get("clean"):
+        return "post-repair audit failed: " + json.dumps(
+            post_audit, ensure_ascii=False, default=str
+        )
+    return None
+
+
 def _validate_args(args: argparse.Namespace) -> None:
     if args.limit < 1 or args.limit > MAX_LIMIT:
         raise RuntimeError(f"--limit must be between 1 and {MAX_LIMIT}")
@@ -543,10 +621,9 @@ async def main() -> None:
     with SessionLocal() as db:
         selection = inspect_selection(db, limit=args.limit)
         payload = selection_payload(selection, database=engine.url.database)
-        payload["identity_audit"] = audit_esports_identity(
+        payload["identity_audit"] = audit_esports_match_events(
             db,
-            item_ids=selection.item_ids_newest_first,
-            event_ids=selection.event_ids,
+            event_ids=set(selection.event_ids),
         )
     print(json.dumps(payload, ensure_ascii=False), flush=True)
     if len(selection.item_ids_newest_first) != args.limit:
@@ -573,13 +650,23 @@ async def main() -> None:
 
     outcomes = await reaggregate_items(selection.item_ids_newest_first)
     regenerated = regenerate_published_reports(selection.published_report_dates)
+    # Post-repair audit: the repair only counts as successful when the events it
+    # (re)produced are clean — no false merges, no strong same-occurrence
+    # duplicates, no invalid Events. Fail loudly with concrete IDs instead of
+    # silently reporting success.
+    with SessionLocal() as db:
+        post_audit = post_repair_audit(
+            db, reaggregated_item_ids=set(selection.item_ids_newest_first)
+        )
     result = {
         "reaggregation": dict(outcomes),
         "daily_reports_regenerated": regenerated,
+        "post_repair_audit": post_audit,
     }
     print(json.dumps(result, ensure_ascii=False), flush=True)
-    if outcomes.get("failed") or outcomes.get("missing"):
-        raise RuntimeError(f"repair completed with reaggregation failures: {dict(outcomes)}")
+    failure = repair_failure_reason(outcomes, post_audit)
+    if failure:
+        raise RuntimeError(failure)
 
 
 if __name__ == "__main__":

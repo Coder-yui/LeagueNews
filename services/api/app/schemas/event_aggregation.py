@@ -4,7 +4,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.event_types import EventFamily, EventMateriality, EventRelation, EventSourceRole
-from app.domain.esports_match_identity import esports_match_has_subject
+from app.domain.esports_match_identity import (
+    esports_match_attach_subject,
+    normalized_match_participants,
+    placeholder_match_participants,
+)
 from app.domain.message_taxonomy import Product
 
 
@@ -94,18 +98,34 @@ class EventMentionDecision(BaseModel):
             and self.match_identity is None
         ):
             raise ValueError("esports_match create/attach requires match_identity")
-        if (
-            self.action == "create"
-            and self.event_family == "esports_match"
-            and self.match_identity is not None
-            and not esports_match_has_subject(
-                self.match_identity.model_dump(mode="json", exclude_none=True)
-            )
-        ):
-            raise ValueError(
-                "esports_match create requires a recognizable match subject: "
-                "participants or external_match_id"
-            )
+        if self.action != "ignore" and self.event_family == "esports_match":
+            identity = self.match_identity.model_dump(mode="json", exclude_none=True)
+            placeholders = placeholder_match_participants(identity)
+            if placeholders:
+                # A participant subject must name real teams; "未知对手"/"TBD" style
+                # placeholders explicitly state the side is unknown and can never
+                # satisfy the subject contract for either action.
+                raise ValueError(
+                    "esports_match match_identity participants must name real teams; "
+                    f"placeholder values are not participants: {placeholders}. "
+                    "对手未知时不能 create（应 attach 已有候选或 ignore）"
+                )
+            if self.action == "create":
+                # A user-visible concrete match Event names both sides. An
+                # external_match_id is additional strong identity evidence but never
+                # substitutes for the two participants.
+                if len(normalized_match_participants(identity.get("participants"))) != 2:
+                    raise ValueError(
+                        "esports_match create requires exactly 2 distinct participants "
+                        "as the match subject (external_match_id alone is not enough)"
+                    )
+            elif not esports_match_attach_subject(identity):
+                # Follow-up evidence may name only one side, but an identity with no
+                # participant at all cannot attach to a concrete match.
+                raise ValueError(
+                    "esports_match attach requires match_identity with at least "
+                    "1 explicit participant"
+                )
         if self.action == "create":
             if self.event_id is not None:
                 raise ValueError("create cannot reference event_id")

@@ -10,6 +10,7 @@ from app.domain.esports_match_identity import (
     esports_match_has_subject,
     esports_match_identity_conflict,
     match_identity_from_anchors,
+    match_identity_from_message_entities,
 )
 from app.models.event import Event
 from app.models.normalized_item import NormalizedItem
@@ -21,41 +22,12 @@ ESPORTS_MATCH_RECALL_WINDOW_DAYS: Final = 7
 _WORD_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]", re.IGNORECASE)
 
 
-def esports_match_identity_gate(
-    candidates: list[dict[str, Any]],
-    *,
-    incoming_identity: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    """Remove esports_match candidates that structurally cannot be the incoming match.
-
-    This runs after recall and before the LLM decision. It compares the candidate's
-    *system-known* identity (from ``Event.canonical_anchors``) with the incoming match
-    identity and drops candidates that hard-conflict on explicit structured facts
-    (participants, external_match_id, match_date, scheduled_at, stage, round). The LLM
-    only sees candidates that could still be the same match; 7-day recall and this
-    identity gate are separate layers and must not be conflated. Candidate identity is
-    never re-declared by the model --- it comes from the Event's own anchors.
-    """
-    filtered: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if candidate.get("event_family") != "esports_match":
-            filtered.append(candidate)
-            continue
-        candidate_identity = match_identity_from_anchors(
-            candidate.get("canonical_anchors") or {}
-        )
-        if esports_match_identity_conflict(candidate_identity, incoming_identity):
-            continue
-        filtered.append(candidate)
-    return filtered
-
-
 def _is_recallable_event(event: Event) -> bool:
-    """An esports_match needs a valid title and a recognizable match subject.
+    """An esports_match needs a valid title and a complete match subject.
 
-    A shell Event (empty title, or no participants / external_match_id) cannot
-    identify what match it is, so it must never enter the candidate pool as an attach
-    target; repair/rebuild deletes such invalid Events instead of leaving them behind.
+    A shell Event (empty title, or without exactly two participants) cannot identify
+    what match it is, so it must never enter the candidate pool as an attach target;
+    repair/rebuild deletes such invalid Events instead of leaving them behind.
     """
     if event.event_family != "esports_match":
         return True
@@ -171,9 +143,27 @@ def recall_event_candidates(
     message_products = {str(product) for product in item.products}
     ranked: list[tuple[float, Event, list[str]]] = []
 
+    # esports_match identity gate — it MUST run before the final ranking/limit, never
+    # after: a structurally conflicting candidate that is dropped only after the top-N
+    # truncation has already consumed a slot and silently evicted the true candidate
+    # (ranked 13th behind 12 conflicting ones), forcing a false split. The incoming
+    # signal is the conservative high-confidence participants extracted from the
+    # message's own team entities; other families never pass through this gate.
+    incoming_match_identity: dict[str, Any] | None = None
+
     for event in events:
         if not _is_recallable_event(event):
             continue
+        if event.event_family == "esports_match":
+            if incoming_match_identity is None:
+                incoming_match_identity = match_identity_from_message_entities(
+                    item.entities
+                )
+            if esports_match_identity_conflict(
+                match_identity_from_anchors(event.canonical_anchors or {}),
+                incoming_match_identity,
+            ):
+                continue
         event_products = {str(product) for product in event.products}
         concrete_message_products = message_products - {"unknown"}
         if concrete_message_products:
@@ -218,7 +208,27 @@ def recall_event_candidates(
         reasons.append("recent_activity")
         ranked.append((score, event, reasons))
 
-    selected = sorted(ranked, key=lambda row: (-row[0], -row[1].id))[:total_limit]
+    selected = sorted(ranked, key=lambda row: (-row[0], -row[1].id))
+    if len(families) > 1 and "esports_match" in families:
+        # Family-fair truncation for esports_match routing. A routed sibling family
+        # with roster-style anchors (an esports_schedule roundup lists every team in
+        # its anchors) outscores concrete match Events on entity overlap and fills
+        # the whole budget, starving the esports_match attach targets the LLM needs
+        # — the same top-N eviction the pre-gate ordering caused, now across
+        # families. esports_match keeps a protected share of the budget; sibling
+        # families fill the remaining slots with their original ranking. Pure
+        # single-family routing and every non-esports_match routing keep the
+        # original global truncation.
+        match_rows = [row for row in selected if row[1].event_family == "esports_match"]
+        other_rows = [row for row in selected if row[1].event_family != "esports_match"]
+        match_quota = max(1, total_limit // 2)
+        selected = sorted(
+            match_rows[:match_quota]
+            + other_rows[: max(0, total_limit - min(len(match_rows), match_quota))],
+            key=lambda row: (-row[0], -row[1].id),
+        )
+    else:
+        selected = selected[:total_limit]
     return [
         {
             "event_id": event.id,

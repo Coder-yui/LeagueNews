@@ -6,6 +6,7 @@ RELEVANCE_OPERATION = "相关性判断"
 TRANSLATION_OPERATION = "翻译"
 KNOWLEDGE_ORGANIZATION_OPERATION = "知识整理"
 EVENT_AGGREGATION_OPERATION = "事件聚合"
+ESPORTS_MATCH_AGGREGATION_OPERATION = "具体比赛事件聚合"
 PRODUCTION_LLM_OPERATIONS = frozenset(
     {
         CLASSIFICATION_OPERATION,
@@ -14,6 +15,7 @@ PRODUCTION_LLM_OPERATIONS = frozenset(
         TRANSLATION_OPERATION,
         KNOWLEDGE_ORGANIZATION_OPERATION,
         EVENT_AGGREGATION_OPERATION,
+        ESPORTS_MATCH_AGGREGATION_OPERATION,
     }
 )
 
@@ -45,6 +47,10 @@ class PromptRegistry:
         EVENT_AGGREGATION_OPERATION: (
             "event-aggregation",
             "v3-lifecycle-cohesion",
+        ),
+        ESPORTS_MATCH_AGGREGATION_OPERATION: (
+            "esports-match-aggregation",
+            "v1-subject-continuation",
         ),
         "图片结构化": ("media-structure", "v1"),
     }

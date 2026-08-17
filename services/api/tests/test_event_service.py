@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 import app.models  # noqa: F401
 from app.core.database import Base
@@ -388,3 +388,119 @@ def test_revision_correction_recalculates_lifecycle_from_current_evidence() -> N
             select(EventMention).where(EventMention.event_id == event.id)
         ).all()
         assert {mention.normalized_item_revision for mention in mentions} == {1, 2}
+
+
+def _autoflush_disabled_session() -> tuple[Session, sessionmaker]:
+    """Mirror SessionLocal: autoflush=False + expire_on_commit=False.
+
+    Production uses this configuration, so a regression test must reproduce it
+    explicitly rather than relying on the default autoflush=True Session, which
+    would mask the bug by auto-flushing pending EventRevision rows before the
+    projection-replay query runs.
+    """
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return Session(engine, expire_on_commit=False), sessionmaker(
+        bind=engine, autoflush=False, expire_on_commit=False
+    )
+
+
+def test_create_event_refresh_projection_in_same_transaction_autoflush_disabled() -> None:
+    """Regression: refresh_event_metrics() in the same transaction as
+    create_event() must replay the just-written EventRevision patch, so the
+    event's title / current_summary / canonical_anchors survive the projection
+    replay instead of being wiped back to the empty baseline.
+
+    create_event() adds its EventRevision inside the savepoint, so its release
+    flushes the patch; this pins the in-transaction visibility contract that the
+    aggregation workflow relies on.
+    """
+    db, session_factory = _autoflush_disabled_session()
+    with session_factory() as new_db:
+        source = Source(name="Same-transaction source", reliability_score=0.8)
+        new_db.add(source)
+        new_db.flush()
+        item = _add_item(
+            new_db,
+            source=source,
+            external_id="same-txn-create",
+            published_at=datetime(2026, 8, 11, 8, tzinfo=UTC),
+            title="同事务创建",
+        )
+        new_db.commit()
+
+        event, created = create_event(
+            new_db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={"participants": ["AAA", "BBB"]},
+            title="Test Match",
+            current_summary="Test Summary",
+            commit=False,
+        )
+        assert created is True
+        refresh_event_metrics(new_db, {event.id})
+        assert event.title == "Test Match"
+        assert event.current_summary == "Test Summary"
+        assert event.canonical_anchors.get("participants") == ["AAA", "BBB"]
+    db.close()
+
+
+def test_add_mention_refresh_projection_in_same_transaction_autoflush_disabled() -> None:
+    """Regression: add_event_mention() followed by refresh_event_metrics() in the
+    same transaction must apply the new mention's projection patch while keeping
+    earlier fields (e.g. title from the create) intact.
+    """
+    db, session_factory = _autoflush_disabled_session()
+    with session_factory() as new_db:
+        source = Source(name="Same-transaction update source", reliability_score=0.8)
+        new_db.add(source)
+        new_db.flush()
+        initial = _add_item(
+            new_db,
+            source=source,
+            external_id="same-txn-update-1",
+            published_at=datetime(2026, 8, 11, 8, tzinfo=UTC),
+            title="初始",
+        )
+        followup = _add_item(
+            new_db,
+            source=source,
+            external_id="same-txn-update-2",
+            published_at=datetime(2026, 8, 11, 10, tzinfo=UTC),
+            title="跟进",
+        )
+        new_db.commit()
+
+        event, _ = create_event(
+            new_db,
+            normalized_item_id=initial.id,
+            mention_index=0,
+            event_family="esports_match",
+            products=["lol_esports"],
+            canonical_anchors={"participants": ["AAA", "BBB"]},
+            title="Initial Match",
+            current_summary="Initial summary",
+            commit=False,
+        )
+        updated, added = add_event_mention(
+            new_db,
+            event_id=event.id,
+            normalized_item_id=followup.id,
+            mention_index=0,
+            relation="supports",
+            source_role="independent_media",
+            materiality="material_update",
+            current_summary="Updated summary",
+            latest_development="新增比分",
+            commit=False,
+        )
+        assert added is True
+        refresh_event_metrics(new_db, {event.id})
+        assert updated.title == "Initial Match"
+        assert updated.current_summary == "Updated summary"
+        assert updated.latest_development == "新增比分"
+        assert updated.canonical_anchors.get("participants") == ["AAA", "BBB"]
+    db.close()

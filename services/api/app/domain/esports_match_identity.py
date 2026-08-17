@@ -1,6 +1,6 @@
 from collections.abc import Mapping
-from datetime import date, datetime
-from typing import Any
+from datetime import date, datetime, timedelta
+from typing import Any, Final
 
 from app.domain.message_entities import canonical_entity_name
 
@@ -67,21 +67,26 @@ def esports_match_identity_conflict(
             f"message={incoming_identity['external_match_id']!s}"
         )
 
-    # participants is the explicit match subject. When both identities name a full
-    # participant set and the sets are genuinely distinct (neither is a subset of the
-    # other), the candidate cannot be the same match regardless of any other field.
-    # One side missing participants stays unknown rather than a conflict; identical
-    # participants are only a positive compatibility signal, never proof of the same
-    # occurrence. The subset guard keeps an incidental third-team mention in a message
-    # (e.g. "参考 JDG 上一场的表现") from wrongly discarding a compatible candidate.
+    # participants is the explicit match subject. When both identities name
+    # participants and the sets differ, the candidate cannot be the same match
+    # regardless of any other field. The only tolerated shape is one-sided
+    # follow-up evidence: a single named side that belongs to the candidate's
+    # participants ("JDG 拿下第一局" naming just JDG against a JDG/LGD match).
+    # A full incoming subject must match the candidate's sides exactly; a side
+    # outside the candidate's participants is always a hard conflict. One side
+    # missing participants entirely stays unknown rather than a conflict;
+    # identical participants are only a positive compatibility signal, never
+    # proof of the same occurrence.
     existing_participants = _normalized_participants(existing_identity.get("participants"))
     incoming_participants = _normalized_participants(incoming_identity.get("participants"))
     if (
         existing_participants
         and incoming_participants
         and existing_participants != incoming_participants
-        and not existing_participants.issubset(incoming_participants)
-        and not incoming_participants.issubset(existing_participants)
+        and not (
+            len(incoming_participants) == 1
+            and incoming_participants < existing_participants
+        )
     ):
         return (
             "participants 明确冲突："
@@ -128,7 +133,22 @@ def esports_match_identity_conflict(
     for key in ("stage", "round"):
         existing_value = _normalized_scalar(existing_identity.get(key))
         incoming_value = _normalized_scalar(incoming_identity.get(key))
-        if existing_value and incoming_value and existing_value != incoming_value:
+        # stage/round are free-text labels; different sources abbreviate the same
+        # real-world stage differently ("常规赛组内赛" vs "组内赛"). A containment
+        # relation (either normalized value containing the other) is an abbreviated
+        # spelling of the same label, not an explicit difference — treating it as a
+        # conflict would wrongly veto the create guard, the apply fence and the
+        # duplicate audit for what is really the same occurrence. Only values that
+        # differ with no containment relationship ("Group Stage" vs "Playoffs") are
+        # explicit conflicts. Structured fields (dates, datetimes, external ids)
+        # above still compare exactly.
+        if (
+            existing_value
+            and incoming_value
+            and existing_value != incoming_value
+            and existing_value not in incoming_value
+            and incoming_value not in existing_value
+        ):
             return (
                 f"{key} 明确冲突：candidate={existing_identity[key]!s}, "
                 f"message={incoming_identity[key]!s}"
@@ -225,54 +245,136 @@ def _normalized_participants(value: Any) -> set[str]:
     return normalized
 
 
-def esports_match_has_subject(identity: Mapping[str, Any] | None) -> bool:
-    """A concrete esports_match needs a recognizable match subject.
+def normalized_match_participants(participants: Any) -> list[str]:
+    """Canonical, de-duplicated, order-preserving match participant names."""
+    if not isinstance(participants, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for part in participants:
+        if not isinstance(part, str) or not part.strip():
+            continue
+        canonical = canonical_entity_name("team", part).strip()
+        token = " ".join(canonical.casefold().split())
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(canonical)
+    return normalized
 
-    A match Event is only meaningful when it names at least one explicit participant
-    (a normal match usually has two sides) or carries an explicit ``external_match_id``.
-    A create with neither is rejected, and an Event that lost both cannot keep
-    participating in aggregation.
+
+def esports_match_has_subject(identity: Mapping[str, Any] | None) -> bool:
+    """A recallable esports_match needs a complete match subject.
+
+    A concrete match Event names exactly two distinct normalized participants — the
+    two sides of the match. ``external_match_id`` is additional strong identity
+    evidence, but it never substitutes for the match sides: an Event without both
+    participants cannot be a user-visible concrete match and must not participate in
+    candidate recall (repair deletes and rebuilds such Events).
     """
     match_identity = match_identity_from_anchors(identity)
-    if _normalized_participants(match_identity.get("participants")):
-        return True
-    if _normalized_scalar(match_identity.get("external_match_id")):
-        return True
-    return False
+    return len(normalized_match_participants(match_identity.get("participants"))) == 2
+
+
+def esports_match_attach_subject(identity: Mapping[str, Any] | None) -> bool:
+    """An attach needs at least one explicit participant of the current match.
+
+    Follow-up evidence ("JDG 拿下第一局") may name only one side, so attach accepts a
+    single participant. An empty identity carries no match subject at all and can
+    neither attach nor create.
+    """
+    match_identity = match_identity_from_anchors(identity)
+    return bool(normalized_match_participants(match_identity.get("participants")))
+
+
+_PLACEHOLDER_PARTICIPANT_MARKERS: Final = (
+    "未知",
+    "待定",
+    "不明",
+    "unknown",
+    "tbd",
+)
+_PLACEHOLDER_PARTICIPANT_NAMES: Final[frozenset[str]] = frozenset(
+    {"?", "对手", "opponent"}
+)
+
+
+def placeholder_match_participants(identity: Mapping[str, Any] | None) -> list[str]:
+    """Return placeholder names that are not real match participants.
+
+    A participant subject must name real teams. Placeholder wording like
+    "未知对手" / "TBD" explicitly states the side is *not* known: such a value can
+    never satisfy the two-sided create subject (nor a one-sided attach subject),
+    because it would fabricate a concrete-match Event whose subject is unknown —
+    exactly the shell the subject contract forbids. Real team names never carry
+    these markers.
+    """
+    match_identity = match_identity_from_anchors(identity)
+    placeholders: list[str] = []
+    for name in normalized_match_participants(match_identity.get("participants")):
+        token = name.casefold()
+        if token in _PLACEHOLDER_PARTICIPANT_NAMES or any(
+            marker in token for marker in _PLACEHOLDER_PARTICIPANT_MARKERS
+        ):
+            placeholders.append(name)
+    return placeholders
 
 
 def match_identity_from_message_entities(
     entities: list[Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Derive a conservative incoming match identity from already extracted entities.
+    """Derive a high-confidence incoming match subject from extracted entities.
 
-    ``NormalizedItem.entities`` is a list of extracted entity dicts. The only occurrence
-    facts reliably available *before* the LLM decision are the message's explicit team
-    entities, which become ``participants`` (a normal match usually has two sides).
-    Dates, stage/round, scheduled_at and external ids cannot be structured without the
-    model and stay unknown here; they are compared by the code fence at attach/apply
-    time once the model supplies ``match_identity``. This is a conservative pre-LLM
-    signal: with no team entities it returns an empty identity and the identity gate is
-    a no-op rather than a source of false conflicts.
+    ``NormalizedItem.entities`` is a list of extracted entity dicts, each carrying
+    ``type``, ``role`` (``core`` / ``context`` / ``affected``) and ``canonical_name``.
+    A message may mention many teams ("WBG 2:1 IG，下一轮将面对 JDG；LGD 此前……"),
+    so *all* team entities can never be the current match's participants. Only two
+    shapes are confident enough to become the pre-LLM ``participants`` signal:
+
+    A. exactly two team entities with ``role == "core"`` -> those two canonical names;
+    B. otherwise, exactly two team entities in the whole message -> those two.
+
+    Every other shape (three or more teams, or one team alone) leaves the incoming
+    participants unknown: the identity gate then keeps every structurally compatible
+    candidate and the LLM keeps full semantic control. Names prefer the normalized
+    ``canonical_name`` over raw display names. Dates, stage/round, scheduled_at and
+    external ids cannot be structured without the model and stay unknown here; they
+    are checked by the fences once the model supplies ``match_identity``.
     """
     if not isinstance(entities, list):
         return {}
-    participants: list[str] = []
-    seen: set[str] = set()
+    team_entities: list[Mapping[str, Any]] = []
     for entity in entities:
         if not isinstance(entity, Mapping):
             continue
         if str(entity.get("type") or "").strip().casefold() not in {"team", "club"}:
             continue
-        name = entity.get("name") or entity.get("display_name") or entity.get("canonical_name")
+        name = (
+            entity.get("canonical_name")
+            or entity.get("display_name")
+            or entity.get("name")
+        )
         if not isinstance(name, str) or not name.strip():
             continue
-        key = " ".join(name.strip().casefold().split())
-        if key in seen:
-            continue
-        seen.add(key)
-        participants.append(name.strip())
-    return {"participants": participants} if participants else {}
+        team_entities.append(entity)
+
+    core_names = [
+        str(entity.get("canonical_name") or entity.get("display_name") or entity.get("name"))
+        for entity in team_entities
+        if str(entity.get("role") or "").strip().casefold() == "core"
+    ]
+    candidate_names = core_names if len(core_names) == 2 else (
+        [
+            str(entity.get("canonical_name") or entity.get("display_name") or entity.get("name"))
+            for entity in team_entities
+        ]
+        if len(team_entities) == 2
+        else []
+    )
+    participants = normalized_match_participants(candidate_names)
+    if len(participants) != 2:
+        return {}
+    return {"participants": participants}
 
 
 def _normalized_scalar(value: Any) -> str | None:
@@ -280,6 +382,68 @@ def _normalized_scalar(value: Any) -> str | None:
         return None
     normalized = " ".join(str(value).strip().casefold().split())
     return normalized or None
+
+
+def _identity_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def ungrounded_match_identity_fields(
+    identity: Mapping[str, Any] | None,
+    *,
+    message_published_at: datetime | None,
+    text: str,
+) -> dict[str, str]:
+    """Return esports_match identity fields the message itself cannot support.
+
+    The model is instructed to leave unevidenced identity fields missing, but a
+    fabricated value is worse than a missing one: a hallucinated future match_date
+    hard-conflicts the real same-match candidates at the identity gate and forces
+    a false split (an early game-progress report created with a wrong future date
+    can never be attached by the later true-date reports of the same match). Two
+    deterministic checks, no thresholds on how old a match may be:
+
+    - occurrence dates: esports_match is the lifecycle of a match that is actually
+      happening or finished. A match_date/scheduled_at more than one day after the
+      message's publish date (one day of timezone slack) reports a future
+      occurrence — that is a schedule, not a match, and is always ungrounded.
+      Same-day and past dates stay allowed ("昨日赛果" recaps legitimately infer
+      the previous day).
+    - round: a round label is competition-internal numbering with no inference
+      path; it is grounded only when it literally appears in the message text.
+
+    stage/competition/participants are deliberately not checked: free-text labels
+    are legitimately abbreviated (containment-compatible) and participants come
+    from the message's own entities.
+    """
+    match_identity = match_identity_from_anchors(identity)
+    issues: dict[str, str] = {}
+    if message_published_at is not None:
+        publish_bound = message_published_at.date() + timedelta(days=1)
+        for key in ("match_date", "scheduled_at"):
+            value = match_identity.get(key)
+            occurrence = _identity_date(value)
+            if occurrence is not None and occurrence > publish_bound:
+                issues[key] = (
+                    f"{key}={value} 晚于消息发布时间：esports_match 是已发生比赛的生命周期，"
+                    "未来的比赛安排属于 esports_schedule；当前消息无法支持该值"
+                )
+    round_value = _normalized_scalar(match_identity.get("round"))
+    if round_value and round_value not in text.casefold():
+        issues["round"] = (
+            f"round={match_identity.get('round')} 在消息原文中没有任何字面证据；"
+            "没有证据的字段必须保持缺失，不能推断或补齐"
+        )
+    return issues
 
 
 def _match_date(identity: Mapping[str, Any]) -> str | None:

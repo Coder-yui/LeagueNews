@@ -14,8 +14,11 @@ from app.domain.event_admission import derive_event_space, minimal_event_filter
 from app.domain.esports_match_identity import (
     esports_match_has_subject,
     esports_match_identity_conflict,
+    esports_match_same_occurrence_evidence,
     match_identity_from_anchors,
     match_identity_from_message_entities,
+    placeholder_match_participants,
+    ungrounded_match_identity_fields,
 )
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
@@ -23,7 +26,7 @@ from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
-from app.services.event_candidates import esports_match_identity_gate, recall_event_candidates
+from app.services.event_candidates import recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.events import create_event
 from app.repositories.events import current_event_mention_conditions
@@ -1970,8 +1973,9 @@ def _team_event(
 def test_esports_match_participants_conflict_identity_gate_removes_candidate() -> None:
     """JDG/LGD candidate + WBG/IG incoming: participants hard conflict -> gate drops it.
 
-    The candidate is recalled by the 7-day window but removed by the pre-LLM identity
-    gate, so it can never be attached (the apply fence also refuses it).
+    The identity gate runs inside recall before ranking/top-N, so the conflicting
+    candidate is never delivered to the LLM and can never be attached (the apply
+    fence also refuses a non-candidate attach).
     """
     now = datetime(2026, 8, 16, 8, tzinfo=UTC)
     engine = _engine()
@@ -1999,16 +2003,10 @@ def test_esports_match_participants_conflict_identity_gate_removes_candidate() -
         recalled = recall_event_candidates(
             db, item=item, possible_families=["esports_match"]
         )
-        assert any(candidate["event_id"] == event.id for candidate in recalled)
-
-        gated = esports_match_identity_gate(
-            recalled,
-            incoming_identity=match_identity_from_message_entities(item.entities),
-        )
-        assert all(candidate["event_id"] != event.id for candidate in gated)
+        assert all(candidate["event_id"] != event.id for candidate in recalled)
 
         # Defense in depth: a forced attach to the dropped candidate fails at apply,
-        # because the candidate is no longer in the gated candidate set.
+        # because the candidate never entered the candidate payload.
         with pytest.raises(ValueError, match="non-candidate"):
             _aggregate(
                 db, item,
@@ -2055,11 +2053,7 @@ def test_esports_match_participants_same_date_missing_keeps_candidate() -> None:
         recalled = recall_event_candidates(
             db, item=item, possible_families=["esports_match"]
         )
-        gated = esports_match_identity_gate(
-            recalled,
-            incoming_identity=match_identity_from_message_entities(item.entities),
-        )
-        assert any(candidate["event_id"] == event.id for candidate in gated)
+        assert any(candidate["event_id"] == event.id for candidate in recalled)
         assert esports_match_identity_conflict(
             match_identity_from_anchors(event.canonical_anchors),
             {"participants": ["BLG", "TES"]},
@@ -2067,7 +2061,13 @@ def test_esports_match_participants_same_date_missing_keeps_candidate() -> None:
 
 
 def test_esports_match_external_match_id_same_without_participants_compatible() -> None:
-    """participants 缺失但 external_match_id 相同: candidate is compatible."""
+    """An external_match_id alone cannot keep a concrete match Event recallable.
+
+    external_match_id is strong identity evidence but never substitutes for the
+    two participants: such an Event is an invalid shell that repair deletes and
+    rebuilds, so it must not be recalled. Equal explicit ids still show no hard
+    conflict in the pure identity comparison.
+    """
     now = datetime(2026, 8, 16, 8, tzinfo=UTC)
     engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
@@ -2091,12 +2091,7 @@ def test_esports_match_external_match_id_same_without_participants_compatible() 
         recalled = recall_event_candidates(
             db, item=item, possible_families=["esports_match"]
         )
-        # No team entities -> incoming identity is empty -> gate is a no-op.
-        gated = esports_match_identity_gate(
-            recalled,
-            incoming_identity=match_identity_from_message_entities(item.entities),
-        )
-        assert any(candidate["event_id"] == event.id for candidate in gated)
+        assert all(candidate["event_id"] != event.id for candidate in recalled)
         # With an explicit incoming external_match_id the pair stays compatible.
         assert esports_match_identity_conflict(
             match_identity_from_anchors(event.canonical_anchors),
@@ -2115,11 +2110,24 @@ def test_esports_match_participants_conflict_even_with_same_date_is_hard_conflic
 
 
 def test_esports_match_create_requires_match_subject() -> None:
-    """esports_match create needs participants or external_match_id; a bare identity fails."""
-    with pytest.raises(ValidationError, match="recognizable match subject"):
+    """esports_match create needs exactly 2 participants; external_match_id alone never substitutes."""
+    with pytest.raises(ValidationError, match="exactly 2 distinct participants"):
         _result(
             _esports_create_decision(
                 title="未知比赛", match_identity={},
+            )
+        )
+    with pytest.raises(ValidationError, match="exactly 2 distinct participants"):
+        _result(
+            _esports_create_decision(
+                title="JDG 的比赛", match_identity={"participants": ["JDG"]},
+            )
+        )
+    with pytest.raises(ValidationError, match="exactly 2 distinct participants"):
+        _result(
+            _esports_create_decision(
+                title="100 号比赛",
+                match_identity={"external_match_id": "lpl-100"},
             )
         )
     # participants 满足最小 create identity contract。
@@ -2143,6 +2151,68 @@ def test_esports_match_schema_rejects_candidate_match_identity() -> None:
             ),
             "candidate_match_identity": {"participants": ["BLG", "TES"]},
         })
+
+
+def test_esports_match_abbreviated_stage_is_not_a_hard_conflict() -> None:
+    """Abbreviated free-text stage labels are the same stage, not an explicit conflict.
+
+    Official posts write "常规赛组内赛" while community posts abbreviate it to
+    "组内赛". A containment relation between the normalized labels is an
+    abbreviated spelling of one stage: treating it as a conflict would suppress
+    the create guard and the duplicate audit for what is really the same
+    occurrence (same participants + same match_date) and enable a false split.
+    Genuinely different labels with no containment stay hard conflicts.
+    """
+    existing = {
+        "participants": ["NIP", "WBG"],
+        "match_date": "2026-08-13",
+        "stage": "常规赛组内赛",
+        "competition": "2026LPL第三赛段常规赛组内赛",
+        "round": "W4D2",
+    }
+    incoming = {
+        "participants": ["WBG", "NIP"],
+        "match_date": "2026-08-13",
+        "stage": "组内赛",
+        "competition": "2026LPL第三赛段",
+    }
+    assert esports_match_identity_conflict(existing, incoming) is None
+    # The strong same-occurrence evidence (participants + equal match_date) must
+    # stay visible to the create guard and the duplicate audit.
+    assert esports_match_same_occurrence_evidence(existing, incoming) is not None
+    # Non-containing, genuinely different labels remain explicit conflicts.
+    assert esports_match_identity_conflict(
+        {"stage": "常规赛"}, {"stage": "季后赛"}
+    ) == "stage 明确冲突：candidate=常规赛, message=季后赛"
+
+
+def test_esports_match_placeholder_participants_rejected() -> None:
+    """Placeholder participants ("未知对手"/"TBD") are not a real match subject.
+
+    The model must not fabricate a concrete-match Event whose subject is unknown:
+    placeholder values fail the subject contract for both create and attach, so
+    the message should attach to an existing candidate or be ignored instead.
+    """
+    with pytest.raises(ValidationError, match="placeholder"):
+        _result(
+            _esports_create_decision(
+                title="GEN 的比赛",
+                match_identity={"participants": ["GEN", "未知对手"]},
+            )
+        )
+    with pytest.raises(ValidationError, match="placeholder"):
+        _result(
+            _esports_attach_decision(
+                event_id=123,
+                match_identity={"participants": ["GEN", "TBD"]},
+            )
+        )
+    assert placeholder_match_participants(
+        {"participants": ["GEN", "未知对手"]}
+    ) == ["未知对手"]
+    assert placeholder_match_participants(
+        {"participants": ["GEN", "HLE"]}
+    ) == []
 
 
 def test_empty_esports_match_shell_is_not_recalled() -> None:
@@ -2188,6 +2258,503 @@ def test_empty_esports_match_shell_is_not_recalled() -> None:
         assert no_subject.id not in ids
         assert valid.id in ids
         assert not esports_match_has_subject(no_subject.canonical_anchors)
+
+
+# ---------------------------------------------------------------------------
+# v13: gate-before-rank pipeline + high-confidence subject extraction contract
+# ---------------------------------------------------------------------------
+
+
+def test_esports_match_identity_gate_before_topn_keeps_true_rank13_candidate() -> None:
+    """A.1: the identity gate must filter before the top-N truncation.
+
+    Twelve JDG/LGD candidates out-rank the true WBG/IG candidate on text overlap.
+    If the gate ran only after the top-12 cut, the conflicting candidates would
+    already have consumed every slot, the true candidate ranked 13th would be
+    lost, and the model could only create a false split.
+    """
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="gate-order")
+        db.add(source)
+        db.flush()
+        message_text = "WBG 2:1 IG 比赛结束 晋级决赛"
+        conflicting_ids: list[int] = []
+        for index in range(12):
+            event = _team_event(
+                db,
+                title=f"{message_text} 战报 {index}",
+                anchors={"participants": ["JDG", "LGD"], "match_date": "2026-08-16"},
+                now=now - timedelta(hours=index),
+            )
+            conflicting_ids.append(event.id)
+        true_event = _team_event(
+            db,
+            title="夏季赛焦点战",
+            anchors={"participants": ["WBG", "IG"], "match_date": "2026-08-16"},
+            now=now - timedelta(days=2),
+        )
+        item = _item(
+            db, source=source, external_id="wbg-ig-final",
+            title=message_text, products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": "WBG", "canonical_name": "WBG"},
+                {"type": "team", "name": "IG", "canonical_name": "IG"},
+            ],
+            published_at=now,
+        )
+        db.commit()
+
+        candidates = recall_event_candidates(
+            db, item=item, possible_families=["esports_match"]
+        )
+        ids = [candidate["event_id"] for candidate in candidates]
+        # The conflicting candidates never consume a top-N slot: the true
+        # candidate ranked behind twelve of them is still delivered to the LLM.
+        assert ids == [true_event.id]
+        assert set(conflicting_ids).isdisjoint(ids)
+
+
+def test_esports_match_quota_blocks_sibling_family_starvation() -> None:
+    """A.1b: routed sibling families cannot starve esports_match candidates.
+
+    A multi-family roundup message recalls roster-style esports_schedule Events
+    (their anchors list every team) that outscore the concrete match Events on
+    entity overlap. Without a protected share of the candidate budget, twelve
+    schedule Events fill the whole top-12 and evict the true match candidate
+    (ranked 13th), forcing the model into a false split — the cross-family
+    variant of the pre-gate eviction. Sibling families keep the remaining
+    slots with their original ranking.
+    """
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="quota-starvation")
+        db.add(source)
+        db.flush()
+        roster = ["WBG", "NIP", "TES", "LGD", "TT", "BLG"]
+        for index in range(12):
+            db.add(Event(
+                title=f"2026LPL组内赛8月{index + 1}日赛程", current_summary="",
+                event_family="esports_schedule", products=["lol_esports"],
+                canonical_anchors={"event": f"2026LPL组内赛8月{index + 1}日", "teams": roster},
+                first_seen_at=now - timedelta(hours=index),
+                last_seen_at=now - timedelta(hours=index),
+            ))
+        db.flush()
+        true_match = _team_event(
+            db,
+            title="NIP 对阵 WBG",
+            anchors={"participants": ["NIP", "WBG"], "match_date": "2026-08-16"},
+            now=now - timedelta(days=1),
+        )
+        item = _item(
+            db, source=source, external_id="roundup-quota",
+            title="组内赛赛果汇总：NIP 2:1 WBG，TT 0:2 BLG", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": name, "canonical_name": name}
+                for name in roster[:4]
+            ],
+            published_at=now,
+        )
+        db.commit()
+
+        candidates = recall_event_candidates(
+            db,
+            item=item,
+            possible_families=["esports_match", "esports_schedule"],
+            entity_hints={"teams": roster},
+        )
+        ids = {candidate["event_id"] for candidate in candidates}
+        # The true match candidate is protected from sibling-family starvation.
+        assert true_match.id in ids
+        match_candidates = [
+            candidate for candidate in candidates
+            if candidate["event_family"] == "esports_match"
+        ]
+        assert [candidate["event_id"] for candidate in match_candidates] == [true_match.id]
+        # Sibling families fill the remaining slots with their original ranking.
+        assert len(candidates) == 12
+        assert all(
+            candidate["event_family"] in {"esports_match", "esports_schedule"}
+            for candidate in candidates
+        )
+
+        # Single-family routing and non-esports_match routing keep the original
+        # global truncation: a pure esports_match message with many conflicting
+        # candidates is unaffected by the quota logic.
+        pure = recall_event_candidates(
+            db, item=item, possible_families=["esports_match"],
+            entity_hints={"teams": roster},
+        )
+        assert {candidate["event_id"] for candidate in pure} == {true_match.id}
+
+
+def test_esports_match_fabricated_identity_fields_rejected() -> None:
+    """A hallucinated future match_date or round label is ungrounded evidence.
+
+    Real failure mode: an early game-progress report ("EDG 1-1 AL，AL扳回一城")
+    published 2026-08-12 was created with match_date=2026-08-14 / round=W4D3 that
+    appear nowhere in the message. The fabricated date then hard-conflicted the
+    true same-match candidates at the identity gate and forced a false split.
+    Occurrence dates after the publish day (one day of timezone slack) and round
+    labels with no literal text evidence are rejected; same-day, yesterday and
+    literal-evidence values stay grounded.
+    """
+    published = datetime(2026, 8, 12, 10, 58, tzinfo=UTC)
+    text = "EDG 1-1 AL，AL扳回一城 AL以18-0的比分碾压EDG #EDG对战AL#"
+
+    # Fabricated future occurrence and round with no literal evidence.
+    issues = ungrounded_match_identity_fields(
+        {
+            "participants": ["EDG", "AL"],
+            "match_date": "2026-08-14",
+            "round": "W4D3",
+        },
+        message_published_at=published,
+        text=text,
+    )
+    assert set(issues) == {"match_date", "round"}
+
+    # Same-day and yesterday inferences are legitimate; a literal round is grounded.
+    assert ungrounded_match_identity_fields(
+        {
+            "participants": ["EDG", "AL"],
+            "match_date": "2026-08-12",
+            "round": "EDG对战AL",
+        },
+        message_published_at=published,
+        text=text,
+    ) == {}
+    assert ungrounded_match_identity_fields(
+        {"participants": ["EDG", "AL"], "match_date": "2026-08-11"},
+        message_published_at=published,
+        text=text,
+    ) == {}
+    # A scheduled_at in the future is a schedule, not a match lifecycle.
+    assert "scheduled_at" in ungrounded_match_identity_fields(
+        {"participants": ["EDG", "AL"], "scheduled_at": "2026-08-15T19:00:00+08:00"},
+        message_published_at=published,
+        text=text,
+    )
+    # stage/competition are free-text labels and are never checked.
+    assert ungrounded_match_identity_fields(
+        {"participants": ["EDG", "AL"], "stage": "常规赛组内赛", "competition": "LPL"},
+        message_published_at=published,
+        text=text,
+    ) == {}
+
+
+def test_match_subject_extraction_prefers_two_core_teams() -> None:
+    """B.2: exactly two core team entities are the current match subject."""
+    identity = match_identity_from_message_entities([
+        {"type": "team", "role": "core", "name": "WBG", "canonical_name": "WBG"},
+        {"type": "team", "role": "core", "name": "IG", "canonical_name": "IG"},
+        {"type": "team", "role": "context", "name": "JDG", "canonical_name": "JDG"},
+    ])
+    assert identity == {"participants": ["WBG", "IG"]}
+
+
+def test_match_subject_extraction_uses_two_teams_without_roles() -> None:
+    """B.3: with no roles, only a message with exactly two team entities qualifies."""
+    identity = match_identity_from_message_entities([
+        {"type": "team", "name": "WBG", "canonical_name": "WBG"},
+        {"type": "team", "name": "IG", "canonical_name": "IG"},
+    ])
+    assert identity == {"participants": ["WBG", "IG"]}
+    # canonical_name is preferred over the raw display name.
+    identity = match_identity_from_message_entities([
+        {"type": "team", "name": "微博电竞", "canonical_name": "WBG"},
+        {"type": "team", "name": "IG电子竞技俱乐部", "canonical_name": "IG"},
+    ])
+    assert identity == {"participants": ["WBG", "IG"]}
+
+
+def test_match_subject_extraction_three_or_more_teams_stays_unknown() -> None:
+    """B.4: three or more teams without exactly two cores leave the subject unknown."""
+    assert match_identity_from_message_entities([
+        {"type": "team", "role": "core", "name": "WBG", "canonical_name": "WBG"},
+        {"type": "team", "name": "IG", "canonical_name": "IG"},
+        {"type": "team", "name": "JDG", "canonical_name": "JDG"},
+    ]) == {}
+    assert match_identity_from_message_entities([
+        {"type": "team", "name": "WBG", "canonical_name": "WBG"},
+        {"type": "team", "name": "IG", "canonical_name": "IG"},
+        {"type": "team", "name": "JDG", "canonical_name": "JDG"},
+        {"type": "team", "name": "LGD", "canonical_name": "LGD"},
+    ]) == {}
+
+
+def test_esports_match_attach_subject_contract() -> None:
+    """C.8/C.9: an empty identity cannot attach; one named side can."""
+    with pytest.raises(ValidationError, match="at least 1 explicit participant"):
+        _result(
+            _esports_attach_decision(
+                event_id=123,
+                match_identity={},
+                latest_development="JDG 拿下第一局",
+            )
+        )
+    ok = _result(
+        _esports_attach_decision(
+            event_id=123,
+            match_identity={"participants": ["JDG"]},
+            latest_development="JDG 拿下第一局",
+        )
+    )
+    assert ok.mentions[0].action == "attach"
+
+
+def test_esports_match_single_side_followup_attaches_to_full_subject() -> None:
+    """D.11: "JDG 拿下第一局" names one side; it stays compatible with JDG/LGD."""
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="single-side")
+        db.add(source)
+        db.flush()
+        creator = _item(
+            db, source=source, external_id="jdg-lgd-open",
+            title="JDG 对阵 LGD 开赛", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": "JDG", "canonical_name": "JDG"},
+                {"type": "team", "name": "LGD", "canonical_name": "LGD"},
+            ],
+            published_at=now,
+        )
+        db.commit()
+        _aggregate(db, creator, StaticClient(_result(_esports_create_decision(
+            title="JDG 对阵 LGD",
+            latest_development="比赛开始",
+            match_identity={"participants": ["JDG", "LGD"]},
+            evidence="JDG 对阵 LGD 开赛",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+
+        followup = _item(
+            db, source=source, external_id="jdg-game-one",
+            title="JDG 拿下第一局", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "role": "core", "name": "JDG", "canonical_name": "JDG"},
+            ],
+            published_at=now + timedelta(hours=1),
+        )
+        db.commit()
+
+        # One team entity alone cannot define a subject, so the gate keeps the
+        # candidate; the one-sided attach then passes every fence.
+        candidates = recall_event_candidates(
+            db, item=followup, possible_families=["esports_match"]
+        )
+        assert any(candidate["event_id"] == event.id for candidate in candidates)
+        _aggregate(
+            db, followup,
+            StaticClient(
+                _result(
+                    _esports_attach_decision(
+                        event_id=event.id,
+                        match_identity={"participants": ["JDG"]},
+                        latest_development="JDG 拿下第一局",
+                    )
+                )
+            ),
+        )
+        mention = db.scalar(
+            select(EventMention).where(EventMention.normalized_item_id == followup.id)
+        )
+        assert mention is not None
+        assert (
+            mention.structured_fact_changes.get("match_identity")
+            == {"participants": ["JDG"]}
+        )
+        db.refresh(event)
+        # The established two-sided subject is never narrowed by one-sided evidence.
+        assert event.canonical_anchors.get("participants") == ["JDG", "LGD"]
+
+
+def test_esports_match_mentions_persist_own_match_identity() -> None:
+    """G.17: every esports_match evidence mention stores the identity it described."""
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="mention-identity")
+        db.add(source)
+        db.flush()
+        first = _item(
+            db, source=source, external_id="wbg-ig-open",
+            title="WBG 1:0 IG", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": "WBG", "canonical_name": "WBG"},
+                {"type": "team", "name": "IG", "canonical_name": "IG"},
+            ],
+            published_at=now,
+        )
+        db.commit()
+        _aggregate(db, first, StaticClient(_result(_esports_create_decision(
+            title="WBG 对阵 IG",
+            latest_development="1:0",
+            match_identity={
+                "participants": ["WBG", "IG"],
+                "match_date": "2026-08-16",
+            },
+            evidence="WBG 1:0 IG",
+        ))))
+        event = db.scalar(select(Event).where(Event.event_family == "esports_match"))
+        assert event is not None
+
+        second = _item(
+            db, source=source, external_id="wbg-ig-final",
+            title="WBG 2:1 IG 比赛结束", products=["lol_esports"],
+            topics=["esports_matches"],
+            entities=[
+                {"type": "team", "name": "WBG", "canonical_name": "WBG"},
+                {"type": "team", "name": "IG", "canonical_name": "IG"},
+            ],
+            published_at=now + timedelta(hours=2),
+        )
+        db.commit()
+        _aggregate(db, second, StaticClient(_result(_esports_attach_decision(
+            event_id=event.id,
+            match_identity={"participants": ["WBG", "IG"]},
+            latest_development="2:1 最终赛果",
+        ))))
+
+        identities = list(
+            db.scalars(
+                select(EventMention.structured_fact_changes)
+                .where(EventMention.event_id == event.id)
+                .order_by(EventMention.id)
+            )
+        )
+        assert identities == [
+            {
+                "match_identity": {
+                    "participants": ["WBG", "IG"],
+                    "match_date": "2026-08-16",
+                }
+            },
+            {"match_identity": {"participants": ["WBG", "IG"]}},
+        ]
+
+
+def test_pure_esports_match_routing_uses_dedicated_short_prompt() -> None:
+    """F.15: a message routed purely to esports_match gets the short prompt."""
+    client, completions = _llm_client_with_responses([_esports_attach_response()])
+    result = asyncio.run(
+        client.aggregate_events(
+            message={
+                "title": "BLG 2:1 TES 比赛结束",
+                "summary": "比分从 1:1 推进到 2:1",
+                "content_form": "original",
+            },
+            possible_event_families=["esports_match"],
+            candidates=[
+                _esports_candidate(
+                    event_id=123,
+                    anchors={"participants": ["BLG", "TES"]},
+                )
+            ],
+        )
+    )
+    assert result.mentions[0].action == "attach"
+    system_content = next(
+        msg["content"]
+        for msg in completions.calls[0]["messages"]
+        if msg["role"] == "system"
+    )
+    assert "具体比赛" in system_content
+    assert "semantic continuation" in system_content
+    # The short prompt carries none of the cross-family long rules (the appended
+    # JSON schema enum legitimately lists every family name).
+    for absent in (
+        "事件粒度原则",
+        "cosmetic_release 是外观资产本身的发布",
+        "service_incident 是具体故障",
+        "同批系列皮肤",
+    ):
+        assert absent not in system_content
+
+
+def test_multi_family_routing_keeps_general_aggregation_prompt() -> None:
+    """F.16: any non-pure routing keeps the unchanged general prompt."""
+    client, completions = _llm_client_with_responses([_esports_attach_response()])
+    asyncio.run(
+        client.aggregate_events(
+            message={
+                "title": "BLG 2:1 TES 比赛结束",
+                "summary": "比分从 1:1 推进到 2:1",
+                "content_form": "original",
+            },
+            possible_event_families=["esports_match", "esports_rules"],
+            candidates=[
+                _esports_candidate(
+                    event_id=123,
+                    anchors={"participants": ["BLG", "TES"]},
+                )
+            ],
+        )
+    )
+    system_content = next(
+        msg["content"]
+        for msg in completions.calls[0]["messages"]
+        if msg["role"] == "system"
+    )
+    assert "事件粒度原则" in system_content
+    assert "cosmetic_release" in system_content
+    assert "service_incident" in system_content
+
+
+def test_non_esports_families_recall_is_unchanged_by_the_gate() -> None:
+    """K.25: gameplay/cosmetic/service recall never passes through the identity gate."""
+    now = datetime(2026, 8, 16, 8, tzinfo=UTC)
+    engine = _engine()
+    with Session(engine, expire_on_commit=False) as db:
+        source = Source(name="other-families")
+        db.add(source)
+        db.flush()
+        families_anchors = [
+            ("gameplay_balance", {"patch_version": "26.17"}),
+            ("cosmetic_release", {"skin_line": "灵魂莲华"}),
+            ("service_incident", {"component": "登录服务"}),
+        ]
+        event_ids = set()
+        for family, anchors in families_anchors:
+            event = Event(
+                title=f"{family} 事件", current_summary="内容。",
+                event_family=family, products=["lol_pc"],
+                canonical_anchors=dict(anchors),
+                first_seen_at=now, last_seen_at=now,
+            )
+            db.add(event)
+            db.flush()
+            event_ids.add(event.id)
+        item = _item(
+            db, source=source, external_id="mixed-teams",
+            title="多支队伍参加的表演赛与版本消息", products=["lol_pc"],
+            topics=["balance_gameplay"],
+            entities=[
+                {"type": "team", "name": "WBG", "canonical_name": "WBG"},
+                {"type": "team", "name": "IG", "canonical_name": "IG"},
+                {"type": "team", "name": "JDG", "canonical_name": "JDG"},
+                {"type": "team", "name": "LGD", "canonical_name": "LGD"},
+            ],
+            published_at=now,
+        )
+        db.commit()
+
+        candidates = recall_event_candidates(
+            db, item=item,
+            possible_families=["gameplay_balance", "cosmetic_release", "service_incident"],
+        )
+        recalled = {candidate["event_id"] for candidate in candidates}
+        assert recalled == event_ids
 
 
 # ---------------------------------------------------------------------------
@@ -2845,9 +3412,9 @@ def test_v11_prompt_teaches_semantic_continuation_beyond_strong_evidence() -> No
     # The shortened prompt still teaches the core semantic contract: candidates
     # passed structural identity filtering, but the model must still judge the
     # same-match lifecycle continuation, and participants alone are not enough.
-    assert "continuation-first" in system_content
-    assert "participants 相同本身不等于同一场" in system_content
-    assert "不能因为 score、title、winner、lifecycle status" in system_content
+    assert "semantic continuation" in system_content
+    assert "participants 相同本身不能证明是同一 occurrence" in system_content
+    assert "绝不能 create 新 Event" in system_content
 
 
 def test_v11_same_day_different_scheduled_at_is_distinct_occurrence() -> None:
@@ -2895,9 +3462,14 @@ def test_v11_identical_scheduled_at_is_strong_same_occurrence() -> None:
 
 
 def test_v11_external_match_id_alone_is_strong_without_participants() -> None:
-    """Item 8: an equal explicit external_match_id is strong evidence even when participants
-    are absent; participants must not gate it."""
-    mention = _continuation_mention(match_identity={"external_match_id": "match-123"})
+    """Item 8: an equal explicit external_match_id is strong evidence even when the
+    candidate carries no participants; participants must not gate it."""
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "external_match_id": "match-123",
+        }
+    )
     candidates = {123: _esports_candidate(
         event_id=123,
         anchors={"external_match_id": "match-123"},
@@ -2911,10 +3483,18 @@ def test_v11_external_match_id_alone_is_strong_without_participants() -> None:
 
 def test_v11_different_external_match_id_is_hard_conflict() -> None:
     """Item 9: explicitly different external_match_id is a hard conflict -> create is legal."""
-    mention = _continuation_mention(match_identity={"external_match_id": "match-123"})
+    mention = _continuation_mention(
+        match_identity={
+            "participants": ["BLG", "TES"],
+            "external_match_id": "match-123",
+        }
+    )
     candidates = {123: _esports_candidate(
         event_id=123,
-        anchors={"external_match_id": "match-999"},
+        anchors={
+            "participants": ["BLG", "TES"],
+            "external_match_id": "match-999",
+        },
     )}
     error = esports_match_create_continuation_error(
         mention, candidates=candidates, message={}
@@ -2970,7 +3550,9 @@ def test_v11_non_material_attach_rejects_projection() -> None:
 def test_v11_invalidating_creator_mention_clears_stale_projection() -> None:
     """Item 4: creator mention A provides title/summary/anchors/latest; attach B only updates
     latest_development. Invalidating A must NOT leave A's presentation evidence behind: the
-    restored projection is rebuilt from a clean baseline and only B's still-valid patch survives."""
+    restored projection is rebuilt from a clean baseline and only B's still-valid patch
+    survives. The match subject itself is rebuilt from B's stored mention identity, so the
+    Event keeps a valid title/anchor pair instead of collapsing into a shell."""
     engine = _engine()
     with Session(engine, expire_on_commit=False) as db:
         source = Source(name="proj-creator-invalid")
@@ -3012,10 +3594,11 @@ def test_v11_invalidating_creator_mention_clears_stale_projection() -> None:
         db.refresh(event)
 
         assert event.latest_development == "2:1 最终赛果"
-        # No stale A projection may survive.
-        assert event.title == ""
-        assert event.current_summary == ""
-        assert event.canonical_anchors == {}
+        # A's stale presentation must not survive; the identity supplement rebuilds
+        # the subject from B's own stored match identity (H.18 contract).
+        assert event.title == "BLG 对阵 TES"
+        assert event.canonical_anchors.get("participants") == ["BLG", "TES"]
+        assert event.current_summary == "2:1 最终赛果"
         assert event.key_facts == []
 
 

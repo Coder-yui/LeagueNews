@@ -1,6 +1,6 @@
 # Event Filtering, Recall, and Granularity
 
-> Policy version: `event-aggregation-v12-identity-gate-subject-continuation`
+> Policy version: `event-aggregation-v13-gate-before-rank-evidence-identity`
 
 ## Minimal filter
 
@@ -60,21 +60,29 @@ left to the model's semantic judgment, not force-merged. `esports_schedule` may 
 fixture separately.
 
 The workflow records explicit match identity facts in `canonical_anchors` and applies a narrow hard
-conflict guard to attach decisions. After `esports_match` candidate recall and before the LLM
-decision, an **identity gate** drops candidates with a hard identity conflict against the incoming
-message identity (explicitly different participants, external match ID, match date, scheduled time,
-stage or round; a one-sided missing field is unknown, not a conflict). Candidate identity is read
-only from the system-stored `canonical_anchors`; the model never re-declares or back-fills candidate
-identity, so an identity-deficient older candidate stays unknown instead of being patched by the
-model. When both sides provide incompatible match dates, external match IDs, stages or rounds, attach
-is rejected. A field missing on either side is not a hard conflict and the semantic decision remains
+conflict guard to attach decisions. Inside `esports_match` candidate recall — **before ranking and
+the top-N truncation** — an **identity gate** drops candidates with a hard identity conflict against
+the conservatively extracted incoming match subject (exactly two `role=core` team entities, or
+exactly two team entities total; otherwise the incoming participants are unknown and no participant
+filtering happens). Explicitly different participants, external match ID, match date, scheduled
+time, stage or round are hard conflicts; a one-sided missing field is unknown, not a conflict.
+Filtering before the top-N cut guarantees conflicting candidates never consume a candidate slot and
+evict the true candidate ranked behind them. Candidate identity is read only from the
+system-stored `canonical_anchors`; the model never re-declares or back-fills candidate identity, so
+an identity-deficient older candidate stays unknown instead of being patched by the model. When
+both sides provide incompatible match dates, external match IDs, stages or rounds, attach is
+rejected. A field missing on either side is not a hard conflict and the semantic decision remains
 with the model. Message publication timestamps are never treated as match dates.
 
-An `esports_match` Event needs a valid title and a recognizable match subject (participants or an
-external match ID) to exist as a normal Event. A shell Event with an empty title or no usable match
-subject is never recalled as an attach candidate, and repair/rebuild deletes such orphan/invalid
-Events instead of leaving an empty shell. `esports_match` create requires the same recognizable
-match subject; an empty `match_identity` fails business validation.
+An `esports_match` Event needs a non-empty title and exactly 2 match participants to exist as a
+normal Event; projection restore rebuilds that identity from the still-valid material mentions'
+stored `structured_fact_changes.match_identity` (empty title falls back to the deterministic
+`A 对阵 B`). A shell Event — empty title, participants ≠ exactly 2, conflicting member identities,
+or no recoverable material evidence — is never recalled as an attach candidate, and repair/rebuild
+deletes such orphan/invalid Events instead of leaving an empty shell. `esports_match` create
+requires exactly 2 distinct normalized participants (an external match ID is additional evidence,
+never a substitute); attach requires at least 1 explicit participant; an empty `match_identity`
+fails business validation for both actions.
 
 `latest_development` (together with `last_material_update_at` and `latest_update_message_id`) is
 derived from the newest still-valid material update by evidence time, not from processing order or

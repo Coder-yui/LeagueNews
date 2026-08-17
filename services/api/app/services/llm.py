@@ -2,7 +2,6 @@ import json
 import hashlib
 import os
 import time
-from datetime import datetime
 from collections.abc import Callable
 from typing import Literal, TypeVar, cast
 from urllib.parse import urlsplit
@@ -12,12 +11,6 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.config import settings
-from app.domain.esports_match_identity import (
-    esports_match_identity_conflict,
-    esports_match_same_occurrence_evidence,
-    match_identity_from_anchors,
-    ungrounded_match_identity_fields,
-)
 from app.domain.importance import (
     AudienceRegion,
     CompetitionRegion,
@@ -42,14 +35,13 @@ from app.domain.message_entities import EntityType
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
-    ESPORTS_MATCH_AGGREGATION_OPERATION,
     EVENT_AGGREGATION_OPERATION,
     IMPORTANCE_SCORING_OPERATION,
     KNOWLEDGE_ORGANIZATION_OPERATION,
     RELEVANCE_OPERATION,
     TRANSLATION_OPERATION,
 )
-from app.schemas.event_aggregation import EventAggregationResult, EventMentionDecision
+from app.schemas.event_aggregation import EventAggregationResult
 
 
 class LLMConfigurationError(RuntimeError):
@@ -58,48 +50,6 @@ class LLMConfigurationError(RuntimeError):
 
 class LLMAnalysisError(RuntimeError):
     """Raised when a provider response cannot be used as a news analysis."""
-
-
-ESPORTS_MATCH_AGGREGATION_PROMPT = """你是 LeagueNews 的电竞赛事聚合编辑器，正在判断具体比赛
-（esports_match）Event。输入是当前消息，以及已由程序完成结构化身份兼容性过滤的近期候选
-Event：participants / external_match_id / match_date / scheduled_at / stage / round 明确冲突的
-候选已被程序移除。你的任务是为消息中的每个比赛相关片段选择 attach、create 或 ignore。
-
-注意：候选结构兼容不代表一定是同一场比赛；你仍需根据比赛双方、比赛进程、比分变化、时间和
-赛事上下文判断是否为同一场比赛的 semantic continuation。
-
-动作语义：
-- attach：当前消息是候选同一场比赛的继续、比分推进、比赛过程、最终赛果、winner 确定，或由
-  本场直接产生的晋级/淘汰结果。
-- create：当前消息明确描述另一场具体比赛，且没有结构兼容的合适候选。
-- ignore：当前内容不足以形成或连接一个具体比赛 Event。
-
-必须遵守：
-- 同一场比赛：1:0 → 1:1 → 2:1 → final 始终是一个 Event；比分变化、比赛结束、winner 确定
-  都是已有 Event 的 material_update，绝不能 create 新 Event。
-- participants 相同本身不能证明是同一 occurrence；但 participants + 连续比赛状态 + 时间/赛事
-  上下文一致可以支持 attach。
-- 不要因为缺少 match_date / round 等强字段就机械 create；只有你有正向理由确认这是另一场比赛时
-  才 create。
-- 不得通过 projection 把旧 Event 改写成另一场比赛。
-- 候选的身份来自系统提供的 candidate_events/canonical_anchors，你只能读取，不得重新声明或补齐
-  候选身份；match_identity 只描述当前消息自身。
-
-输出规则：
-- mention_index 从 0 连续递增。
-- create 必须在 match_identity 中明确两支比赛双方（exactly 2 个 participants）；attach 至少
-  明确一支比赛方；match_identity 没有证据的字段保持缺失，不能猜造。participants 必须是两支
-  真实战队的名称，禁止使用“未知对手”“TBD”等占位词——对手未知时不足以 create，应 attach 已有
-  候选或 ignore。match_date 使用比赛发生日期而不是消息 published_at。
-- attach 必须引用 candidate_events 中的 event_id，且 event_family 为 esports_match；create 不
-  引用 event_id，必须提供 new_event.title 与 new_event.summary。
-- 单产品消息每个 create/attach mention 填该 product；跨产品消息逐 mention 选择所属产品；
-  ignore 不需要 product。
-- create/attach 的 evidence_excerpt 必须来自当前消息。
-- materiality=material_update 的 attach 必须提供 projection.latest_development（表述本消息带来
-  的最新发展）；corroboration_only、duplicate、context_only 的 attach 不得提供 projection。
-- 展示字段使用简体中文。
-只输出符合 schema 的 JSON。"""
 
 
 class ExtractedEntity(BaseModel):
@@ -175,61 +125,6 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 def execution_metadata(result: BaseModel) -> dict[str, object]:
     value = getattr(result, "_llm_execution_metadata", {})
     return dict(value) if isinstance(value, dict) else {}
-
-
-def esports_match_create_continuation_error(
-    mention: EventMentionDecision,
-    *,
-    candidates: dict[int, dict[str, object]],
-    message: dict[str, object],
-) -> str | None:
-    """Stop an esports_match create that clearly continues an existing match.
-
-    continuation-first is enforced by Python only on **strong positive
-    same-occurrence evidence** (see ``esports_match_same_occurrence_evidence``): an
-    equal explicit ``external_match_id``, participants plus an equal explicit match
-    date or scheduled_at (full datetime), or participants plus equal
-    competition/stage/round, with no hard conflict. This is a deterministic guard,
-    intentionally stricter than the LLM's own attach judgment --- the model may still
-    choose to attach an ambiguous candidate from continuous lifecycle + recency +
-    context semantics. Absence of a conflict is never treated as proof of the same
-    occurrence, and ``message`` wording / score format plays no role here. When the
-    strong evidence is ambiguous (multiple candidates, or none) the model keeps full
-    semantic control and creates only when it has positive reason this is a new match.
-    """
-    if mention.action != "create" or mention.event_family != "esports_match":
-        return None
-    if mention.match_identity is None:
-        return None
-    incoming_identity = mention.match_identity.model_dump(mode="json", exclude_none=True)
-    product = str(mention.product) if mention.product is not None else None
-
-    same_evidence: dict[int, str] = {}
-    for candidate_id, candidate in candidates.items():
-        if candidate.get("event_family") != "esports_match":
-            continue
-        if product is not None:
-            candidate_products = {str(value) for value in candidate.get("products") or []}
-            if candidate_products != {product}:
-                continue
-        anchors = candidate.get("canonical_anchors") or {}
-        reason = esports_match_same_occurrence_evidence(anchors, incoming_identity)
-        if reason:
-            same_evidence[int(candidate_id)] = reason
-
-    # Ambiguous (zero or many) strong-evidence candidates -> keep the model in
-    # control of the semantic choice instead of forcing attach.
-    if len(same_evidence) != 1:
-        return None
-    candidate_id, reason = next(iter(same_evidence.items()))
-    candidate = candidates[candidate_id]
-    return (
-        f"mention[{mention.mention_index}] 不能 create 新的 esports_match Event：当前消息有强正的"
-        f"同一场次证据（{reason}），它延续的是候选 Event {candidate['event_id']} 的同一场比赛。"
-        "比分变化、比赛结束、winner 确定或晋级/淘汰结果都属于同一场比赛生命周期的 "
-        "material_update，不是新比赛。请优先改为 attach 候选 Event "
-        f"{candidate['event_id']}；只有当前消息明确是另一场比赛时才 create。"
-    )
 
 
 class TranslatedTextBlock(BaseModel):
@@ -472,52 +367,7 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                     "content_form=repost 不能 create Event；转载只能 attach 到候选 "
                     "Event 或 ignore"
                 )
-            message_text = " ".join(
-                str(value)
-                for value in (
-                    message.get("title"),
-                    message.get("summary"),
-                    message.get("content"),
-                )
-                if value
-            )
-            published_at_raw = message.get("published_at")
-            try:
-                published_at = (
-                    datetime.fromisoformat(str(published_at_raw))
-                    if published_at_raw
-                    else None
-                )
-            except ValueError:
-                published_at = None
             for mention in result.mentions:
-                if (
-                    mention.action in ("create", "attach")
-                    and mention.event_family == "esports_match"
-                    and mention.match_identity is not None
-                ):
-                    ungrounded = ungrounded_match_identity_fields(
-                        mention.match_identity.model_dump(
-                            mode="json", exclude_none=True
-                        ),
-                        message_published_at=published_at,
-                        text=message_text,
-                    )
-                    if ungrounded:
-                        reasons = "；".join(ungrounded.values())
-                        return (
-                            f"mention[{mention.mention_index}] 的 match_identity 包含消息"
-                            f"无法支持的虚构字段：{reasons}。请删除这些字段后重新输出："
-                            "没有证据的字段保持缺失，缺失好于虚构"
-                        )
-                if mention.action == "create":
-                    continuation_error = esports_match_create_continuation_error(
-                        mention,
-                        candidates=candidate_by_id,
-                        message=message,
-                    )
-                    if continuation_error:
-                        return continuation_error
                 if mention.action != "attach":
                     continue
                 candidate = candidate_by_id.get(int(mention.event_id or 0))
@@ -538,35 +388,8 @@ approved_rules 只约束处理方式，不是当前消息的事实来源。"""
                     return (
                         f"mention[{mention.mention_index}] attach 的 product 必须与候选 Event 完全一致"
                     )
-                if mention.event_family == "esports_match":
-                    incoming_identity = (
-                        mention.match_identity.model_dump(mode="json", exclude_none=True)
-                        if mention.match_identity is not None
-                        else {}
-                    )
-                    # Candidate identity comes from the system's own stored anchors;
-                    # the model never re-declares who a candidate is.
-                    candidate_identity = match_identity_from_anchors(
-                        candidate.get("canonical_anchors") or {}
-                    )
-                    conflict = esports_match_identity_conflict(
-                        candidate_identity, incoming_identity
-                    )
-                    if conflict:
-                        return (
-                            f"mention[{mention.mention_index}] 不能 attach 到 candidate Event "
-                            f"{mention.event_id}：这是不同的具体比赛场次（{conflict}）。"
-                            "请根据当前消息改为 create 或 ignore；不得用 projection 改写旧比赛。"
-                        )
             return None
 
-        # A message routed purely to esports_match gets a dedicated short prompt:
-        # cross-family grouping rules (cosmetics batches, gameplay balance, service
-        # incidents, ...) are irrelevant noise for concrete-match continuation.
-        # Every other routing keeps the general prompt and unchanged behavior.
-        esports_only = [str(family) for family in possible_event_families] == [
-            "esports_match"
-        ]
         prompt = """你是 LeagueNews 的事件聚合编辑器。输入是一条已经完成翻译、摘要、分类和实体
 提取的消息，以及由程序宽松召回的一组近期候选 Event。你的唯一核心任务是识别消息中的 0 到 N 个
 有意义事件 mention，并为每个 mention 选择 attach、create 或 ignore。一次响应处理整条消息；不要
@@ -621,20 +444,17 @@ event_family 语义边界：
   即使奖励是外观也不因此改成 cosmetic_release。
 - commercial_offer 是商店、付费商品或限时销售变化；service_incident 是具体故障、热修或服务异常；
   platform_service 是平台能力或服务产品本身的发布/变化。
-- esports_match 是一场具体比赛/series occurrence 的实际发生生命周期，从比赛开始推进（进行中更新）
-  延伸到最后赛果，以及直接由本场比赛产生的晋级/淘汰结果。它不是两支队伍之间抽象的对阵关系，也不是
-  赛前安排。esports_schedule 用于赛程体系本身：赛前预告、对阵安排、开赛时间、日历、延期/改期/场地/
-  赛制等安排变化；它只是安排层面的状态，可以独立于实际比赛 Event。实际比赛一旦发生并推进状态，就
-  进入 esports_match，之后比分、胜负、赛果等必须延续同一 Event，不能再退化为 esports_schedule。
-  对 esports_match 采用 continuation-first：candidates 已经通过程序的结构化身份兼容性过滤
-  （participants / external_match_id / match_date / scheduled_at / stage / round 明确冲突的候选已被
-  程序移除），但结构上兼容并不等于就是同一场，仍需要你判断是否同一场比赛生命周期的 continuation：
-  - 同场比分推进、状态从进行中到结束、winner 确定、晋级/淘汰结果产生 → attach 到候选 Event，绝不能
-    create；这些是已有 Event 的 material_update。不能因为 score、title、winner、lifecycle status
-    变化，或“赛果/结束/击败/拿下”等字眼就 create 新 Event。
-  - 只有你有正向理由确认这是另一场 occurrence（明确不同的比赛）时才 create；不要因为缺少强结构化
-    字段就机械 create。
-  - participants 相同本身不等于同一场。
+- esports_match 是一场具体比赛的完整生命周期，包括赛前确定的对阵与时间、进行中更新和赛果；
+  esports_schedule 只用于赛事日历/赛程体系本身，或延期、改期、场地、对阵、赛制等实质安排变化，
+  不能因为消息是赛前预告就把具体比赛改成 esports_schedule。
+- esports_match 表示一场具体比赛的实际过程和结果。同一场比赛的开始、比分推进、比赛过程、
+  最终赛果和胜负通常发生在同一天或相隔很短的时间内，应优先视为同一 Event 的连续发展：
+  例如 BLG 1:0 TES → BLG 1:1 TES → BLG 2:1 TES → BLG 2:1 TES 比赛结束，应 attach 到同一个
+  比赛 Event，不能因为比分变化不断 create。但如果消息与候选比赛已经相隔明显较长时间，
+  特别是已经跨天较久，结合当前上下文更像同两支队伍进行的另一场比赛，则应考虑这是新的比赛
+  occurrence 并 create 新 Event。时间只是语义判断的重要信号：同两支队伍可以多次交手，
+  participants 相同不代表永远是同一个 Event，比分变化本身也不代表新 Event；请结合候选标题、
+  摘要、时间、双方和赛事上下文做正常语义判断。
 - roster_change 是选手/教练/阵容变动；esports_rules 是赛事规则和竞赛制度变化。
 - universe_release、media_release、corporate_change、security_enforcement 按其字面现实变化使用；没有更
   合适 family 的命名发展才用 other_named_development。
@@ -647,28 +467,15 @@ event_family 语义边界：
   与 mention.product 完全一致。
 - create 不引用 event_id，必须提供最小 new_event.title 和 new_event.summary。
   canonical_anchors 仅是可选描述/召回特征，不需要完整，也不得虚构。
-- esports_match 的 create/attach 必须在 match_identity 中提取当前消息明确给出的比赛身份信息，包括
-  participants、competition、stage、round、match_date、scheduled_at、series_format、external_match_id；
-  没有证据的字段保持缺失，不能猜造。match_date 使用比赛发生日期而不是消息 published_at。
-  强正的同一场次证据（external_match_id 一致、或 participants + match_date 一致、或 participants +
-  双方 scheduled_at 完整时间一致、或 participants + competition/stage/round 一致，且无任何硬冲突）
-  是程序 deterministic 验证依据；你的 attach 判断还应综合 participants + 连续比赛状态 + 时间接近 +
-  上下文一致等语义证据。双方都有值且 match_date、scheduled_at、external_match_id、stage 或 round
-  明确冲突就是硬冲突，必须 create/ignore；一侧字段缺失不是冲突，继续结合其他语义判断。不得通过
-  projection 把旧比赛 Event 改写成新场次。候选的身份来自系统已存储的 anchors，你只能读取候选
-  candidate_events 中给出的身份信息，不得重新声明或补齐候选身份。
 - ignore 不引用 Event。
 - create/attach 的 evidence_excerpt 必须来自当前消息。
 - relation、source_role、materiality 描述当前 mention。只有 materiality=material_update 的 attach 才能
-  提交 projection，且必须至少提供 latest_development（表述本消息带来的最新发展）；materiality=
-  corroboration_only、duplicate 或 context_only 时 projection 必须为 null 或省略，不能同时输出任何
-  标题、摘要、最新进展或 key facts 更新。
-- attach 的 projection 用于当前 Event 的展示标题、摘要、最新进展或 key facts；它不能改变
+  提交 projection；materiality=corroboration_only、duplicate 或 context_only 时 projection 必须为 null
+  或省略，不能同时输出任何标题、摘要、最新进展或 key facts 更新。
+- attach 的 projection 可选，只用于当前 Event 的展示标题、摘要、最新进展或 key facts；它不能改变
   membership 决定。create 的初始展示字段放在 new_event。
 - 展示字段使用简体中文。
 只输出符合 schema 的 JSON。"""
-        if esports_only:
-            prompt = ESPORTS_MATCH_AGGREGATION_PROMPT
         return await self._validated_json_completion(
             prompt=prompt,
             payload={
@@ -678,11 +485,7 @@ event_family 语义边界：
             },
             max_tokens=3200,
             schema=EventAggregationResult,
-            operation=(
-                ESPORTS_MATCH_AGGREGATION_OPERATION
-                if esports_only
-                else EVENT_AGGREGATION_OPERATION
-            ),
+            operation=EVENT_AGGREGATION_OPERATION,
             business_validator=validate_candidate_references,
         )
 

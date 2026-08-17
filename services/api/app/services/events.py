@@ -54,46 +54,26 @@ def _earlier(left: datetime | None, right: datetime) -> datetime:
     return min(normalized, right)
 
 
-def _projection_patch(
-    *,
-    title: str | None = None,
-    current_summary: str | None = None,
-    latest_development: str | None = None,
-    lifecycle_status: str | None = None,
-    canonical_anchors: dict[str, Any] | None = None,
-    key_facts: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Capture this material-update mention's own projection contribution.
-
-    Unlike a whole-Event snapshot, this only records the fields this mention
-    actually provided. An absent field means "leave whatever earlier valid
-    evidence established alone", so a late-reprocessed older message can never
-    bake the newest global projection into its own revision.
-    """
-    patch: dict[str, Any] = {}
-    if title is not None:
-        patch["title"] = title
-    if current_summary is not None:
-        patch["current_summary"] = current_summary
-    if latest_development is not None:
-        patch["latest_development"] = latest_development
-    if lifecycle_status is not None:
-        patch["lifecycle_status"] = lifecycle_status
-    if canonical_anchors is not None:
-        patch["canonical_anchors"] = dict(canonical_anchors)
-    if key_facts is not None:
-        patch["key_facts"] = list(key_facts)
-    return patch
+def _projection_snapshot(event: Event) -> dict[str, Any]:
+    """Keep enough material-update state to restore a projection after revision invalidation."""
+    return {
+        "title": event.title,
+        "current_summary": event.current_summary,
+        "latest_development": event.latest_development,
+        "key_facts": list(event.key_facts or []),
+        "lifecycle_status": event.lifecycle_status,
+        "canonical_anchors": dict(event.canonical_anchors or {}),
+    }
 
 
 def _revision_evidence_snapshot(
+    event: Event,
     *,
     item: NormalizedItem,
     mention_index: int,
     relation: str,
     materiality: str,
     aggregation_policy_version: str,
-    projection_patch: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "normalized_item_id": item.id,
@@ -102,7 +82,7 @@ def _revision_evidence_snapshot(
         "relation": relation,
         "materiality": materiality,
         "aggregation_policy_version": aggregation_policy_version,
-        "projection_patch": projection_patch,
+        "projection_snapshot": _projection_snapshot(event),
     }
 
 
@@ -267,26 +247,15 @@ def create_event(
                     summary=event.current_summary,
                     change_note="创建事件",
                     evidence_snapshot=_revision_evidence_snapshot(
+                        event,
                         item=item,
                         mention_index=mention_index,
                         relation=relation,
                         materiality=materiality,
                         aggregation_policy_version=aggregation_policy_version,
-                        projection_patch=_projection_patch(
-                            title=event.title,
-                            current_summary=event.current_summary,
-                            latest_development=event.latest_development,
-                            lifecycle_status=event.lifecycle_status,
-                            canonical_anchors=dict(event.canonical_anchors or {}),
-                            key_facts=list(event.key_facts or []),
-                        ),
                     ),
                 )
             )
-            # SessionLocal disables autoflush, so flush the revision here: the
-            # caller may refresh_event_metrics() in the same transaction before
-            # commit, and the projection replay must see this patch immediately.
-            db.flush()
         if commit:
             db.commit()
             db.refresh(event)
@@ -394,16 +363,20 @@ def add_event_mention(
         if all(existing.id != mention.id for existing in mentions):
             mentions.append(mention)
         if materiality == "material_update":
-            event.last_material_update_at = _later(event.last_material_update_at, observed_at)
-            # Only a message that is at least as recent as the current material
-            # evidence may advance the latest-update fields/projection on the live
-            # row. A late-reprocessed older message must never regress them; the
-            # definitive selection is recomputed from evidence time by
-            # refresh_event_metrics anyway.
+            # The projection must track the newest material evidence, not the
+            # processing order: a late-reprocessed older message never regresses
+            # the latest-update fields on the live row.
+            last_material_update_at = event.last_material_update_at
+            if (
+                last_material_update_at is not None
+                and last_material_update_at.tzinfo is None
+            ):
+                last_material_update_at = last_material_update_at.replace(tzinfo=UTC)
             is_latest_evidence = (
-                event.last_material_update_at is None
-                or observed_at >= event.last_material_update_at
+                last_material_update_at is None
+                or observed_at >= last_material_update_at
             )
+            event.last_material_update_at = _later(event.last_material_update_at, observed_at)
             if is_latest_evidence:
                 event.latest_update_message_id = item.id
             event.current_revision += 1
@@ -427,26 +400,15 @@ def add_event_mention(
                     summary=event.current_summary,
                     change_note=latest_development or "事件实质更新",
                     evidence_snapshot=_revision_evidence_snapshot(
+                        event,
                         item=item,
                         mention_index=mention_index,
                         relation=relation,
                         materiality=materiality,
                         aggregation_policy_version=aggregation_policy_version,
-                        projection_patch=_projection_patch(
-                            title=title,
-                            current_summary=current_summary,
-                            latest_development=latest_development,
-                            lifecycle_status=lifecycle_status,
-                            canonical_anchors=canonical_anchors,
-                            key_facts=key_facts,
-                        ),
                     ),
                 )
             )
-            # SessionLocal disables autoflush, so flush the revision here: the
-            # caller may refresh_event_metrics() in the same transaction before
-            # commit, and the projection replay must see this patch immediately.
-            db.flush()
         if commit:
             db.commit()
             db.refresh(event)

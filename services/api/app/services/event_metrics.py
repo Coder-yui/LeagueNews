@@ -11,11 +11,6 @@ from app.domain.event_types import (
     HEAT_POLICY_VERSION,
     IMPORTANCE_POLICY_VERSION,
 )
-from app.domain.esports_match_identity import (
-    esports_match_identity_conflict,
-    merge_match_identity,
-    normalized_match_participants,
-)
 from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
@@ -69,149 +64,67 @@ def refresh_event_importance(event: Event, mentions: list[EventMention]) -> None
 def _restore_event_projection(
     db: Session, event: Event, mentions: list[EventMention]
 ) -> None:
-    """Replay each still-valid material-update projection patch by evidence time.
+    """Restore material-update fields from the newest still-valid revision snapshot.
 
-    Each ``EventRevision`` stores the *mention's own* projection contribution
-    (``projection_patch``), never a whole-Event snapshot, so a late-reprocessed
-    old message can never bake the newest global projection into its own patch.
-    Restore rebuilds the projection by:
-
-    1. ordering the active material-update mentions by priority evidence time;
-    2. looking up the patch recorded for each mention's proof key;
-    3. replaying the patches in that order, applying only the fields present.
-
-    The order matches ``_refresh_references`` so ``latest_development`` and
-    ``latest_update_message_id`` are derived from the same deterministic winner
-    (``evidence_time``, then ``EventMention.id``). Selecting by ``EventRevision.
-    revision`` is intentionally avoided: a late-reprocessed old message receives a
-    higher revision but an older evidence time and must not regress the projection.
+    "Newest" follows the mention evidence time (published_at / ingested_at, then
+    mention id), never the revision number: a late-reprocessed older message gets
+    a higher revision but must never win the projection.
     """
-    # A clean baseline: the projection must be rebuilt purely from still-valid
-    # material patches below. Never carry forward evidence-derived fields left by a
-    # mention that has since been invalidated (e.g. an invalidated create's
-    # canonical_anchors / key_facts / latest_development). title and current_summary
-    # are non-nullable stable columns, so fall back to empty strings when no valid
-    # patch restores them.
-    event.title = ""
-    event.current_summary = ""
-    event.latest_development = ""
-    event.lifecycle_status = "developing"
-    event.canonical_anchors = {}
-    event.key_facts = []
-
     material_mentions = [
         mention for mention in mentions if mention.materiality == "material_update"
     ]
-    if not material_mentions:
-        event.lifecycle_status = "stale"
-        return
-    material = sorted(
-        material_mentions,
-        key=lambda mention: (_mention_time(mention), mention.id),
-    )
-    material_keys = {
-        (
-            mention.normalized_item_id,
-            mention.normalized_item_revision,
-            mention.mention_index,
-            mention.aggregation_policy_version,
+    snapshots: list[tuple[tuple[datetime, int], dict[str, object]]] = []
+    if material_mentions:
+        mention_by_key = {
+            (
+                mention.normalized_item_id,
+                mention.normalized_item_revision,
+                mention.mention_index,
+                mention.aggregation_policy_version,
+            ): mention
+            for mention in material_mentions
+        }
+        revisions = db.scalars(
+            select(EventRevision)
+            .where(EventRevision.event_id == event.id)
+            .order_by(EventRevision.revision)
         )
-        for mention in material
-    }
-    # proof key -> the mention-scoped projection patch (legacy revisions fall back
-    # to a full snapshot recorded when they were written).
-    contribution_by_key: dict[
-        tuple[int, int, int, str], dict[str, object]
-    ] = {}
-    for revision in db.scalars(
-        select(EventRevision)
-        .where(EventRevision.event_id == event.id)
-        .order_by(EventRevision.revision)
-    ):
-        evidence = revision.evidence_snapshot or {}
-        key = (
-            evidence.get("normalized_item_id"),
-            evidence.get("normalized_item_revision"),
-            evidence.get("mention_index"),
-            evidence.get("aggregation_policy_version"),
-        )
-        if key not in material_keys:
-            continue
-        patch_candidate = evidence.get("projection_patch")
-        if isinstance(patch_candidate, dict) and patch_candidate:
-            contribution_by_key[key] = patch_candidate
-        else:
-            legacy = evidence.get("projection_snapshot")
-            if isinstance(legacy, dict):
-                contribution_by_key[key] = legacy
+        for revision in revisions:
+            evidence = revision.evidence_snapshot or {}
+            key = (
+                evidence.get("normalized_item_id"),
+                evidence.get("normalized_item_revision"),
+                evidence.get("mention_index"),
+                evidence.get("aggregation_policy_version"),
+            )
+            snapshot = evidence.get("projection_snapshot")
+            mention = mention_by_key.get(key)
+            if mention is not None and isinstance(snapshot, dict):
+                snapshots.append(((_mention_time(mention), mention.id), snapshot))
 
-    for mention in material:
-        key = (
-            mention.normalized_item_id,
-            mention.normalized_item_revision,
-            mention.mention_index,
-            mention.aggregation_policy_version,
+    if snapshots:
+        _key, snapshot = max(snapshots, key=lambda value: value[0])
+        event.title = str(snapshot.get("title") or event.title)
+        event.current_summary = str(
+            snapshot.get("current_summary") or event.current_summary
         )
-        patch = contribution_by_key.get(key)
-        if not patch:
-            continue
-        if "title" in patch:
-            event.title = str(patch["title"])
-        if "current_summary" in patch:
-            event.current_summary = str(patch["current_summary"])
-        if "latest_development" in patch:
-            event.latest_development = str(patch["latest_development"])
-        if "lifecycle_status" in patch:
-            event.lifecycle_status = str(patch["lifecycle_status"])
-        key_facts = patch.get("key_facts")
+        event.latest_development = str(
+            snapshot.get("latest_development") or ""
+        )
+        key_facts = snapshot.get("key_facts")
         if isinstance(key_facts, list):
             event.key_facts = key_facts
-        canonical_anchors = patch.get("canonical_anchors")
+        canonical_anchors = snapshot.get("canonical_anchors")
         if isinstance(canonical_anchors, dict):
             event.canonical_anchors = canonical_anchors
-
-    if event.event_family == "esports_match":
-        _restore_esports_match_identity(event, material)
-
-
-def _restore_esports_match_identity(event: Event, material: list[EventMention]) -> None:
-    """Rebuild the concrete-match subject from still-valid evidence identities.
-
-    Each esports_match mention persists the match identity it described at its
-    own evidence time in ``structured_fact_changes.match_identity``. After the
-    patch replay above, this supplement restores the identity even when the
-    mentions that originally carried title/anchors were invalidated: merging the
-    still-valid identities in evidence-time order (never silently merging hard
-    conflicts) recovers the two participants, a deterministic title fallback
-    ("A 对阵 B") and a minimal summary fallback from latest_development. It
-    never calls the LLM and never invents an "Unknown Match" subject.
-    """
-    identity: dict[str, object] = {}
-    for mention in material:
-        fact_changes = mention.structured_fact_changes
-        mention_identity = (
-            fact_changes.get("match_identity")
-            if isinstance(fact_changes, dict)
-            else None
+        lifecycle_status = snapshot.get("lifecycle_status")
+        event.lifecycle_status = (
+            str(lifecycle_status) if lifecycle_status else "developing"
         )
-        if not isinstance(mention_identity, dict) or not mention_identity:
-            continue
-        if esports_match_identity_conflict(identity, mention_identity):
-            # Hard conflicts are never silently merged; keep the established
-            # identity. False merges surface through the repair audit.
-            continue
-        identity = merge_match_identity(identity, mention_identity)
-    participants = normalized_match_participants(identity.get("participants"))
-    if len(participants) == 2:
-        anchors = dict(event.canonical_anchors or {})
-        anchors["participants"] = participants
-        event.canonical_anchors = anchors
-        if not (event.title or "").strip():
-            event.title = f"{participants[0]} 对阵 {participants[1]}"
-    if not (event.current_summary or "").strip() and (
-        event.latest_development or ""
-    ).strip():
-        event.current_summary = event.latest_development
+    else:
+        # Legacy revisions do not have a projection snapshot. Keep their stable
+        # label, but never let an old lifecycle status survive evidence removal.
+        event.lifecycle_status = "developing" if material_mentions else "stale"
 
 
 def _refresh_event_times(event: Event, mentions: list[EventMention]) -> None:

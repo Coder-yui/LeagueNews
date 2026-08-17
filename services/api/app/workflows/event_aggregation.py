@@ -10,11 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.domain.event_admission import AdmissionDecision, minimal_event_filter
-from app.domain.esports_match_identity import (
-    esports_match_identity_conflict,
-    match_identity_from_anchors,
-    merge_match_identity,
-)
 from app.domain.event_families import EventSpace, product_supports_family
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun
@@ -39,10 +34,6 @@ STALE_RUNNING_RUN_AFTER = timedelta(seconds=settings.pipeline_worker_lease_secon
 
 class SupersededEventAggregationError(RuntimeError):
     """The requested NormalizedItem revision is no longer the current projection."""
-
-
-class EsportsMatchIdentityConflictError(ValueError):
-    """An attach attempted to cross a known esports match occurrence boundary."""
 
 
 def _run_key(item: NormalizedItem) -> str:
@@ -184,6 +175,8 @@ def _message_payload(item: NormalizedItem) -> tuple[dict[str, object], dict[str,
         "message_type": item.message_type,
         "topics": item.topics,
         "entities": item.entities,
+        # The model uses the message/candidate time distance as a semantic signal
+        # for "same match continuation vs. another occurrence" judgment.
         "published_at": (
             (item.raw_item.published_at or item.raw_item.ingested_at).isoformat()
             if item.raw_item is not None
@@ -427,37 +420,6 @@ def _validate_repost_actions(item: NormalizedItem, result: EventAggregationResul
         raise ValueError("repost messages cannot create events")
 
 
-def _decision_match_identity(decision: EventMentionDecision) -> dict[str, Any]:
-    if decision.match_identity is None:
-        return {}
-    return decision.match_identity.model_dump(mode="json", exclude_none=True)
-
-
-def _validate_esports_match_attach(
-    event: Event,
-    decision: EventMentionDecision,
-) -> None:
-    """Apply-phase esports_match occurrence guard (defense in depth).
-
-    Semantic membership errors are caught by the model business validator; this
-    keeps a narrow hard-conflict fence so a conflicting attach can never be
-    written even if it reaches the transaction. Candidate identity is the
-    system's own ``Event.canonical_anchors`` --- the model never re-declares who
-    a candidate is.
-    """
-    if decision.event_family != "esports_match":
-        return
-    candidate_identity = match_identity_from_anchors(event.canonical_anchors or {})
-    conflict = esports_match_identity_conflict(
-        candidate_identity, _decision_match_identity(decision)
-    )
-    if conflict:
-        raise EsportsMatchIdentityConflictError(
-            f"mention[{decision.mention_index}] cannot attach to esports_match Event "
-            f"{event.id}: {conflict}"
-        )
-
-
 def apply_membership_transaction(
     db: Session,
     *,
@@ -489,35 +451,19 @@ def apply_membership_transaction(
                 "excerpt": decision.evidence_excerpt,
             }
         )
-        # Every esports_match evidence mention persists the match identity it
-        # described *at its own evidence time* in its structured_fact_changes, so
-        # projection/identity rebuilds and audits never depend on the Event's
-        # final canonical_anchors alone.
-        mention_fact_changes = (
-            {"match_identity": _decision_match_identity(decision)}
-            if decision.event_family == "esports_match"
-            else None
-        )
         if decision.action == "create":
             seed = decision.new_event
             if seed is None:  # Pydantic enforces this; keep type narrowing explicit.
                 raise ValueError("create mention is missing new_event")
             if decision.event_family is None:
                 raise ValueError("create mention is missing event_family")
-            canonical_anchors = dict(seed.canonical_anchors)
-            if decision.event_family == "esports_match":
-                canonical_anchors = merge_match_identity(
-                    canonical_anchors,
-                    _decision_match_identity(decision),
-                    overwrite=True,
-                )
             event, _created = create_event(
                 db,
                 normalized_item_id=item.id,
                 mention_index=decision.mention_index,
                 event_family=decision.event_family,
                 products=[resolved_products[decision.mention_index]],
-                canonical_anchors=canonical_anchors,
+                canonical_anchors=seed.canonical_anchors,
                 title=seed.title,
                 current_summary=seed.summary,
                 relation=decision.relation,
@@ -526,7 +472,6 @@ def apply_membership_transaction(
                 independence_group=independence_group,
                 evidence_excerpt=decision.evidence_excerpt,
                 content_fingerprint=claim_fingerprint,
-                structured_fact_changes=mention_fact_changes,
                 latest_development=seed.latest_development,
                 key_facts=seed.key_facts,
                 commit=False,
@@ -535,26 +480,10 @@ def apply_membership_transaction(
         else:
             if decision.event_family is None:
                 raise ValueError("attach mention is missing event_family")
-            event = db.scalar(
-                select(Event)
-                .where(Event.id == int(decision.event_id or 0))
-                .with_for_update()
-            )
+            event = db.get(Event, int(decision.event_id or 0))
             if event is None:
                 raise ValueError(f"candidate event {decision.event_id} disappeared")
-            _validate_esports_match_attach(event, decision)
             proposal = decision.projection
-            canonical_anchors = None
-            if decision.event_family == "esports_match":
-                # Only the current mention's own occurrence facts enrich the Event
-                # anchors; candidate identity always comes from the system's stored
-                # anchors and is never re-declared by the model.
-                enriched_anchors = merge_match_identity(
-                    event.canonical_anchors or {},
-                    _decision_match_identity(decision),
-                )
-                if enriched_anchors != (event.canonical_anchors or {}):
-                    canonical_anchors = enriched_anchors
             event, _added = add_event_mention(
                 db,
                 event_id=event.id,
@@ -566,11 +495,9 @@ def apply_membership_transaction(
                 independence_group=independence_group,
                 evidence_excerpt=decision.evidence_excerpt,
                 content_fingerprint=claim_fingerprint,
-                structured_fact_changes=mention_fact_changes,
                 title=proposal.title if proposal else None,
                 current_summary=proposal.summary if proposal else None,
                 latest_development=proposal.latest_development if proposal else None,
-                canonical_anchors=canonical_anchors,
                 key_facts=proposal.key_facts if proposal else None,
                 commit=False,
                 use_savepoint=False,
@@ -643,23 +570,12 @@ async def aggregate_normalized_item(
             db, run, outcome="skipped_by_minimal_filter", admission=admission
         )
 
-    if reuse_draft is None:
-        # The esports_match identity gate runs *inside* recall, before the final
-        # ranking/top-N truncation: structurally conflicting candidates never
-        # consume a candidate slot, so the true candidate ranked behind a batch of
-        # conflicting ones is still delivered to the LLM. The incoming signal is
-        # the conservative high-confidence participants extracted from the
-        # message's own team entities; the full match_identity the model supplies
-        # later is fenced again by the model business validator and the apply
-        # fence. Other families never pass through the gate.
-        candidates = recall_event_candidates(
-            db,
-            item=item,
-            possible_families=admission.event_space.possible_families,
-            entity_hints=admission.entity_hints,
-        )
-    else:
-        candidates = list(run.candidate_snapshot or [])
+    candidates = recall_event_candidates(
+        db,
+        item=item,
+        possible_families=admission.event_space.possible_families,
+        entity_hints=admission.entity_hints,
+    ) if reuse_draft is None else list(run.candidate_snapshot or [])
     run.candidate_snapshot = candidates
     message, truncation = _message_payload(item)
 

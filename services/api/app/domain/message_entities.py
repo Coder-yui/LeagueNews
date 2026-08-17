@@ -60,14 +60,6 @@ _COMPETITION_CODES: Final = (
     "msi",
     "ewc",
 )
-_TEAM_ALIASES: Final = {
-    # Match identity compares teams from independently extracted messages. Keep
-    # the small set of established production aliases in the event display form.
-    "ig": "IG",
-    "invictus gaming": "IG",
-    "wbg": "WBG",
-    "weibo gaming": "WBG",
-}
 
 
 def _key_token(value: str) -> str:
@@ -88,9 +80,6 @@ def canonical_entity_name(entity_type: str, value: str) -> str:
             return latin_tokens[0]
     if entity_type == "team":
         shortened = _TEAM_SUFFIX_PATTERN.sub("", normalized).strip()
-        alias = _TEAM_ALIASES.get(" ".join(shortened.casefold().split()))
-        if alias:
-            return alias
         latin_tokens = _LATIN_TOKEN_PATTERN.findall(shortened)
         if latin_tokens and any("\u4e00" <= char <= "\u9fff" for char in shortened):
             return latin_tokens[0].casefold()

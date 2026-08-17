@@ -13,25 +13,16 @@ published NormalizedItem
   → minimal process/skip filter
   → products + topics → possible event families
   → product/family/entity/recency candidate retrieval (bounded)
-  → esports_match identity gate (inside recall, BEFORE ranking/top-N)
   → one LLM semantic coreference decision
-      (pure esports_match routing uses the short esports_match prompt)
-  → structural validation + esports_match occurrence conflict guard
-  → esports_match continuation-first create/attach business validation
+  → structural validation
   → atomic Event/EventMention membership persistence
-      (each esports_match mention stores its own match_identity evidence)
   → importance, credibility, heat and presentation projections
-      (esports_match identity rebuilt from still-valid evidence identities)
 ```
 
 The LLM chooses `attach`, `create`, or `ignore` for each meaningful mention. It may provide
 evidence and optional presentation updates, but it does not output product/topic/message-type
 classification, deterministic event identities, market/week keys, match keys or numeric identity
-signatures. For `esports_match`, it extracts optional occurrence facts **for the current mention
-only**: participants, competition, stage/round, match date, scheduled time, series format and an
-official external match ID. Candidate identity is never re-declared by the model: it is read
-exclusively from the system-stored `canonical_anchors` in the candidate payload. These facts are
-compatibility metadata in `canonical_anchors`, not a second Event identity.
+signatures.
 
 Before that decision, the model groups the whole message by independent real-world lifecycle. A
 shared release batch, version or series, launch window, status and follow-up path forms one group;
@@ -56,9 +47,9 @@ not identity proofs. Current real-data product values are `lol_pc`, `tft`, `lol_
 `lol_universe`, `other_lol_product`, `riot_ecosystem` and `unknown`; current entity values are
 primarily teams, players, champions and leagues.
 
-Candidate recall applies product and routed-family gates before ranking. Within that bounded set it
-uses entity overlap, lightweight title/summary overlap and recency. It never proves that two
-observations are the same Event.
+Candidate recall applies product and routed-family gates before ranking. Within that bounded set
+(Events from the last 60 days) it uses entity overlap, lightweight title/summary overlap and
+recency. It never proves that two observations are the same Event.
 
 `message_type` remains upstream semantic context. The LLM uses it, together with source metadata
 and candidate mentions, to select relation, source role and materiality. Projection code derives
@@ -69,177 +60,17 @@ membership.
 
 Python verifies schema, contiguous mention indexes, candidate membership, routed family
 compatibility, evidence presence, idempotency, model-call audit, transaction atomicity and
-projection refresh. It does not impose message-type or event-family mention limits or generally
-verify semantic equivalence. The narrow `esports_match` exceptions:
-
-- **Attach guard (apply-time fence).** When both the mention and candidate state incompatible
-  match dates or external match IDs, Python rejects the attach. It rejects incompatible stages or
-  rounds only when both identities explicitly establish the same competition. Missing
-  occurrence fields remain a semantic model decision.
-- **Identity gate (pre-LLM, before ranking/top-N).** `esports_match` identity filtering runs
-  **inside the recall loop, before ranking and the top-N truncation** — never after it: a
-  structurally conflicting candidate dropped only after the top-N cut has already consumed a slot
-  and silently evicted the true candidate ranked behind a batch of conflicting ones, forcing a
-  false split. The incoming signal is extracted conservatively from the message's own team
-  entities: exactly two `role=core` team entities are the current match subject; otherwise exactly
-  two team entities total; otherwise the incoming participants are *unknown* and no participant
-  filtering happens. Python drops candidates with a hard identity conflict against that signal:
-  explicitly different participants, `external_match_id`, `match_date`, `scheduled_at`, `stage` or
-  `round`. A one-sided missing field is *unknown*, never a conflict; equal participants are a
-  positive compatibility signal but never proof of the same occurrence. The LLM only sees
-  candidates that could still be the same match. This gate is a separate layer from the 7-day
-  recall boundary, and other families never pass through it.
-- **Continuation-first create guard (model business validation).** For `esports_match`, a
-  `create` is rejected before persistence only when there is exactly one compatible candidate with
-  **strong positive same-occurrence evidence** — an equal explicit `external_match_id` (decisive on
-  its own, even without participants), participants plus an equal explicit `match_date`, participants
-  plus an equal explicit `scheduled_at` (full datetime, never a bare date), or participants plus
-  equal `competition`/`stage`/`round`; and no hard occurrence conflict. This is a *business
-  validation error* fed back to the model through the retry loop. It is never a deterministic forced
-  attach, and *absence of a conflict is never proof of the same occurrence*: same-participant
-  messages with no conflict are left to the model's semantic judgment. Crucially, this strong
-  structured evidence is the **Python deterministic guard threshold, not the LLM's attach
-  threshold**; when evidence is ambiguous (zero or multiple strong-evidence candidates) the LLM
-  keeps full semantic control and may still attach via semantic continuation.
-- **Subject contract (model business validation).** `esports_match` **create** must carry exactly
-  **2 distinct normalized participants** — an explicit `external_match_id` is additional strong
-  identity evidence but never substitutes for the two sides. `esports_match` **attach** must carry
-  at least **1 explicit participant** (a follow-up such as “JDG 拿下第一局” may name only one side).
-  `match_identity={}` is rejected for both actions, so an identity-unknown concrete match Event is
-  never created and no attach can join a concrete match without naming any side; not every
-  date/stage/round field is required.
-
-## esports_match continuation-first
-
-Once a match has entered `esports_match`, its observed state is a single concrete occurrence's
-lifecycle. `0:0 → 1:0 → 1:1 → 2:1 → finished → final result` must remain **one** Event. Score
-changes, winner becoming known, live→finished transitions and advancement/elimination results are
-`material_update`s of the existing match, never reasons to `create`. The prompt teaches the model
-to attach score/result/winner/advancement updates to the existing match, while two different
-recorded occurrences of the same two teams must `create` a new Event. The only conditions that
-deterministically justify a new `esports_match` Event are a genuinely different occurrence —
-explicitly different `match_date`, `stage`, `round`, `scheduled_at` or `external_match_id` — or the
-absence of any reasonably compatible existing candidate.
-
-Python enforces continuation-first **only** on strong positive same-occurrence evidence. There is no
-score-regex or Chinese keyword parser driving it: a create is rejected either because a strong fact
-proves this message continues an existing match, or it is left to the LLM. Formats like `2-1`, `2:1`
-or a natural-language result ("BLG 让一追二击败 TES") are treated identically because validation
-depends on structured occurrence facts, not its wording.
-
-- `esports_schedule` carries pre-match fixtures, schedules and opening arrangements, and may be a
-  separate Event from the in-progress match. Once a match actually begins and pushes state, it
-  belongs to `esports_match` and subsequent score/result/advancement states must continue that
-  Event.
-- The Python strong-evidence guard is deliberately strict and conservative. The LLM's **attach**
-  judgment is intentionally looser: it may conclude two mentions are the same match from **semantic
-  continuation evidence** — equal participants plus a continuous lifecycle (score advancing,
-  live→finished, winner resolved) plus a recent candidate plus agreeing competition/stage context —
-  even when no strong structured fact is present, or when only participants are shared but the
-  lifecycle state is clearly continuous. Same participants alone are never enough, and if occurrence
-  information is insufficient the model creates a new Event only with positive reason; it must not
-  `create` merely because a strong structured fact is absent.
-- `match_identity` is occurrence-compatibility metadata inside `canonical_anchors`; it is used for
-  hard-conflict fencing, strong same-occurrence evidence and model context, not a second Event
-  identity. `event_id` remains the only identity. `match_date`
-  compares by date; `scheduled_at` (when both sides provide it) compares by full normalized datetime,
-  so two matches on the same day at different times are distinct occurrences. A one-sided
-  `match_date` vs a one-sided `scheduled_at` may prove a date-level conflict but never exact
-  `scheduled_at` equality. `candidate_match_identity` is **removed**: candidate identity is read only
-  from system-stored `canonical_anchors`; the model never re-declares or back-fills candidate
-  identity.
-- **Participants conflict rule.** Participants are a match subject, compared through normalized
-  canonical entity names. When both sides explicitly provide participants and the normalized sets
-  differ, that is a **hard identity conflict** — candidate JDG/LGD vs incoming WBG/IG is
-  incompatible even on the same date. The only tolerated shape is one-sided follow-up evidence: a
-  single named side that belongs to the candidate's participants (“JDG 拿下第一局” against a
-  JDG/LGD candidate). A missing participants side is *unknown*, not a conflict; equal participants
-  are a positive compatibility signal but never proof of the same occurrence.
-- **Subject contract.** `esports_match` create requires exactly 2 distinct normalized participants;
-  attach requires at least 1 explicit participant; `match_identity={}` fails business validation
-  for both actions and the model must retry or ignore. An `external_match_id` is additional strong
-  evidence, never a substitute for the two sides.
-- **Short esports_match prompt.** A message whose `possible_event_families == ["esports_match"]` is
-  aggregated with a dedicated short prompt covering only concrete-match continuation semantics
-  (attach = continuation/score/result/winner/advancement of the same match; create = a clearly
-  different concrete match with no compatible candidate; ignore = insufficient content). Every
-  other routing keeps the general prompt and unchanged behavior.
-- **Mention identity evidence.** Every `esports_match` create/attach mention persists the match
-  identity it described at its own evidence time in
-  `EventMention.structured_fact_changes.match_identity`. Projection restore rebuilds the Event
-  identity by merging the still-valid material mentions' stored identities in evidence order (hard
-  conflicts are never silently merged), restores the two participants into `canonical_anchors`,
-  falls back an empty title to the deterministic `A 对阵 B`, and falls back an empty summary to
-  `latest_development` — never to an "Unknown Match" shell, never via an LLM call.
-- **Shell events.** An `esports_match` Event needs a non-empty title and exactly 2 match
-  participants to exist as a normal Event. A shell Event — empty title, participants ≠ exactly 2,
-  conflicting member identities, or no recoverable material evidence — is never recalled as an
-  attach candidate, and repair/rebuild deletes such orphan/invalid Events instead of keeping an
-  empty shell.
-- `esports_match_same_occurrence_evidence()` is the single helper deciding whether Python may
-  deterministic-reject a continuation `create` and whether the repair audit flags two Events as
-  strong same-occurrence duplicates. It is deliberately conservative and never promotes
-  "no conflict" to "same match". `esports_match_identity_conflict()` is the deterministic
-  identity-compatibility layer applied inside `esports_match` recall.
-
-## Candidate recall by family
-
-Candidate retrieval is family-aware and applies the routed-family gate **in SQL before the bounded
-candidate limit**: `esports_match` uses a recent **7-day** search boundary (`last_seen_at`), while
-every other family keeps the original recall window (365 days). Because the family filter and its
-window are applied in the SQL query that precedes `ORDER BY ... LIMIT 500`, unrelated families
-cannot consume the bounded candidate budget and starve the family that actually needs recall. The
-7-day bound and its recency score are a *search boundary only* — never a match identity rule. Two
-clearly distinct matches inside 7 days still create two Events; one match is never merged across
-the boundary. Message publication time is never treated as match identity.
-
-## latest_development projection
-
-`latest_development`, `last_material_update_at` and `latest_update_message_id` all point at the
-same thing: the latest **still-valid material_update by evidence time** with a deterministic
-tie-break (`evidence_time`, then `EventMention.id`). This is not the last-processed message nor the
-largest revision. A late-reprocessed older message receives a higher `EventRevision.revision` but an
-older evidence time, so the projection restore replays the still-valid material-update patches in
-evidence order (never the max revision), and a revision invalidation can deterministically rebuild
-the correct projection.
-
-Each material-update `EventRevision` records its **own mention-specific projection patch** — only
-the presentation fields that mention contributed. It never stores a whole-Event snapshot taken after
-processing, so a message reprocessed late cannot bake the then-current global projection into its
-own revision and later resurrect the wrong state. On invalidation, restore:
-
-1. clears a **clean projection baseline** (`title`/`summary`/`latest_development`/`lifecycle_status`/
-   `canonical_anchors`/`key_facts` back to empty defaults) so evidence left by an invalidated mention
-   can never survive;
-2. collects the still-valid material-update mentions;
-3. looks up each mention's recorded projection patch;
-4. replays the patches in evidence order (stable tie-break), applying only the fields present.
-
-`corroboration_only`, `duplicate` and `context_only` mentions never advance
-`latest_development`, `last_material_update_at` or `latest_update_message_id`.
-
-## material_update projection contract
-
-`latest_development`, `last_material_update_at` and `latest_update_message_id` all point at the
-same thing: the latest **still-valid material_update by evidence time** with a deterministic
-tie-break (`evidence_time`, then `EventMention.id`). To keep that guarantee, every `material_update`
-attach must provide a projection that at least sets `latest_development` — each real development
-must describe what happened — while `corroboration_only` / `duplicate` / `context_only` attaches
-must not carry a projection and never advance these three fields.
+projection refresh. It does not impose message-type or event-family mention limits and does not
+verify event identity, patch/match/market/week signatures, or semantic equivalence of two messages.
 
 ## Removed duplicate NLP
 
 The retired event-identity parsers were deleted. Their regexes and deterministic
 parsers for weekly rotations, mythic-shop market/week, esports team pairs, relative dates, patch
-signatures and strong-anchor identity are not part of Event Aggregation. The score-regex
-(`_MATCH_SCORE_PATTERN`) and Chinese match-state keyword table (`_MATCH_STATE_TERMS`) are removed
-too: continuation-first membership is decided by structured occurrence facts, never by parsing score
-formats or natural-language result keywords, so `2:1`, `2-1` and "让一追二击败" are handled
-identically. Remaining regexes belong to upstream Message Processing/OCR or generic token overlap
-and are not event identity rules. The aggregation path does not use upstream hotfix signals or
-message-type branches to determine Event count or identity. The `esports_match` guard compares
-model-extracted structured facts, not parsed team names or match dates derived from message
-publication timestamps.
+signatures and strong-anchor identity are not part of Event Aggregation. Remaining regexes belong
+to upstream Message Processing/OCR or generic token overlap and are not event identity rules. The
+aggregation path does not use upstream hotfix signals or message-type branches to determine Event
+count or identity.
 
 ## Evaluation boundary
 

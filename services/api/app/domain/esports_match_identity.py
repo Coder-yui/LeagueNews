@@ -130,6 +130,20 @@ def esports_match_identity_conflict(
                 f"occurrence 日期明确冲突：candidate={existing_day}, message={incoming_day}"
             )
 
+    # Stage and round labels are deterministic occurrence boundaries only when
+    # both identities establish the same competition. An isolated label can be
+    # an advancement destination or other contextual wording, not a match stage.
+    existing_competition = _normalized_scalar(existing_identity.get("competition"))
+    incoming_competition = _normalized_scalar(incoming_identity.get("competition"))
+    same_competition = (
+        existing_competition
+        and incoming_competition
+        and (
+            existing_competition == incoming_competition
+            or existing_competition in incoming_competition
+            or incoming_competition in existing_competition
+        )
+    )
     for key in ("stage", "round"):
         existing_value = _normalized_scalar(existing_identity.get(key))
         incoming_value = _normalized_scalar(incoming_identity.get(key))
@@ -143,6 +157,8 @@ def esports_match_identity_conflict(
         # explicit conflicts. Structured fields (dates, datetimes, external ids)
         # above still compare exactly.
         if (
+            same_competition
+            and
             existing_value
             and incoming_value
             and existing_value != incoming_value

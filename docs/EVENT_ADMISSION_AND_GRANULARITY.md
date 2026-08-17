@@ -64,14 +64,17 @@ conflict guard to attach decisions. Inside `esports_match` candidate recall — 
 the top-N truncation** — an **identity gate** drops candidates with a hard identity conflict against
 the conservatively extracted incoming match subject (exactly two `role=core` team entities, or
 exactly two team entities total; otherwise the incoming participants are unknown and no participant
-filtering happens). Explicitly different participants, external match ID, match date, scheduled
-time, stage or round are hard conflicts; a one-sided missing field is unknown, not a conflict.
+filtering happens). Explicitly different participants, external match ID, match date or scheduled
+time are hard conflicts. A different stage or round is a hard conflict only when both identities also
+explicitly establish the same competition; otherwise it can be contextual wording rather than an
+occurrence boundary. A one-sided missing field is unknown, not a conflict.
 Filtering before the top-N cut guarantees conflicting candidates never consume a candidate slot and
 evict the true candidate ranked behind them. Candidate identity is read only from the
 system-stored `canonical_anchors`; the model never re-declares or back-fills candidate identity, so
 an identity-deficient older candidate stays unknown instead of being patched by the model. When
-both sides provide incompatible match dates, external match IDs, stages or rounds, attach is
-rejected. A field missing on either side is not a hard conflict and the semantic decision remains
+both sides provide incompatible match dates or external match IDs, attach is rejected. Incompatible
+stages or rounds reject attach only when both sides explicitly establish the same competition. A field
+missing on either side is not a hard conflict and the semantic decision remains
 with the model. Message publication timestamps are never treated as match dates.
 
 An `esports_match` Event needs a non-empty title and exactly 2 match participants to exist as a

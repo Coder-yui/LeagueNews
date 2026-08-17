@@ -20,6 +20,7 @@ from app.domain.esports_match_identity import (
     placeholder_match_participants,
     ungrounded_match_identity_fields,
 )
+from app.domain.message_entities import canonical_entity_name
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
@@ -846,8 +847,16 @@ def test_missing_incoming_match_date_does_not_block_semantic_attach() -> None:
             {"external_match_id": "lpl-101"},
             "external_match_id",
         ),
-        ({"stage": "Group Stage"}, {"stage": "Playoffs"}, "stage"),
-        ({"round": "Upper Round 1"}, {"round": "Lower Round 2"}, "round"),
+        (
+            {"competition": "LPL", "stage": "Group Stage"},
+            {"competition": "LPL", "stage": "Playoffs"},
+            "stage",
+        ),
+        (
+            {"competition": "LPL", "round": "Upper Round 1"},
+            {"competition": "LPL", "round": "Lower Round 2"},
+            "round",
+        ),
         (
             {"scheduled_at": "2026-08-14T23:00:00+08:00"},
             {"scheduled_at": "2026-08-16T19:00:00+08:00"},
@@ -2180,10 +2189,41 @@ def test_esports_match_abbreviated_stage_is_not_a_hard_conflict() -> None:
     # The strong same-occurrence evidence (participants + equal match_date) must
     # stay visible to the create guard and the duplicate audit.
     assert esports_match_same_occurrence_evidence(existing, incoming) is not None
-    # Non-containing, genuinely different labels remain explicit conflicts.
+    # Non-containing, genuinely different labels remain explicit conflicts when
+    # both identities establish the same competition.
     assert esports_match_identity_conflict(
-        {"stage": "常规赛"}, {"stage": "季后赛"}
+        {"competition": "LPL", "stage": "常规赛"},
+        {"competition": "LPL", "stage": "季后赛"},
     ) == "stage 明确冲突：candidate=常规赛, message=季后赛"
+
+
+def test_esports_match_aliases_keep_same_date_lifecycle_on_one_event() -> None:
+    """Full team names and abbreviations must identify the same match sides."""
+    assert canonical_entity_name("team", "Invictus Gaming") == "IG"
+    assert canonical_entity_name("team", "Weibo Gaming") == "WBG"
+
+    existing = {
+        "participants": ["WBG", "IG"],
+        "competition": "2026LPL第三赛段",
+        "stage": "常规赛组内赛",
+        "match_date": "2026-08-16",
+    }
+    incoming = {
+        "participants": ["Invictus Gaming", "Weibo Gaming"],
+        "stage": "骑士之路",
+        "match_date": "2026-08-16",
+    }
+    assert esports_match_identity_conflict(existing, incoming) is None
+    assert esports_match_same_occurrence_evidence(existing, incoming) is not None
+
+    mention = _continuation_mention(match_identity=incoming)
+    error = esports_match_create_continuation_error(
+        mention,
+        candidates={123: _esports_candidate(event_id=123, anchors=existing)},
+        message={"title": "WBG 2:1 IG", "content_form": "original"},
+    )
+    assert error is not None
+    assert "123" in error
 
 
 def test_esports_match_placeholder_participants_rejected() -> None:
@@ -2899,6 +2939,7 @@ def test_v10_case_f_same_date_different_round_conflict_allows_create() -> None:
     mention = _continuation_mention(
         match_identity={
             "participants": ["BLG", "TES"],
+            "competition": "LPL",
             "match_date": "2026-08-16",
             "round": "lower-final",
         }
@@ -2907,6 +2948,7 @@ def test_v10_case_f_same_date_different_round_conflict_allows_create() -> None:
         event_id=123,
         anchors={
             "participants": ["BLG", "TES"],
+            "competition": "LPL",
             "match_date": "2026-08-16",
             "round": "upper-final",
         },

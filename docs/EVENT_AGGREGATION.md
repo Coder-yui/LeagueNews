@@ -62,7 +62,7 @@ metadata; they are not a parallel identity mechanism.
   conflict is **never** treated as proof of the same occurrence, and same participants alone are never
   enough; if occurrence information is insufficient, the model creates only when it has positive
   reason this is a new match. The apply layer keeps a hard fencing conflict guard (explicit
-  `match_date`, `scheduled_at`, `external_match_id`, `stage`, or `round` conflicts reject attach after
+  `match_date`, `scheduled_at`, `external_match_id`, or same-competition `stage`/`round` conflicts reject attach after
   the model decision and again before membership is written; missing identity fields are not
   conflicts; one-sided `match_date` vs `scheduled_at` can still prove a date-level conflict but never
   exact `scheduled_at` equality). An `esports_match` Event represents one concrete match or series

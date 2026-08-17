@@ -73,7 +73,8 @@ projection refresh. It does not impose message-type or event-family mention limi
 verify semantic equivalence. The narrow `esports_match` exceptions:
 
 - **Attach guard (apply-time fence).** When both the mention and candidate state incompatible
-  match dates, external match IDs, stages or rounds, Python rejects the attach. Missing
+  match dates or external match IDs, Python rejects the attach. It rejects incompatible stages or
+  rounds only when both identities explicitly establish the same competition. Missing
   occurrence fields remain a semantic model decision.
 - **Identity gate (pre-LLM, before ranking/top-N).** `esports_match` identity filtering runs
   **inside the recall loop, before ranking and the top-N truncation** — never after it: a

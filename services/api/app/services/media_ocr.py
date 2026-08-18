@@ -4,10 +4,13 @@ from functools import lru_cache
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance
 from rapidocr import RapidOCR
+
+from app.core.config import settings
 
 
 class OCRProcessingError(RuntimeError):
@@ -33,10 +36,26 @@ def get_ocr_engine() -> RapidOCR:
 
 
 def resolve_public_media_path(storage_path: str) -> Path:
-    workspace_root = Path(__file__).resolve().parents[4]
-    public_root = (workspace_root / "apps" / "web" / "public").resolve()
-    candidate = (public_root / storage_path.lstrip("/")).resolve()
-    if not candidate.is_relative_to(public_root):
+    path = urlparse(storage_path).path
+    media_root = settings.resolved_media_root.resolve()
+    api_prefixes = {
+        "/api/v1/media-assets/files/": "private",
+        "/api/v1/media-assets/published/": "published",
+    }
+    candidate: Path | None = None
+    for prefix, visibility in api_prefixes.items():
+        if path.startswith(prefix):
+            parts = Path(path[len(prefix) :]).parts
+            if len(parts) != 2 or any(part in {"", ".", ".."} for part in parts):
+                raise OCRProcessingError(f"invalid media path: {storage_path}")
+            candidate = media_root / visibility / parts[0] / parts[1]
+            break
+    if candidate is None and path.startswith("/media/"):
+        candidate = media_root / path.removeprefix("/media/")
+    if candidate is None:
+        candidate = media_root / path.lstrip("/")
+    candidate = candidate.resolve()
+    if not candidate.is_relative_to(media_root):
         raise OCRProcessingError("media path escapes the public directory")
     if not candidate.is_file():
         raise OCRProcessingError(f"media file not found: {storage_path}")

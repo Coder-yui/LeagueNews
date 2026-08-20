@@ -62,6 +62,14 @@ def select_daily_sections(
     candidates: list[DailyReportCandidate],
 ) -> dict[str, list[DailyReportCandidate]]:
     """Apply V1 eligibility, event deduplication, ranking, and section limits."""
+    eligible = eligible_daily_candidates(candidates)
+    deduplicated = deduplicate_daily_candidates(eligible)
+    return rank_daily_sections(assign_daily_sections(deduplicated))
+
+
+def eligible_daily_candidates(
+    candidates: list[DailyReportCandidate],
+) -> list[DailyReportCandidate]:
     eligible = [
         candidate
         for candidate in candidates
@@ -76,22 +84,42 @@ def select_daily_sections(
         ),
         reverse=True,
     )
+    return eligible
+
+
+def deduplicate_daily_candidates(
+    candidates: list[DailyReportCandidate],
+) -> list[DailyReportCandidate]:
+    """Keep the highest-ranked message for each already-aggregated event."""
 
     seen_event_ids: set[int] = set()
     deduplicated: list[DailyReportCandidate] = []
-    for candidate in eligible:
+    for candidate in candidates:
         event_ids = set(candidate.event_ids)
         if event_ids and event_ids & seen_event_ids:
             continue
         seen_event_ids.update(event_ids)
         deduplicated.append(candidate)
+    return deduplicated
 
+
+def assign_daily_sections(
+    candidates: list[DailyReportCandidate],
+) -> dict[str, list[DailyReportCandidate]]:
     sections = {name: [] for name in DAILY_REPORT_SECTION_LIMITS}
-    for candidate in deduplicated:
-        section = daily_report_section(candidate.products)
-        if len(sections[section]) < DAILY_REPORT_SECTION_LIMITS[section]:
-            sections[section].append(candidate)
+    for candidate in candidates:
+        sections[daily_report_section(candidate.products)].append(candidate)
     return sections
+
+
+def rank_daily_sections(
+    sections: dict[str, list[DailyReportCandidate]],
+) -> dict[str, list[DailyReportCandidate]]:
+    """Apply the stable V2 order and per-section limits."""
+    return {
+        section: list(candidates[: DAILY_REPORT_SECTION_LIMITS[section]])
+        for section, candidates in sections.items()
+    }
 
 
 def generate_daily_report(db: Session, report_date: date) -> DailyReport:
@@ -139,6 +167,15 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
     ]
     sections = select_daily_sections(candidates)
 
+    return persist_daily_report(db, report_date, sections)
+
+
+def persist_daily_report(
+    db: Session,
+    report_date: date,
+    sections: dict[str, list[DailyReportCandidate]],
+) -> DailyReport:
+    """Persist an already-reviewed selection without rerunning selection rules."""
     report = db.scalar(select(DailyReport).where(DailyReport.report_date == report_date))
     if report is None:
         report = DailyReport(report_date=report_date, status="published")

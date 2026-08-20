@@ -58,8 +58,8 @@ class PipelineCorrection(Base):
     __table_args__ = (
         CheckConstraint(
             "restart_from_stage IN "
-            "('relevance', 'image_ocr', 'translation', 'message_analysis', "
-            "'importance')",
+            "('evidence', 'relevance', 'image_ocr', 'media', 'translation', "
+            "'message_analysis', 'importance', 'evidence_gate', 'publication')",
             name="ck_pipeline_corrections_restart_stage",
         ),
         CheckConstraint(
@@ -92,6 +92,14 @@ class ProcessingCheckpoint(Base):
         index=True,
     )
     stage: Mapped[str] = mapped_column(String(40), index=True)
+    graph_name: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    graph_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    state_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True
+    )
+    upstream_checkpoint_ids: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
     output_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     artifact_references: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     knowledge_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -108,7 +116,8 @@ class ProcessingCheckpoint(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "stage IN ('relevance', 'image_ocr', 'translation', 'message_analysis', 'importance')",
+            "stage IN ('evidence', 'relevance', 'image_ocr', 'media', 'translation', "
+            "'message_analysis', 'importance', 'evidence_gate', 'publication')",
             name="ck_processing_checkpoints_stage",
         ),
         CheckConstraint(

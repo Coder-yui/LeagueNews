@@ -15,6 +15,7 @@ from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.repositories.events import current_event_mention_conditions
+from app.services.editorial_overrides import set_automatic_projection_field
 
 
 _SOURCE_ROLE_RANK = {
@@ -104,27 +105,41 @@ def _restore_event_projection(
 
     if snapshots:
         _key, snapshot = max(snapshots, key=lambda value: value[0])
-        event.title = str(snapshot.get("title") or event.title)
-        event.current_summary = str(
-            snapshot.get("current_summary") or event.current_summary
+        set_automatic_projection_field(
+            event, "title", str(snapshot.get("title") or event.title)
         )
-        event.latest_development = str(
-            snapshot.get("latest_development") or ""
+        set_automatic_projection_field(
+            event,
+            "current_summary",
+            str(snapshot.get("current_summary") or event.current_summary),
+        )
+        set_automatic_projection_field(
+            event,
+            "latest_development",
+            str(snapshot.get("latest_development") or ""),
         )
         key_facts = snapshot.get("key_facts")
         if isinstance(key_facts, list):
-            event.key_facts = key_facts
+            set_automatic_projection_field(event, "key_facts", key_facts)
         canonical_anchors = snapshot.get("canonical_anchors")
         if isinstance(canonical_anchors, dict):
-            event.canonical_anchors = canonical_anchors
+            set_automatic_projection_field(
+                event, "canonical_anchors", canonical_anchors
+            )
         lifecycle_status = snapshot.get("lifecycle_status")
-        event.lifecycle_status = (
-            str(lifecycle_status) if lifecycle_status else "developing"
+        set_automatic_projection_field(
+            event,
+            "lifecycle_status",
+            str(lifecycle_status) if lifecycle_status else "developing",
         )
     else:
         # Legacy revisions do not have a projection snapshot. Keep their stable
         # label, but never let an old lifecycle status survive evidence removal.
-        event.lifecycle_status = "developing" if material_mentions else "stale"
+        set_automatic_projection_field(
+            event,
+            "lifecycle_status",
+            "developing" if material_mentions else "stale",
+        )
 
 
 def _refresh_event_times(event: Event, mentions: list[EventMention]) -> None:
@@ -241,13 +256,13 @@ def refresh_event_metrics(
             "disputed",
             "stale",
         }:
-            event.lifecycle_status = "confirmed"
+            set_automatic_projection_field(event, "lifecycle_status", "confirmed")
         elif level == "denied":
-            event.lifecycle_status = "denied"
+            set_automatic_projection_field(event, "lifecycle_status", "denied")
         elif level == "disputed":
-            event.lifecycle_status = "disputed"
+            set_automatic_projection_field(event, "lifecycle_status", "disputed")
         elif event.lifecycle_status in {"confirmed", "denied", "disputed"}:
-            event.lifecycle_status = "developing"
+            set_automatic_projection_field(event, "lifecycle_status", "developing")
 
         heat_evidence = [
             HeatEvidence(

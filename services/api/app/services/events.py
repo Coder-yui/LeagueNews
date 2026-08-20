@@ -15,6 +15,7 @@ from app.domain.event_types import (
 )
 from app.models.event import Event, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
+from app.services.editorial_overrides import set_automatic_projection_field
 from app.repositories.events import (
     count_active_messages,
     find_mention,
@@ -381,17 +382,23 @@ def add_event_mention(
                 event.latest_update_message_id = item.id
             event.current_revision += 1
             if is_latest_evidence and title is not None:
-                event.title = title
+                set_automatic_projection_field(event, "title", title)
             if is_latest_evidence and current_summary is not None:
-                event.current_summary = current_summary
+                set_automatic_projection_field(event, "current_summary", current_summary)
             if is_latest_evidence and latest_development is not None:
-                event.latest_development = latest_development
+                set_automatic_projection_field(
+                    event, "latest_development", latest_development
+                )
             if is_latest_evidence and lifecycle_status is not None:
-                event.lifecycle_status = lifecycle_status
+                set_automatic_projection_field(
+                    event, "lifecycle_status", lifecycle_status
+                )
             if is_latest_evidence and canonical_anchors is not None:
-                event.canonical_anchors = dict(canonical_anchors)
+                set_automatic_projection_field(
+                    event, "canonical_anchors", dict(canonical_anchors)
+                )
             if is_latest_evidence and key_facts is not None:
-                event.key_facts = list(key_facts)
+                set_automatic_projection_field(event, "key_facts", list(key_facts))
             db.add(
                 EventRevision(
                     event_id=event.id,

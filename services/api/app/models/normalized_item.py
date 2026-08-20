@@ -54,6 +54,7 @@ class NormalizedItem(Base):
     analysis_model: Mapped[str] = mapped_column(String(120))
     analysis_version: Mapped[str] = mapped_column(String(30), default="message-processing-v1.1")
     current_revision: Mapped[int] = mapped_column(Integer, default=1)
+    manual_override_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
     publication_status: Mapped[str] = mapped_column(String(30), default="published", index=True)
     withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     withdrawal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -142,6 +143,9 @@ class NormalizedItemRevision(Base):
         ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     change_note: Mapped[str] = mapped_column(Text, default="published")
+    revision_source: Mapped[str] = mapped_column(String(20), default="workflow")
+    editor_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     normalized_item: Mapped[NormalizedItem] = relationship(back_populates="revisions")
@@ -155,5 +159,9 @@ class NormalizedItemRevision(Base):
         CheckConstraint(
             "revision >= 1",
             name="ck_normalized_item_revisions_revision_positive",
+        ),
+        CheckConstraint(
+            "revision_source IN ('workflow', 'manual')",
+            name="ck_normalized_item_revisions_source",
         ),
     )

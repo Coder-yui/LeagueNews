@@ -99,6 +99,7 @@ class Event(Base):
         String(80), default=AGGREGATION_POLICY_VERSION
     )
     current_revision: Mapped[int] = mapped_column(Integer, default=1)
+    manual_override_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -249,6 +250,9 @@ class EventRevision(Base):
     summary: Mapped[str] = mapped_column(Text)
     change_note: Mapped[str] = mapped_column(Text)
     evidence_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    revision_source: Mapped[str] = mapped_column(String(20), default="workflow")
+    editor_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped[Event] = relationship(back_populates="revisions")
@@ -256,6 +260,10 @@ class EventRevision(Base):
     __table_args__ = (
         UniqueConstraint("event_id", "revision", name="uq_event_revisions_event_revision"),
         CheckConstraint("revision >= 1", name="ck_event_revisions_revision_positive"),
+        CheckConstraint(
+            "revision_source IN ('workflow', 'manual')",
+            name="ck_event_revisions_source",
+        ),
     )
 
 
@@ -296,7 +304,7 @@ class EventAggregationRun(Base):
         ),
         CheckConstraint(
             "outcome IS NULL OR outcome IN ('skipped_by_minimal_filter', 'applied', "
-            "'ignored', 'model_error', 'apply_error')",
+            "'ignored', 'review_rejected', 'model_error', 'apply_error')",
             name="ck_event_runs_outcome",
         ),
         CheckConstraint(

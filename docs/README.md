@@ -13,6 +13,8 @@
 ## 架构与数据
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)：当前系统边界、目录、API 与数据表职责。
+- [`V3_LANGGRAPH_ARCHITECTURE.md`](V3_LANGGRAPH_ARCHITECTURE.md)：v3 LangGraph-first 探索架构与边界。
+- [`V3_LOCAL_EXPERIMENTATION.md`](V3_LOCAL_EXPERIMENTATION.md)：v3 本地实验结构、版本与产物约束。
 - [`RAW_ITEM_CONTENT_MODEL.md`](RAW_ITEM_CONTENT_MODEL.md)：不可变 RawItem 与 ContentBlock v2。
 - [`CONNECTOR_ARCHITECTURE.md`](CONNECTOR_ARCHITECTURE.md)：Connector、Source 与 ingestion 边界。
 

@@ -79,6 +79,7 @@ async def build_translation(
     media_extractions: list[MediaExtraction],
     glossary: list[dict[str, object]] | None = None,
     rules: list[str] | None = None,
+    client: LLMClient | None = None,
 ) -> TranslationData:
     source_text = text_from_content_blocks(raw_item.content_blocks)
     source_title = raw_item.native_title
@@ -144,7 +145,7 @@ async def build_translation(
         }
         for extraction in media_extractions
     ]
-    client = LLMClient()
+    client = client or LLMClient()
     translated_title = ""
     translated_result_blocks = []
     translated_result_extractions = []

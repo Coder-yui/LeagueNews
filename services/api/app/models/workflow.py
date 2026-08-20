@@ -36,6 +36,10 @@ class ProcessingRun(Base):
     outcome: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     current_stage: Mapped[str] = mapped_column(String(40), index=True)
     execution_mode: Mapped[str] = mapped_column(String(20), default="manual", index=True)
+    graph_name: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    graph_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    state_version: Mapped[int | None] = mapped_column(nullable=True)
+    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     correction_id: Mapped[int | None] = mapped_column(
         ForeignKey("pipeline_corrections.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -66,8 +70,9 @@ class ProcessingRun(Base):
             name="ck_processing_runs_outcome",
         ),
         CheckConstraint(
-            "current_stage IN ('relevance', 'image_ocr', 'translation', "
-            "'message_analysis', 'importance')",
+            "current_stage IN ('evidence', 'relevance', 'image_ocr', 'media', "
+            "'translation', 'message_analysis', 'importance', 'evidence_gate', "
+            "'publication')",
             name="ck_processing_runs_stage",
         ),
         CheckConstraint(
@@ -112,8 +117,8 @@ class ReviewTask(Base):
             name="ck_review_tasks_status",
         ),
         CheckConstraint(
-            "stage IN ('relevance', 'image_ocr', 'translation', "
-            "'message_analysis', 'importance')",
+            "stage IN ('relevance', 'image_ocr', 'media', 'translation', "
+            "'message_analysis', 'importance', 'evidence_gate')",
             name="ck_review_tasks_stage",
         ),
         CheckConstraint(

@@ -427,6 +427,7 @@ def apply_membership_transaction(
     result: EventAggregationResult,
     candidates: list[dict[str, Any]],
     additional_event_ids: set[int] | None = None,
+    refresh_metrics: bool = True,
 ) -> tuple[int, set[int]]:
     """Apply already-decided membership. The caller owns the surrounding transaction."""
 
@@ -505,7 +506,8 @@ def apply_membership_transaction(
         affected_event_ids.add(event.id)
         applied_count += 1
 
-    refresh_event_metrics(db, affected_event_ids | (additional_event_ids or set()))
+    if refresh_metrics:
+        refresh_event_metrics(db, affected_event_ids | (additional_event_ids or set()))
     return applied_count, affected_event_ids
 
 

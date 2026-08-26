@@ -384,6 +384,7 @@ def test_create_persists_membership_then_refreshes_projections() -> None:
             title="26.17 版本平衡调整",
             importance_score=0.81,
             importance_profile="leak_gameplay",
+            published_at=datetime.now(UTC),
         )
         db.commit()
         client = StaticClient(_result(_create_decision()))

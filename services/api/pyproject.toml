@@ -19,7 +19,7 @@ dependencies = [
   "selectolax>=0.3.32,<1",
   "sqlalchemy>=2.0,<3",
   "trafilatura>=2.0,<3",
-  "twscrape>=0.17,<1",
+  "twscrape>=0.20.1,<1",
   "uvicorn[standard]>=0.34,<1",
   "aiotieba>=4.7,<5",
 ]

@@ -166,13 +166,13 @@ class WeiboConnector(BaseConnector[WeiboStatusRecord]):
             full_text or clean_text(mblog.get("text_raw") or mblog.get("text"))
         )
         text = _remove_attachment_short_urls(text, mblog)
-        if not status_id or not uid or not text:
-            raise WeiboConnectorCollectionError(
-                f"Weibo status is missing id, author, or text: {status_id or 'unknown'}"
-            )
-
         url = f"https://weibo.com/{uid}/{bid or status_id}"
-        blocks: list[dict[str, Any]] = [{"type": "paragraph", "text": text}]
+        # Media-only posts are valid source evidence even when Weibo returns no
+        # usable body text. The evidence gate will classify them as insufficient
+        # evidence downstream instead of failing the whole collection run.
+        blocks: list[dict[str, Any]] = []
+        if text:
+            blocks.append({"type": "paragraph", "text": text})
         for image_url in _picture_urls(mblog):
             blocks.append(
                 {
@@ -222,6 +222,11 @@ class WeiboConnector(BaseConnector[WeiboStatusRecord]):
                     "text": label,
                     "source_url": link,
                 }
+            )
+
+        if not status_id or not uid or not blocks:
+            raise WeiboConnectorCollectionError(
+                f"Weibo status is missing id, author, or text: {status_id or 'unknown'}"
             )
 
         return RawItemCandidate(

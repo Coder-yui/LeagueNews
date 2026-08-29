@@ -87,6 +87,32 @@ def test_weibo_collects_long_text_images_repost_and_attachment_links() -> None:
     assert "微博投票" in item.content_blocks[5]["text"]
 
 
+def test_weibo_accepts_media_only_status() -> None:
+    connector = WeiboConnector(
+        browser_session_factory=lambda: FakeBrowserSession(
+            [
+                {
+                    "ok": 1,
+                    "data": {
+                        "list": [
+                            {
+                                "mid": "5337039736149033",
+                                "pic_ids": ["birthday-image"],
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+    )
+
+    items = asyncio.run(connector.collect(request()))
+
+    assert len(items) == 1
+    assert items[0].external_id == "5337039736149033"
+    assert [block["type"] for block in items[0].content_blocks] == ["image"]
+
+
 def test_weibo_removes_known_short_url_and_preserves_live_embed() -> None:
     mblog = load_json("weibo_timeline.json")["data"]["list"][0]
     mblog["text_raw"] = "今日比赛直播进行中 http://t.cn/AX9lp2or"

@@ -1,6 +1,7 @@
 import hashlib
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,6 +26,10 @@ from app.repositories.events import event_ids_for_normalized_item
 from app.services.event_candidates import recall_event_candidates
 from app.services.event_metrics import refresh_event_metrics
 from app.services.llm import LLMClient, execution_metadata
+from app.services.pipeline_execution import (
+    PipelineExecutionGuard,
+    assert_execution_owned,
+)
 from app.services.raw_item_versions import is_latest_raw_item
 from app.workflows.event_aggregation import (
     _message_payload,
@@ -59,9 +64,14 @@ class V2CompatibilityEventBackend:
         session_factory: SessionFactory,
         *,
         llm_factory: LLMFactory = LLMClient,
+        execution_guard: PipelineExecutionGuard | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._llm_factory = llm_factory
+        self._execution_guard = execution_guard
+
+    def _assert_execution_owned(self, db: Session) -> None:
+        assert_execution_owned(db, self._execution_guard)
 
     async def load_message(
         self, request: EventAggregationRequest
@@ -182,6 +192,7 @@ class V2CompatibilityEventBackend:
             elif stage == EventAggregationStage.LOAD_MESSAGE:
                 fingerprint = output.get("evidence_fingerprint")
                 run.input_fingerprint = str(fingerprint) if fingerprint else None
+            self._assert_execution_owned(db)
             db.commit()
 
     async def apply_membership(
@@ -204,6 +215,7 @@ class V2CompatibilityEventBackend:
                 candidates=candidates.candidates,
                 refresh_metrics=False,
             )
+            self._assert_execution_owned(db)
             db.commit()
             return EventMembershipResult(
                 applied_count=count,
@@ -223,6 +235,7 @@ class V2CompatibilityEventBackend:
         )
         with self._session_factory() as db:
             refresh_event_metrics(db, event_ids)
+            self._assert_execution_owned(db)
             db.commit()
         return EventProjectionResult(refreshed_event_ids=sorted(event_ids))
 
@@ -237,11 +250,10 @@ class V2CompatibilityEventBackend:
                 raise ValueError("event aggregation run not found")
             run.status = "completed"
             run.outcome = outcome
-            from datetime import UTC, datetime
-
             run.completed_at = datetime.now(UTC)
             if outcome in {"applied", "ignored"}:
                 run.applied_at = run.completed_at
+            self._assert_execution_owned(db)
             db.commit()
 
 

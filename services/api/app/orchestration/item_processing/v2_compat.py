@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -21,7 +22,7 @@ from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItemRevision
 from app.models.ocr_lab import OCRProfile
-from app.models.pipeline import ProcessingCheckpoint
+from app.models.pipeline import PipelineCorrection, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun
 from app.orchestration.contracts import (
@@ -50,6 +51,10 @@ from app.services.classification_source import resolve_classification_source
 from app.services.llm import LLMClient, execution_metadata
 from app.services.media_ocr import run_ocr
 from app.services.pipeline_queue import enqueue_pipeline_job
+from app.services.pipeline_execution import (
+    PipelineExecutionGuard,
+    assert_execution_owned,
+)
 from app.services.raw_item_versions import is_latest_raw_item
 from app.services.patch_table import parse_patch_table
 from app.workflows.reviewed_pipeline import (
@@ -134,9 +139,14 @@ class V2CompatibilityItemBackend:
         session_factory: SessionFactory,
         *,
         llm_factory: LLMFactory = LLMClient,
+        execution_guard: PipelineExecutionGuard | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._llm_factory = llm_factory
+        self._execution_guard = execution_guard
+
+    def _assert_execution_owned(self, db: Session) -> None:
+        assert_execution_owned(db, self._execution_guard)
 
     async def load_evidence(self, request: ItemProcessingRequest) -> EvidenceSnapshot:
         with self._session_factory() as db:
@@ -577,6 +587,7 @@ class V2CompatibilityItemBackend:
             )
             run.current_stage = checkpoint.stage.value
             db.add(record)
+            self._assert_execution_owned(db)
             db.commit()
             db.refresh(record)
             return CheckpointReceipt(
@@ -682,6 +693,14 @@ class V2CompatibilityItemBackend:
             run.status = "completed"
             run.outcome = "approved"
             run.current_stage = ProcessingStage.PUBLICATION.value
+            run.completed_at = datetime.now(UTC)
+            if run.correction_id:
+                correction = db.get(PipelineCorrection, run.correction_id)
+                if correction is not None:
+                    correction.status = "completed"
+                    correction.error_message = None
+                    correction.completed_at = run.completed_at
+            self._assert_execution_owned(db)
             db.commit()
             db.refresh(item)
             return PublicationResult(
@@ -689,17 +708,47 @@ class V2CompatibilityItemBackend:
                 normalized_item_revision=item.current_revision,
             )
 
+    async def complete(
+        self, request: ItemProcessingRequest, outcome: str
+    ) -> None:
+        if request.run_mode != RunMode.PRODUCTION:
+            return
+        with self._session_factory() as db:
+            run = db.get(ProcessingRun, request.workflow_run_id)
+            if run is None or run.raw_item_id != request.raw_item_id:
+                raise ValueError("processing run does not match graph request")
+            if run.status in {"completed", "rejected", "superseded"}:
+                return
+            run.status = "rejected" if outcome == "review_rejected" else "completed"
+            run.outcome = outcome
+            run.completed_at = datetime.now(UTC)
+            if run.correction_id:
+                correction = db.get(PipelineCorrection, run.correction_id)
+                if correction is not None:
+                    correction.status = (
+                        "cancelled" if outcome == "review_rejected" else "completed"
+                    )
+                    correction.error_message = None
+                    correction.completed_at = run.completed_at
+            self._assert_execution_owned(db)
+            db.commit()
+
 
 def create_item_processing_run(
     db: Session,
     *,
     raw_item_id: int,
     review_mode: ReviewMode = ReviewMode.AUTOMATIC,
+    supersedes_run_id: int | None = None,
+    correction_id: int | None = None,
+    restart_from_stage: ProcessingStage = ProcessingStage.EVIDENCE,
+    replay_from_run_id: int | None = None,
+    allow_existing_projection: bool = False,
 ) -> ItemProcessingRequest:
     raw_item = _load_raw(db, raw_item_id)
     if not is_latest_raw_item(db, raw_item):
         raise ValueError("raw item has been superseded by a newer revision")
-    if raw_item.normalized_item is not None:
+    if raw_item.normalized_item is not None and not allow_existing_projection:
         raise ValueError("raw item already has a normalized item")
     run = ProcessingRun(
         raw_item_id=raw_item.id,
@@ -707,6 +756,9 @@ def create_item_processing_run(
         status="running",
         current_stage=ProcessingStage.EVIDENCE.value,
         execution_mode=review_mode.value,
+        supersedes_run_id=supersedes_run_id,
+        correction_id=correction_id,
+        restart_from_stage=restart_from_stage.value,
         graph_name=ITEM_PROCESSING_GRAPH,
         graph_version=ITEM_PROCESSING_GRAPH_VERSION,
         state_version=ITEM_PROCESSING_STATE_VERSION,
@@ -720,6 +772,8 @@ def create_item_processing_run(
         raw_item_revision=raw_item.revision,
         run_mode=RunMode.PRODUCTION,
         review_mode=review_mode,
+        restart_from_stage=restart_from_stage,
+        replay_from_run_id=replay_from_run_id,
     )
     run.thread_id = request.thread_id
     db.commit()

@@ -10,11 +10,12 @@ from app.core.database import SessionLocal
 from app.models.daily_report import DailyReport
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
+from app.orchestration.daily_report.service import generate_daily_report
 from app.services.daily_reports import (
     DAILY_REPORT_TIMEZONE,
     daily_report_eligibility_conditions,
     daily_report_window,
-    generate_daily_report,
+    generate_daily_report as generate_daily_report_v2,
 )
 
 
@@ -42,11 +43,11 @@ def due_report_date(now: datetime | None = None) -> date | None:
     return report_date
 
 
-def generate_due_daily_report(
+def _due_generation(
     db: Session,
     *,
     now: datetime | None = None,
-) -> DailyReport | None:
+) -> tuple[date, datetime] | None:
     current = now or datetime.now(UTC)
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
@@ -105,22 +106,57 @@ def generate_due_daily_report(
     if has_eligible_message is None:
         return None
 
-    report = generate_daily_report(db, report_date)
+    return report_date, current
+
+
+def generate_due_daily_report(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> DailyReport | None:
+    """Synchronous compatibility helper for unit tests and one-off scripts.
+
+    The live scheduler uses ``generate_due_daily_report_v3`` below.
+    """
+
+    due = _due_generation(db, now=now)
+    if due is None:
+        return None
+    report_date, current = due
+    report = generate_daily_report_v2(db, report_date)
     report.updated_at = current.astimezone(UTC)
     db.commit()
     db.refresh(report)
     return report
 
 
-def process_due_daily_report(now: datetime | None = None) -> bool:
+async def generate_due_daily_report_v3(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> DailyReport | None:
+    due = _due_generation(db, now=now)
+    if due is None:
+        return None
+    report_date, current = due
+
+    db.commit()
+    report = await generate_daily_report(db, report_date)
+    report.updated_at = current.astimezone(UTC)
+    db.commit()
+    db.refresh(report)
+    return report
+
+
+async def process_due_daily_report(now: datetime | None = None) -> bool:
     with SessionLocal() as db:
-        return generate_due_daily_report(db, now=now) is not None
+        return await generate_due_daily_report_v3(db, now=now) is not None
 
 
 async def daily_report_scheduler_loop() -> None:
     while True:
         try:
-            process_due_daily_report()
+            await process_due_daily_report()
         except Exception:
             logger.exception("daily report scheduler iteration failed")
         await asyncio.sleep(settings.daily_report_scheduler_poll_seconds)

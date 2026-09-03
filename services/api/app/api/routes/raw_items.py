@@ -20,7 +20,7 @@ from app.services.raw_item_versions import (
     is_latest_raw_item,
     latest_raw_item_condition,
 )
-from app.workflows.reviewed_pipeline import start_item_processing
+from app.orchestration.item_processing.service import start_item_processing
 from app.services.pipeline_corrections import restart_raw_item_from_beginning
 
 router = APIRouter()

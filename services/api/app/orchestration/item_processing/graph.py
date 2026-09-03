@@ -125,6 +125,10 @@ class ItemProcessingBackend(Protocol):
         evidence_gate: EvidenceGateProposal,
     ) -> PublicationResult: ...
 
+    async def complete(
+        self, request: ItemProcessingRequest, outcome: str
+    ) -> None: ...
+
 
 def _model(state: ItemProcessingState, key: str, model_type: type[Any]) -> Any:
     return model_type.model_validate(state[key])
@@ -392,8 +396,12 @@ def build_item_processing_graph(
         request = ItemProcessingRequest.model_validate(state["request"])
         return "publish" if request.run_mode == RunMode.PRODUCTION else "preview"
 
-    def complete(outcome: str, trace: str) -> Callable[[ItemProcessingState], ItemProcessingState]:
-        def node(_state: ItemProcessingState) -> ItemProcessingState:
+    def complete(
+        outcome: str, trace: str
+    ) -> Callable[[ItemProcessingState], Any]:
+        async def node(state: ItemProcessingState) -> ItemProcessingState:
+            request = ItemProcessingRequest.model_validate(state["request"])
+            await backend.complete(request, outcome)
             return {"outcome": outcome, "trace": [trace]}
 
         return node

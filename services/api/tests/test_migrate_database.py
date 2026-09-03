@@ -72,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name == "001_initial_schema.sql"
-    assert files[-1].name == "075_allow_event_graph_review_outcome.sql"
+    assert files[-1].name == "076_add_langgraph_checkpoint_store.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -149,6 +149,18 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     ).read_text()
     assert "'review_rejected'" in event_graph_review
     assert "'075_allow_event_graph_review_outcome'" in event_graph_review
+
+    checkpoint_store = (
+        MIGRATIONS / "076_add_langgraph_checkpoint_store.sql"
+    ).read_text()
+    for table in (
+        "checkpoint_migrations",
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in checkpoint_store
+    assert "'076_add_langgraph_checkpoint_store'" in checkpoint_store
 
     event_schema = (MIGRATIONS / "063_replace_event_system_with_v1.sql").read_text()
     assert "DROP TABLE IF EXISTS event_messages" in event_schema

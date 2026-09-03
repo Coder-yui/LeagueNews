@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
 from app.core.database import Base
+from app.api.routes.events import revise_event
+from app.api.routes.normalized_items import revise_normalized_item
 from app.models.event import EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem, NormalizedItemRevision
 from app.models.raw_item import RawItem
@@ -135,6 +137,51 @@ def test_manual_message_revision_is_direct_audited_and_preserves_membership() ->
         replay = revise_published_message(db, command)
         assert replay.idempotent_replay is True
         assert replay.revision == 2
+
+
+def test_editorial_revision_routes_apply_commands_directly() -> None:
+    with _session() as db:
+        source = Source(name="editorial route source", reliability_score=0.8)
+        db.add(source)
+        db.flush()
+        item = _item(db, source, "message-route")
+        event, _created = create_event(
+            db,
+            normalized_item_id=item.id,
+            mention_index=0,
+            event_family="gameplay_balance",
+            products=["lol_pc"],
+            canonical_anchors={"patch": "26.17"},
+            title="route event",
+            current_summary="route event summary",
+        )
+        db.commit()
+
+        message_result = revise_normalized_item(
+            item.id,
+            ManualMessageRevisionCommand(
+                normalized_item_id=item.id,
+                expected_revision=1,
+                patch=MessageEditorialPatch(summary="人工路由摘要"),
+                metadata=_metadata("message-route-revision"),
+            ),
+            db,
+        )
+        event_result = revise_event(
+            event.id,
+            ManualEventRevisionCommand(
+                event_id=event.id,
+                expected_revision=1,
+                patch=EventEditorialPatch(title="人工路由事件"),
+                metadata=_metadata("event-route-revision"),
+            ),
+            db,
+        )
+
+        assert message_result.revision == 2
+        assert event_result.revision == 2
+        assert item.summary == "人工路由摘要"
+        assert event.title == "人工路由事件"
 
 
 def test_manual_revision_uses_optimistic_locking() -> None:

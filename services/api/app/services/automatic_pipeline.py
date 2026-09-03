@@ -28,16 +28,35 @@ from app.services.raw_item_versions import (
     is_latest_raw_item,
     latest_raw_item_condition,
 )
-from app.workflows.event_aggregation import publish_normalized_item_downstream
-from app.workflows.reviewed_pipeline import (
-    approve_review,
-    resume_item_processing,
+from app.orchestration.event_aggregation.service import publish_normalized_item_downstream
+from app.orchestration.item_processing.service import (
+    approve_review as approve_v3_review,
+    resume_item_processing as resume_v3_item_processing,
     start_item_processing,
+)
+from app.orchestration.contracts import ITEM_PROCESSING_GRAPH
+from app.workflows.reviewed_pipeline import (
+    approve_review as approve_v2_review,
+    resume_item_processing as resume_v2_item_processing,
 )
 
 
 logger = logging.getLogger(__name__)
 PIPELINE_RETRY_BACKOFF_SECONDS = (30, 120, 600)
+
+
+async def resume_item_processing(
+    db: Session,
+    run: ProcessingRun,
+    *,
+    execution_guard: PipelineExecutionGuard | None = None,
+) -> ProcessingRun:
+    resume = (
+        resume_v3_item_processing
+        if run.graph_name == ITEM_PROCESSING_GRAPH
+        else resume_v2_item_processing
+    )
+    return await resume(db, run, execution_guard=execution_guard)
 
 
 def _worker_id() -> str:
@@ -104,7 +123,7 @@ def _failed_item_run(db: Session, job: PipelineJob) -> ProcessingRun | None:
             run is not None
             and run.workflow_type == "item"
             and run.execution_mode == "automatic"
-            and run.status == "failed"
+            and run.status in {"failed", "completed"}
         ):
             return run
         return None
@@ -164,7 +183,12 @@ async def execute_pipeline_job(
             job.completed_at = datetime.now(UTC)
             return
         assert_execution_owned(db, execution_guard)
-        await publish_normalized_item_downstream(db, item)
+        if execution_guard is None:
+            await publish_normalized_item_downstream(db, item)
+        else:
+            await publish_normalized_item_downstream(
+                db, item, execution_guard=execution_guard
+            )
         return
 
     item_run = _active_item_run(db, raw_item.id) or _failed_item_run(db, job)
@@ -218,7 +242,12 @@ async def execute_pipeline_job(
             review.policy_version = "auto-approve-v1"
             assert_execution_owned(db, execution_guard)
             db.commit()
-            item_run = await approve_review(
+            approve = (
+                approve_v3_review
+                if item_run.graph_name == ITEM_PROCESSING_GRAPH
+                else approve_v2_review
+            )
+            item_run = await approve(
                 db,
                 review,
                 note="automatic pipeline approval",
@@ -236,7 +265,12 @@ async def execute_pipeline_job(
     job.current_stage = "event_aggregation"
     assert_execution_owned(db, execution_guard)
     db.commit()
-    await publish_normalized_item_downstream(db, item)
+    if execution_guard is None:
+        await publish_normalized_item_downstream(db, item)
+    else:
+        await publish_normalized_item_downstream(
+            db, item, execution_guard=execution_guard
+        )
 
 
 def _finalize_expired_exhausted_job(db: Session, now: datetime) -> bool:
@@ -426,7 +460,14 @@ async def process_next_job() -> bool:
             job.worker_id = None
             if job.correction_id and job.current_stage != "event_aggregation":
                 correction = db.get(PipelineCorrection, job.correction_id)
-                if correction is not None:
+                item_run = (
+                    db.get(ProcessingRun, job.processing_run_id)
+                    if job.processing_run_id is not None
+                    else None
+                )
+                if correction is not None and (
+                    item_run is None or item_run.status == "completed"
+                ):
                     correction.status = "completed"
                     correction.completed_at = job.completed_at
                     correction.error_message = None

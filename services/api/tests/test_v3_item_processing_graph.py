@@ -42,6 +42,11 @@ class FakeBackend:
         self.replay_prefix: ReplayPrefix | None = None
         self.importance_titles: list[str] = []
 
+    async def complete(
+        self, _request: ItemProcessingRequest, outcome: str
+    ) -> None:
+        self.calls.append(f"complete_{outcome}")
+
     async def restore_replay_prefix(
         self, _request: ItemProcessingRequest
     ) -> ReplayPrefix:
@@ -211,7 +216,7 @@ def test_irrelevant_run_stops_before_expensive_stages() -> None:
     )
 
     assert result["outcome"] == "irrelevant"
-    assert backend.calls == ["load_evidence", "relevance"]
+    assert backend.calls == ["load_evidence", "relevance", "complete_irrelevant"]
 
 
 def test_experiment_run_can_never_publish() -> None:

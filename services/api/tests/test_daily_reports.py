@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, date, datetime
 
 import pytest
@@ -230,7 +231,7 @@ def test_daily_report_can_be_withdrawn_and_manually_regenerated() -> None:
         )
         db.commit()
 
-        created = create_daily_report(date(2026, 8, 13), db)
+        created = asyncio.run(create_daily_report(date(2026, 8, 13), db))
         withdrawn = withdraw_daily_report(date(2026, 8, 13), db)
 
         assert created["status"] == "published"
@@ -242,7 +243,7 @@ def test_daily_report_can_be_withdrawn_and_manually_regenerated() -> None:
         assert summaries[0]["item_count"] == 1
         assert summaries[0]["section_counts"]["lolpc"] == 1
 
-        regenerated = create_daily_report(date(2026, 8, 13), db)
+        regenerated = asyncio.run(create_daily_report(date(2026, 8, 13), db))
 
         assert regenerated["id"] == created["id"]
         assert regenerated["status"] == "published"
@@ -281,7 +282,7 @@ def test_daily_report_hides_an_item_that_is_no_longer_currently_eligible() -> No
         db.add(item)
         db.commit()
 
-        create_daily_report(date(2026, 8, 13), db)
+        asyncio.run(create_daily_report(date(2026, 8, 13), db))
         item.content_form = "repost"
         item.importance_score = 0.45
         item.current_revision = 2

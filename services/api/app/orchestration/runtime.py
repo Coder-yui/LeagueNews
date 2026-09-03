@@ -2,6 +2,7 @@ from collections.abc import Callable
 from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.types import Command
 from sqlalchemy.orm import Session
 
 from app.orchestration.catalog import GraphName, GraphRegistry, create_v3_graph_registry
@@ -21,6 +22,7 @@ from app.orchestration.contracts import (
     ItemProcessingRequest,
 )
 from app.services.llm import LLMClient
+from app.services.pipeline_execution import PipelineExecutionGuard
 
 
 SessionFactory = Callable[[], Session]
@@ -42,19 +44,28 @@ class LeagueNewsWorkflowRuntime:
         llm_factory: LLMFactory = LLMClient,
         checkpointer: BaseCheckpointSaver[Any] | None = None,
         registry: GraphRegistry | None = None,
+        execution_guard: PipelineExecutionGuard | None = None,
     ) -> None:
         self._registry = registry or create_v3_graph_registry()
         self._checkpointer = checkpointer
         self._item_backend = V2CompatibilityItemBackend(
-            session_factory, llm_factory=llm_factory
+            session_factory,
+            llm_factory=llm_factory,
+            execution_guard=execution_guard,
         )
         self._event_backend = V2CompatibilityEventBackend(
-            session_factory, llm_factory=llm_factory
+            session_factory,
+            llm_factory=llm_factory,
+            execution_guard=execution_guard,
         )
         self._daily_backend = V2CompatibilityDailyReportBackend(session_factory)
 
     async def invoke_item(
-        self, request: ItemProcessingRequest
+        self,
+        request: ItemProcessingRequest,
+        *,
+        command: Command | None = None,
+        resume_existing: bool = False,
     ) -> dict[str, Any]:
         graph = self._registry.build(
             GraphName.ITEM_PROCESSING,
@@ -63,12 +74,21 @@ class LeagueNewsWorkflowRuntime:
             checkpointer=self._checkpointer,
         )
         return await graph.ainvoke(
-            {"request": request.model_dump(mode="json"), "trace": []},
+            (
+                command
+                if command is not None
+                else None
+                if resume_existing
+                else {"request": request.model_dump(mode="json"), "trace": []}
+            ),
             config=_config(request.thread_id),
         )
 
     async def invoke_event(
-        self, request: EventAggregationRequest
+        self,
+        request: EventAggregationRequest,
+        *,
+        resume_existing: bool = False,
     ) -> dict[str, Any]:
         graph = self._registry.build(
             GraphName.EVENT_AGGREGATION,
@@ -77,7 +97,11 @@ class LeagueNewsWorkflowRuntime:
             checkpointer=self._checkpointer,
         )
         return await graph.ainvoke(
-            {"request": request.model_dump(mode="json"), "trace": []},
+            (
+                None
+                if resume_existing
+                else {"request": request.model_dump(mode="json"), "trace": []}
+            ),
             config=_config(request.thread_id),
         )
 

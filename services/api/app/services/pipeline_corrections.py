@@ -8,6 +8,8 @@ from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineCorrection, PipelineJob, ProcessingCheckpoint
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun
+from app.orchestration.contracts import ITEM_PROCESSING_GRAPH, ProcessingStage
+from app.orchestration.item_processing.service import start_item_processing
 from app.schemas.pipeline import PipelineCorrectionCreate
 from app.services.media_publication import withdraw_raw_item_media
 from app.services.pipeline_queue import enqueue_pipeline_job
@@ -18,7 +20,6 @@ from app.workflows.reviewed_pipeline import (
     OCR_STAGE,
     RELEVANCE_STAGE,
     TRANSLATION_STAGE,
-    start_item_processing,
 )
 from app.workflows.understand_media import is_patch_preview
 
@@ -33,6 +34,29 @@ def _latest_processing_run(db: Session, raw_item_id: int) -> ProcessingRun | Non
         .order_by(ProcessingRun.id.desc())
         .limit(1)
     )
+
+
+def _graph_restart(
+    source_run: ProcessingRun | None,
+    requested_stage: str,
+) -> tuple[ProcessingStage, int | None]:
+    """Map the V2 correction vocabulary onto a V3 replay request.
+
+    Legacy runs do not contain the V3 evidence checkpoint, so their first V3
+    correction is intentionally rebuilt from immutable RawItem evidence.
+    Subsequent V3 runs can replay any preserved prefix.
+    """
+
+    stage = {
+        RELEVANCE_STAGE: ProcessingStage.RELEVANCE,
+        OCR_STAGE: ProcessingStage.MEDIA,
+        TRANSLATION_STAGE: ProcessingStage.TRANSLATION,
+        MESSAGE_ANALYSIS_STAGE: ProcessingStage.MESSAGE_ANALYSIS,
+        IMPORTANCE_STAGE: ProcessingStage.IMPORTANCE,
+    }[requested_stage]
+    if source_run is None or source_run.graph_name != ITEM_PROCESSING_GRAPH:
+        return stage, None
+    return stage, source_run.id
 
 
 def _checkpoint_before(
@@ -175,6 +199,9 @@ async def create_and_start_correction(
     )
     if payload.restart_from_stage == OCR_STAGE and not is_patch_preview(item.raw_item):
         raise ValueError("image_ocr is not applicable to this raw item; restart from translation")
+    graph_stage, replay_from_run_id = _graph_restart(
+        source_run, payload.restart_from_stage
+    )
     resume_context = _resume_context(
         source_run=source_run,
         checkpoint=checkpoint,
@@ -209,8 +236,11 @@ async def create_and_start_correction(
             supersedes_run_id=source_run.id if source_run else None,
             execution_mode=payload.resume_mode,
             correction_id=correction.id,
-            restart_from_stage=payload.restart_from_stage,
+            restart_from_stage=graph_stage.value,
+            replay_from_run_id=replay_from_run_id,
+            allow_existing_projection=True,
             context=resume_context,
+            defer_execution=payload.resume_mode == "automatic",
         )
         if payload.resume_mode == "automatic":
             enqueue_pipeline_job(
@@ -309,6 +339,9 @@ async def recover_failed_job(
     )
     if payload.restart_from_stage == OCR_STAGE and not is_patch_preview(raw_item):
         raise ValueError("image_ocr is not applicable to this raw item; restart from translation")
+    graph_stage, replay_from_run_id = _graph_restart(
+        source_run, payload.restart_from_stage
+    )
     context = _resume_context(
         source_run=source_run,
         checkpoint=checkpoint,
@@ -334,8 +367,10 @@ async def recover_failed_job(
             supersedes_run_id=source_run.id if source_run else None,
             execution_mode=payload.resume_mode,
             correction_id=correction.id,
-            restart_from_stage=payload.restart_from_stage,
+            restart_from_stage=graph_stage.value,
+            replay_from_run_id=replay_from_run_id,
             context=context,
+            defer_execution=payload.resume_mode == "automatic",
         )
         if payload.resume_mode == "automatic":
             enqueue_pipeline_job(
@@ -417,14 +452,20 @@ async def restart_raw_item_from_beginning(
     db.commit()
     db.refresh(correction)
     try:
+        graph_stage, replay_from_run_id = _graph_restart(
+            source_run, RELEVANCE_STAGE
+        )
         await start_item_processing(
             db,
             raw_item,
             supersedes_run_id=source_run.id,
             execution_mode="automatic",
             correction_id=correction.id,
-            restart_from_stage=RELEVANCE_STAGE,
+            restart_from_stage=graph_stage.value,
+            replay_from_run_id=replay_from_run_id,
+            allow_existing_projection=raw_item.normalized_item is not None,
             context={},
+            defer_execution=True,
         )
         enqueue_pipeline_job(
             db,

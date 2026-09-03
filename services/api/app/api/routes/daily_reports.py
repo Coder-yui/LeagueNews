@@ -12,7 +12,7 @@ from app.services.daily_report_read import (
     list_daily_report_summaries,
     load_daily_report,
 )
-from app.services.daily_reports import generate_daily_report
+from app.orchestration.daily_report.service import generate_daily_report
 
 
 router = APIRouter()
@@ -39,9 +39,10 @@ def get_daily_report(report_date: date, db: Session = Depends(get_db)) -> dict[s
 
 
 @router.post("/daily/{report_date}/generate", response_model=DailyReportRead)
-def create_daily_report(report_date: date, db: Session = Depends(get_db)) -> dict[str, Any]:
-    generate_daily_report(db, report_date)
-    db.commit()
+async def create_daily_report(
+    report_date: date, db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    await generate_daily_report(db, report_date)
     report = _load_report(db, report_date)
     return daily_report_payload(db, report)
 

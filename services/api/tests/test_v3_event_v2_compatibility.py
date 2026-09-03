@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+from langgraph.checkpoint.memory import InMemorySaver
 
 import app.models  # noqa: F401
 from app.core.database import Base
@@ -19,6 +20,9 @@ from app.orchestration.event_aggregation import (
     create_event_aggregation_run,
 )
 from app.schemas.event_aggregation import EventAggregationResult
+from app.orchestration.event_aggregation.service import (
+    publish_normalized_item_downstream,
+)
 
 
 class EventLLM:
@@ -153,3 +157,25 @@ def test_event_graph_reuses_v2_semantics_without_experiment_writes() -> None:
         }
         assert db.scalar(select(func.count(Event.id))) == 1
         assert db.scalar(select(func.count(EventMention.id))) == 1
+
+
+def test_event_service_runs_the_registered_graph_to_completion() -> None:
+    factory = _database()
+    item_id, _revision = _published_item(factory)
+    with factory() as db:
+        item = db.get(NormalizedItem, item_id)
+        assert item is not None
+        run = asyncio.run(
+            publish_normalized_item_downstream(
+                db,
+                item,
+                session_factory=factory,
+                llm_factory=EventLLM,
+                checkpointer=InMemorySaver(),
+            )
+        )
+
+        assert run is not None
+        assert run.status == "completed"
+        assert run.outcome == "applied"
+        assert db.scalar(select(func.count(Event.id))) == 1

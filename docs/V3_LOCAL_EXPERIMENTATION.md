@@ -1,6 +1,6 @@
 # LeagueNews v3 本地实验工程
 
-状态：工程底座；暂不部署，不替换云端 v2。
+状态：本地 V3 工程入口；暂不部署，不替换云端 v2。
 
 ## 当前目标
 
@@ -79,10 +79,10 @@ Artifact Store 默认拒绝覆盖同名实验，写文件时先生成临时文�
 
 ## 当前进度与下一轮实验顺序
 
-1. 已完成三个 Graph 的 V2 baseline adapter；experiment 路径均不写发布、事件或日报业务表。
+1. 已完成三个 Graph 的 V2 baseline adapter；本地 API、Worker、Scheduler 已统一调用 Graph Runtime，experiment 路径均不写发布、事件或日报业务表。
 2. 固定第一批 RawItem、NormalizedItem/Event 和日报日期快照，建立人工确认的 golden cases。
 3. 分别比较消息分析/重要性候选，不改变 Item Graph 的发布与 checkpoint 边界。
 4. 比较事件候选召回与语义决策候选，再做端到端聚合回归。
 5. 比较日报去重、分区、排序和容量候选，最后才选择 V3 默认策略版本。
 
-在本地结果稳定之前，不实现生产切换、云端 Worker、部署脚本或 V2 数据迁移。
+在本地结果稳定之前，不切换云端 Worker、不执行部署，也不改写服务器上的 V2 数据。

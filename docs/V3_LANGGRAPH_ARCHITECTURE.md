@@ -1,6 +1,6 @@
 # LeagueNews v3 LangGraph-first 架构
 
-状态：可运行的 V2 兼容基线（本地探索，不替换云端 v2）
+状态：V3 本地运行入口已切换（不替换云端 v2）
 基线提交：`b2b60e4`（`v2.0.0`）
 
 ## 目标
@@ -18,10 +18,10 @@ Backend/Domain Component，不再改 Graph、队列或发布边界。v2 在 `mai
 
 | 业务能力 | V3 入口 | 阶段 | 当前状态 |
 | --- | --- | --- | --- |
-| 消息处理与发布 | `item_processing` | evidence、relevance、media、translation、message_analysis、importance、evidence_gate、publication | 已接入 V2 LLM/OCR/规则/发布语义 |
-| 事件聚合 | `event_aggregation` | load_message、minimal_filter、candidate_retrieval、semantic_decision、apply_membership、refresh_projection | 已接入 V2 召回、LLM、成员关系和事件指标 |
-| 日报生成 | `daily_report_generation` | load_window、select_candidates、deduplicate_events、assign_sections、rank_items、publish | 已接入 V2 时间窗、去重、分栏、排名和持久化 |
-| 发布后人工修订 | 事务命令，不进入 Graph | validate、lock、revision、field ownership | 消息和 Event 均已实现 |
+| 消息处理与发布 | `item_processing` | evidence、relevance、media、translation、message_analysis、importance、evidence_gate、publication | API、Worker、审核、失败恢复与修订重跑均已接管 |
+| 事件聚合 | `event_aggregation` | load_message、minimal_filter、candidate_retrieval、semantic_decision、apply_membership、refresh_projection | Worker 下游入口已接管 |
+| 日报生成 | `daily_report_generation` | load_window、select_candidates、deduplicate_events、assign_sections、rank_items、publish | 手动 API 与本地 Scheduler 已接管 |
+| 发布后人工修订 | 事务命令，不进入 Graph | validate、lock、revision、field ownership | 消息和 Event 服务及 API 均已实现 |
 | Connector 与 ingestion | 原有共享 ingestion | fetch、map、validate、dedupe、evidence persistence、enqueue | 保留，经验证后无需为了 LangGraph 重写 |
 
 三个 Graph 都注册精确 `graph_version/state_version`，都支持 automatic/manual review，且
@@ -61,6 +61,10 @@ Item Graph 的阶段顺序固定为：
 evidence -> relevance -> media -> translation -> message_analysis
          -> importance -> evidence_gate -> publication
 ```
+
+八个阶段不是八次模型调用。当前 V2 兼容算法的普通文本路径仍为 3 次 LLM 调用：相关性、消息分析、
+分类与重要性；翻译仅在需要翻译时增加调用，media/OCR 仅在适用素材上运行，其余阶段是确定性规则、
+审核边界、持久化或发布副作用。
 
 每个阶段有两类持久化，职责不能混用：
 
@@ -134,6 +138,6 @@ evaluation artifact，不能创建 NormalizedItem、Event 或 notification outbo
 - 已发布消息和 Event 可直接人工修订，具备乐观锁、幂等、编辑审计和字段所有权保护；
 - Graph state 和业务表之间没有双重业务真相。
 
-当前分支尚未切换 V2 的云端 Worker、Scheduler 或部署配置。这是刻意的发布边界，不是再保留一套新
-业务实现：本地通过 V3 Graph/Backend 运行，云端 `main` 继续运行冻结的 V2。待新版算法实验完成后，
-再让 PostgreSQL launcher 调用 Graph Registry，并完成影子运行和切换验收。
+当前分支的本地 API、PostgreSQL Worker 和日报 Scheduler 已调用 Graph Registry，并使用 PostgreSQL
+LangGraph checkpointer。部署配置仍未切换，云端 `main` 继续运行冻结的 V2；V3 只在独立 worktree 和
+对应远端开发分支推进，待新版算法实验完成后再单独做部署切换验收。

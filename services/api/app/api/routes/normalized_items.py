@@ -14,6 +14,12 @@ from app.schemas.normalized_item import (
     PublishedItemPageRead,
     PublishedItemRead,
 )
+from app.schemas.editorial import EditorialRevisionResult, ManualMessageRevisionCommand
+from app.services.editorial_revisions import (
+    EditorialRevisionConflictError,
+    EditorialTargetNotFoundError,
+    revise_published_message,
+)
 from app.services.published_items import (
     DEFAULT_PUBLICATION_TIMEZONE,
     get_published_item as read_published_item,
@@ -24,6 +30,22 @@ from app.services.raw_item_versions import latest_normalized_item_condition
 
 
 router = APIRouter()
+
+
+@router.post("/{item_id}/revisions", response_model=EditorialRevisionResult)
+def revise_normalized_item(
+    item_id: int,
+    command: ManualMessageRevisionCommand,
+    db: Session = Depends(get_db),
+) -> EditorialRevisionResult:
+    if command.normalized_item_id != item_id:
+        raise HTTPException(status_code=409, detail="path and command item ids differ")
+    try:
+        return revise_published_message(db, command)
+    except EditorialTargetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EditorialRevisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("", response_model=list[NormalizedItemRead])

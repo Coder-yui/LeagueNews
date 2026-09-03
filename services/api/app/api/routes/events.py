@@ -6,10 +6,32 @@ from app.domain.event_categories import EVENT_CATEGORIES
 from app.domain.event_types import CREDIBILITY_LEVELS, EVENT_FAMILIES, EVENT_LIFECYCLES
 from app.domain.message_taxonomy import Product, PRODUCTS
 from app.schemas.event import EventDetailRead, EventPageRead
+from app.schemas.editorial import EditorialRevisionResult, ManualEventRevisionCommand
+from app.services.editorial_revisions import (
+    EditorialRevisionConflictError,
+    EditorialTargetNotFoundError,
+    revise_published_event,
+)
 from app.services.event_read import get_event_detail, search_events
 
 
 router = APIRouter()
+
+
+@router.post("/{event_id}/revisions", response_model=EditorialRevisionResult)
+def revise_event(
+    event_id: int,
+    command: ManualEventRevisionCommand,
+    db: Session = Depends(get_db),
+) -> EditorialRevisionResult:
+    if command.event_id != event_id:
+        raise HTTPException(status_code=409, detail="path and command event ids differ")
+    try:
+        return revise_published_event(db, command)
+    except EditorialTargetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EditorialRevisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("", response_model=EventPageRead)

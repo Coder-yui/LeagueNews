@@ -500,7 +500,7 @@ async def correct_ocr_review(
     payload: OCRReviewCorrection,
 ) -> ProcessingRun:
     _require_pending_review(review)
-    if review.stage != OCR_STAGE:
+    if review.stage not in {OCR_STAGE, "media"}:
         raise ValueError("OCR correction is only available during image OCR review")
     run = review.processing_run
     approved_ids = _extraction_ids(review.proposal)
@@ -556,8 +556,10 @@ async def correct_ocr_review(
     _replace_pending_review(
         db,
         run=run,
-        stage=OCR_STAGE,
+        stage=review.stage,
         proposal={
+            **review.proposal,
+            "extraction_ids": replacement_ids,
             "approved_media_extraction_ids": replacement_ids,
             "ocr_corrections": correction_history,
         },

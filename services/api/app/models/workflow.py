@@ -65,7 +65,8 @@ class ProcessingRun(Base):
         ),
         CheckConstraint(
             "outcome IS NULL OR outcome IN ('approved', 'irrelevant', "
-            "'review_rejected', 'system_error', 'correction_requested', "
+            "'insufficient_evidence', 'review_rejected', 'system_error', "
+            "'correction_requested', "
             "'raw_item_superseded')",
             name="ck_processing_runs_outcome",
         ),

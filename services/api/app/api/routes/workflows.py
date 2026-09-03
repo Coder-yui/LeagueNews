@@ -19,11 +19,17 @@ from app.schemas.workflow import (
 )
 from app.services.llm import LLMAnalysisError, LLMConfigurationError
 from app.services.media_ocr import OCRProcessingError
+from app.orchestration.contracts import ITEM_PROCESSING_GRAPH
+from app.orchestration.item_processing.service import (
+    approve_review as approve_v3_review,
+    resume_rejected_review,
+    retry_processing_run as retry_v3_processing_run,
+)
 from app.workflows.reviewed_pipeline import (
-    approve_review,
+    approve_review as approve_v2_review,
     correct_ocr_review,
     reject_review,
-    retry_processing_run,
+    retry_processing_run as retry_v2_processing_run,
 )
 
 router = APIRouter()
@@ -32,6 +38,8 @@ router = APIRouter()
 def _corrected_review_proposal(
     review: ReviewTask,
     payload: ReviewCorrectionApproval,
+    *,
+    db: Session | None = None,
 ) -> dict[str, object]:
     corrections = payload.model_dump(exclude={"note"}, exclude_none=True)
     allowed_fields = {
@@ -56,6 +64,19 @@ def _corrected_review_proposal(
         payload.message_type is not None or payload.topics is not None
     ):
         analysis = review.processing_run.context.get("approved_message_analysis_proposal")
+        if not isinstance(analysis, dict) and db is not None:
+            checkpoint = db.scalar(
+                select(ProcessingCheckpoint)
+                .where(
+                    ProcessingCheckpoint.processing_run_id
+                    == review.processing_run_id,
+                    ProcessingCheckpoint.stage == "message_analysis",
+                    ProcessingCheckpoint.invalidated_at.is_(None),
+                )
+                .order_by(ProcessingCheckpoint.id.desc())
+                .limit(1)
+            )
+            analysis = dict(checkpoint.output_snapshot) if checkpoint else None
         if not isinstance(analysis, dict):
             raise ValueError("importance 修正缺少已批准的消息内容分析")
         classification_source = dict(analysis.get("classification_source") or {})
@@ -90,6 +111,7 @@ def _corrected_review_proposal(
         }
     )
     proposal["importance_calculation"] = calculation
+    proposal["calculation"] = calculation
     return proposal
 
 
@@ -188,7 +210,7 @@ def list_ocr_reviews(
 ) -> list[dict[str, object]]:
     statement = (
         select(ReviewTask)
-        .where(ReviewTask.stage == "image_ocr")
+        .where(ReviewTask.stage.in_(["image_ocr", "media"]))
         .order_by(ReviewTask.created_at.desc())
         .limit(200)
     )
@@ -231,7 +253,7 @@ def list_review_queue(db: Session = Depends(get_db)) -> list[dict[str, object]]:
     for review in message_reviews:
         run = review.processing_run
         raw_item = run.raw_item
-        is_ocr = review.stage == "image_ocr"
+        is_ocr = review.stage in {"image_ocr", "media"}
         payloads.append(
             {
                 "raw_item_id": raw_item.id,
@@ -267,7 +289,12 @@ async def approve_review_task(
     if not review:
         raise HTTPException(status_code=404, detail="review task not found")
     try:
-        return await approve_review(db, review, note=payload.note)
+        approve = (
+            approve_v3_review
+            if review.processing_run.graph_name == ITEM_PROCESSING_GRAPH
+            else approve_v2_review
+        )
+        return await approve(db, review, note=payload.note)
     except LLMConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -277,7 +304,7 @@ async def approve_review_task(
 
 
 @router.post("/reviews/{review_id}/reject", response_model=ProcessingRunRead)
-def reject_review_task(
+async def reject_review_task(
     review_id: int,
     payload: ReviewRejection,
     db: Session = Depends(get_db),
@@ -286,7 +313,10 @@ def reject_review_task(
     if not review:
         raise HTTPException(status_code=404, detail="review task not found")
     try:
-        return reject_review(db, review, payload=payload)
+        run = reject_review(db, review, payload=payload)
+        if run.graph_name == ITEM_PROCESSING_GRAPH:
+            return await resume_rejected_review(db, review)
+        return run
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -303,9 +333,14 @@ async def correct_and_approve_review_task(
     review = db.get(ReviewTask, review_id)
     if not review:
         raise HTTPException(status_code=404, detail="review task not found")
-    review.proposal = _corrected_review_proposal(review, payload)
+    review.proposal = _corrected_review_proposal(review, payload, db=db)
     try:
-        return await approve_review(
+        approve = (
+            approve_v3_review
+            if review.processing_run.graph_name == ITEM_PROCESSING_GRAPH
+            else approve_v2_review
+        )
+        return await approve(
             db,
             review,
             note=payload.note or "管理台修正后批准",
@@ -350,7 +385,12 @@ async def retry_run(run_id: int, db: Session = Depends(get_db)) -> object:
     if not run:
         raise HTTPException(status_code=404, detail="processing run not found")
     try:
-        return await retry_processing_run(db, run)
+        retry = (
+            retry_v3_processing_run
+            if run.graph_name == ITEM_PROCESSING_GRAPH
+            else retry_v2_processing_run
+        )
+        return await retry(db, run)
     except LLMConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)

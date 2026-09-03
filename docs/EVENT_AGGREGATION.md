@@ -1,6 +1,6 @@
 # Event Aggregation
 
-> Status: Event Aggregation V2 implemented
+> Status: V3 Event Graph using the V2 semantic baseline
 >
 > Policy version: `event-aggregation-v6.1-recall60-latest-evidence`
 
@@ -9,13 +9,14 @@ Event aggregation answers one question for each meaningful mention in a publishe
 
 The current membership contract and validation boundary are documented in
 [EVENT_AGGREGATION_V2.md](EVENT_AGGREGATION_V2.md); filter and recall details are in
-[EVENT_ADMISSION_AND_GRANULARITY.md](EVENT_ADMISSION_AND_GRANULARITY.md). Refactor notes and
-real-data evaluation results are historical records under [`history/`](history/README.md).
+[EVENT_ADMISSION_AND_GRANULARITY.md](EVENT_ADMISSION_AND_GRANULARITY.md). Real-data evaluation is
+performed through the current versioned experiment runner.
 
 ## Runtime flow
 
 ```text
 published NormalizedItem
+  -> LangGraph Event Graph
   -> minimal_event_filter()             # process / skip
   -> products/topics event-space routing
   -> recall_event_candidates()          # product/family gated, last 60 days, bounded high recall

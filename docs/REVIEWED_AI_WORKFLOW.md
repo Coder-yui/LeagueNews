@@ -1,6 +1,6 @@
-# 单条消息处理流程
+# LangGraph 单条消息处理流程
 
-更新时间：2026-08-11
+更新时间：2026-09-03
 
 本文描述 RawItem 到 NormalizedItem 的唯一处理流程。分类规则以
 [`MESSAGE_CLASSIFICATION.md`](MESSAGE_CLASSIFICATION.md) 为准。
@@ -9,12 +9,14 @@
 
 ```text
 RawItem
+  -> evidence
   -> relevance
-  -> optional image_ocr
+  -> media（按需 OCR）
   -> translation
   -> message_analysis
   -> importance
-  -> publish NormalizedItem
+  -> evidence_gate
+  -> publication
   -> stop
 ```
 
@@ -28,9 +30,13 @@ Event downstream 的失败只属于 PipelineJob/EventAggregationRun，不会把�
 消息类型/主题与重要性特征。中文消息无需翻译，OCR 是指定类型消息的条件分支，纯媒体、纯链接
 或提前结束的消息调用数更少。
 
-自动与人工模式使用相同的草稿、结构校验、业务校验和 checkpoint。自动模式写入
+八个阶段不等于八次 LLM 调用。普通中文文本仍通常只有相关性、消息分析、分类与重要性三次调用；
+翻译和 OCR 均为条件分支，证据门与发布是确定性阶段。
+
+自动与人工模式使用同一个 Item Graph、草稿、结构校验、业务校验和 checkpoint。自动模式写入
 `decision_source=automatic` 并自动批准无需人工介入的草稿；需要人工判断时停在
-`awaiting_review`。审核拒绝保留运行、草稿和反馈，再次处理会创建新的 `ProcessingRun`。
+`interrupt()`，运行记录为 `awaiting_review`。批准或修正后以相同 `thread_id` 恢复；审核拒绝保留
+运行、草稿和反馈。
 
 ## 阶段职责
 
@@ -39,7 +45,11 @@ Event downstream 的失败只属于 PipelineJob/EventAggregationRun，不会把�
 LLM 输出 `relevant | irrelevant | uncertain`、置信度和理由。`irrelevant` 正常结束且不发布；
 `uncertain` 继续处理，避免把证据不完整误判成无关。
 
-### image_ocr
+### evidence
+
+从不可变 RawItem 构建小型证据快照与 fingerprint。Graph state 只保存 JSON 可序列化的数据和 ID。
+
+### media
 
 仅对已识别为设计师版本预览等指定图片执行 OCR 和表格结构化。人工修订创建新的
 `MediaExtraction`，不覆盖原始提取。RawItem 的 `content_blocks` 始终不可变。
@@ -75,7 +85,14 @@ LLM 输出 `relevant | irrelevant | uncertain`、置信度和理由。`irrelevan
 `topics` 候选。评分不再生成 `primary_topic`、`subtopic` 或 `editorial_subtype` 等历史兼容字段；
 计算审计只记录从当前分类直接解析出的 `importance_profile`。
 
-批准重要性后原子写入 `NormalizedItem`、媒体关联和 `NormalizedItemRevision`，处理结束。
+### evidence_gate
+
+在发布前确定性检查文本、媒体提取和证据来源是否足够；不足时以
+`insufficient_evidence` 正常结束，不写发布投影。
+
+### publication
+
+原子写入或修订 `NormalizedItem`、媒体关联和 `NormalizedItemRevision`，并提交独立事件聚合作业。
 
 ## 数据职责
 
@@ -84,6 +101,7 @@ LLM 输出 `relevant | irrelevant | uncertain`、置信度和理由。`irrelevan
 - `processing_runs`：一次处理运行、上下文和最终 outcome。
 - `review_tasks`：阶段草稿、决定和反馈。
 - `processing_checkpoints`：已接受阶段的不可变快照。
+- `checkpoints` / `checkpoint_blobs` / `checkpoint_writes`：LangGraph 节点级恢复状态。
 - `knowledge_rules`：分析与翻译规则。
 - `glossary_terms`：翻译术语。
 - `normalized_items`：当前消息发布投影。
@@ -92,11 +110,14 @@ LLM 输出 `relevant | irrelevant | uncertain`、置信度和理由。`irrelevan
 ## 有效阶段
 
 ```text
+evidence
 relevance
-image_ocr
+media
 translation
 message_analysis
 importance
+evidence_gate
+publication
 ```
 
 主要 API：
@@ -111,13 +132,16 @@ POST /api/v1/workflows/reviews/{id}/correct-ocr
 POST /api/v1/workflows/runs/{id}/retry
 POST /api/v1/pipeline/normalized-items/{id}/corrections
 POST /api/v1/raw-items/{id}/restart-from-beginning
+POST /api/v1/normalized-items/{id}/revisions
 ```
 
 ### 失败恢复与从头重跑
 
-“重试”继续失败 stage，保留已批准的上游 context/checkpoint，适用于临时网络、模型或 OCR
-故障。“从头重跑”仅针对失败项：从 `relevance` 创建新的 `ProcessingRun`，以空 context 和
+“重试”使用原 `workflow_run_id/thread_id` 从最近 LangGraph checkpoint 继续，适用于临时网络、
+模型或 OCR 故障。“从头重跑”仅针对失败项：创建新的 `ProcessingRun`，从 immutable evidence
+重新开始并
 `execution_mode=automatic` 重新判断产品、重新执行后续阶段，并创建新的 `PipelineCorrection`
-及 queued `PipelineJob`。旧 run 通过 `supersedes_run_id` 保留历史；不会继承已批准的 message
+及 queued `PipelineJob`。按阶段重跑则通过 `replay_from_run_id` 只恢复目标阶段之前的已审核业务
+checkpoint。旧 run 通过 `supersedes_run_id` 保留审计；从头重跑不会继承已批准的 message
 analysis 或 importance proposal。automatic 正常自动批准，只有原有业务规则要求人工审核时才进入
 `awaiting_review`。

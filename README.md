@@ -1,4 +1,4 @@
-# LoL Daily Intel
+# LeagueNews V3
 
 英雄联盟垂直领域的多信源采集、AI 消息处理与发布系统。
 
@@ -8,23 +8,21 @@
 Source 周期调度或手工触发
   -> 平台 Connector
   -> 不可变 RawItem + MediaAsset + provenance
-  -> 持久化 Pipeline Job
-  -> 相关性
-  -> 可选版本图片 OCR
-  -> 翻译
-  -> products、content_form、message_type、topics、摘要和实体
-  -> 重要性计算
+  -> PostgreSQL 持久化 Pipeline Job
+  -> LangGraph Item Graph（8 个可恢复阶段）
   -> NormalizedItem 发布
-  -> Event 准入、候选召回与语义 membership
-  -> Event 投影与日报
+  -> LangGraph Event Graph
+  -> Event 投影
+  -> LangGraph Daily Report Graph
 ```
 
 - 已接入 Riot 官网、腾讯 LOL 官网、X、微博、百度贴吧和手工导入。
-- 新内容默认由独立 Worker 自动执行相关性、可选 OCR、翻译、消息分析和重要性；各阶段保留草稿、决定来源和 checkpoint。
-- 已发布消息可以按阶段撤回，并选择人工审核或自动模式重跑。
+- 新内容默认由独立 Worker 调用 LangGraph；技术 checkpoint 与业务 checkpoint 分层持久化。
+- 已发布消息可以从任意业务阶段创建新运行，复用上游已审核结果并选择人工或自动模式。
+- 人工审核使用 LangGraph interrupt/resume；已发布消息和事件也支持直接、幂等、有版本审计的人工修订。
 - 管理台提供审核、采集计划、采集日志、管线日志、失败恢复、撤回、知识与 OCR Lab。
 - 已有单机 Docker Compose 生产部署、Caddy 边界认证、GHCR 镜像发布、备份与恢复脚本。
-- 已实现 Event V2 语义聚合、事件列表/详情和按上海自然日生成的日报。
+- Event 聚合和按上海自然日生成的日报均已进入独立 LangGraph。
 - embedding/向量召回和应用内多用户权限尚未实现；当前数据规模不依赖它们。
 
 ## 架构边界
@@ -35,13 +33,15 @@ Source 周期调度或手工触发
 - `normalized_items` 是单条消息当前投影，历史版本保存在 `normalized_item_revisions`。
 - 消息处理在发布 `NormalizedItem` 后结束；独立 Event 层只消费发布投影，不回写 RawItem。
 - 自动与人工流程使用相同结构化草稿；区别记录在决定来源和运行模式中。
+- LangGraph checkpoint 只负责故障恢复；ProcessingCheckpoint、Revision 和 ReviewTask 承担业务审计。
 
 ## 目录
 
 - `apps/web`：Next.js 公开页面与管理台
 - `services/api/app/connectors`：平台 Connector
-- `services/api/app/services`：ingestion、调度、管线、媒体与 LLM 服务
-- `services/api/app/workflows`：人工审核和 AI 工作流
+- `services/api/app/orchestration`：Graph、运行服务、持久化 checkpoint 和实验执行器
+- `services/api/app/services`：ingestion、队列、调度、媒体、LLM 与领域服务
+- `services/api/app/workflows`：V3 baseline 复用的领域处理函数和历史 V2 运行兼容实现
 - `services/api/app/models`：SQLAlchemy 模型
 - `infra/postgres/migrations`：只追加、不可改写的迁移历史
 - `deploy`：生产 Compose、Caddy、部署/备份/恢复脚本
@@ -119,8 +119,9 @@ pnpm build:web
 ## 文档入口
 
 - [完整文档导航](docs/README.md)
-- [消息处理 v1 里程碑](docs/history/message-processing-v1/MESSAGE_PROCESSING_V1_MILESTONE.md)
 - [当前架构](docs/ARCHITECTURE.md)
+- [LangGraph 架构](docs/V3_LANGGRAPH_ARCHITECTURE.md)
+- [本地实验](docs/V3_LOCAL_EXPERIMENTATION.md)
 - [本地运行](docs/LOCAL_RUNBOOK.md)
 - [Connector 操作与排障](docs/CONNECTOR_OPERATIONS_GUIDE.md)
 - [Connector 架构](docs/CONNECTOR_ARCHITECTURE.md)

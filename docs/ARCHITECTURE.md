@@ -1,6 +1,6 @@
 # LeagueNews 当前架构
 
-更新时间：2026-08-13
+更新时间：2026-09-03
 
 ## 当前主链路
 
@@ -8,16 +8,16 @@
 Source 调度或手工触发
   -> Connector
   -> immutable RawItem + MediaAsset + provenance
-  -> Pipeline Job
-  -> relevance
-  -> optional image_ocr
-  -> translation
-  -> message_analysis
-  -> importance
+  -> PostgreSQL Pipeline Job + lease/fencing
+  -> LangGraph Item Graph
+     evidence -> relevance -> media -> translation
+     -> message_analysis -> importance -> evidence_gate -> publication
   -> NormalizedItem 发布
-  -> Pipeline Worker durable downstream job
-  -> optional single-call EventMention[] aggregation
+  -> LangGraph Event Graph
+     load_message -> minimal_filter -> candidate_retrieval
+     -> semantic_decision -> apply_membership -> refresh_projection
   -> Event current projection + evidence
+  -> LangGraph Daily Report Graph
 
 Published messages and durable failures also produce records in the notification outbox. The
 collection-scheduler process runs the notification dispatcher, which delivers those records to the
@@ -25,11 +25,12 @@ separate featured-message and alert Feishu bots. Notification delivery is a side
 changes the success or rollback semantics of the core pipeline.
 ```
 
-当前运行时包含 Connector、共享 ingestion、RawItem 修订、媒体落盘、自动任务、人工审核、
+当前 V3 本地运行时包含 Connector、共享 ingestion、RawItem 修订、媒体落盘、自动任务、人工审核、
 OCR、翻译、受控消息分类、实体/摘要提取、消息重要性算法、事件聚合、公开消息/事件页和管理台。
-消息处理自身以 NormalizedItem 为输出边界，Pipeline Worker 只消费该发布结果。
+消息、事件和日报的在线入口统一通过 `app/orchestration` 的版本化 Graph Registry 与 Runtime；
+`app/workflows` 中仍被引用的代码是 V2 领域算法 baseline 和历史运行兼容层，不再是新运行入口。
 
-事件 V2 已实现：包含确定性准入/召回、单次多 mention 模型接口、原子 membership 应用，以及
+事件 baseline 包含确定性准入/召回、单次多 mention 模型接口、原子 membership 应用，以及
 相互独立的重要性/可信度/热度投影。Pipeline Worker 在 NormalizedItem 发布后消费 durable
 downstream job；事件失败不会回写已经成功的消息处理运行。
 事件列表、详情 API 和现有 Next.js 栈内的公开页面已经接入。
@@ -67,6 +68,9 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 - `raw_items.content_blocks` 是不可变原始证据，处理和审核不得回写。
 - `normalized_items` 是当前消息发布投影，历史保存在 `normalized_item_revisions`。
 - 自动与人工路径共享提案、Schema/业务校验和 checkpoint。
+- LangGraph PostgreSQL checkpoint 保存节点级技术恢复状态；`processing_checkpoints`、
+  `review_tasks` 和 revision 表保存长期业务审计，二者不互相替代。
+- 日常自动处理通常串行；实验 Runner 使用有界并发，不依赖 Redis 或 Celery。
 - SQL 迁移是追加式历史，不能修改已有编号文件。
 - Event 列表和详情 GET 只读取已持久化投影；过滤、排序、分页和聚合计数在 SQL 中完成。
 - EventMention 的当前投影必须同时满足已发布且 revision 等于 NormalizedItem.current_revision；旧
@@ -119,6 +123,7 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 | `media_assets` / `media_extractions` | 媒体与 OCR 结果 |
 | `processing_runs` / `review_tasks` | 消息处理运行、草稿和决定 |
 | `processing_checkpoints` | 已接受阶段快照 |
+| `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` | LangGraph 技术恢复状态 |
 | `pipeline_jobs` / `pipeline_corrections` | 自动任务、恢复和按阶段重跑 |
 | `knowledge_rules` / `glossary_terms` | 分析规则与术语 |
 | `normalized_items` / `normalized_item_revisions` | 当前发布投影与历史 |
@@ -127,9 +132,9 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 | `daily_reports` / `daily_report_items` | 日报当前投影与消息排序 |
 | `notification_outbox` | 精选消息与系统失败告警的幂等记录、租约和重试状态 |
 
-最新迁移为 `070_add_notification_outbox.sql`。SQL migration 是生产数据库的
+最新迁移为 `076_add_langgraph_checkpoint_store.sql`。SQL migration 是数据库结构的
 唯一结构来源：新数据库和历史数据库都执行同一条有序 migration 链，不再使用 ORM `create_all()`
-初始化生产结构。不得绕过追加迁移直接修改。全新 001→069 初始化与旧 031→069 顺序升级已在
+初始化正式结构。不得绕过追加迁移直接修改。全新 001→076 初始化与现有本地库顺序升级已在
 可销毁 PostgreSQL 17 上验证。
 
 ## 验证

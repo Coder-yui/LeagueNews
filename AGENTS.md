@@ -2,7 +2,7 @@
 
 ## Structure
 
-- `services/api/app`: FastAPI application, SQLAlchemy models, connectors, workflows, and services.
+- `services/api/app`: FastAPI application, SQLAlchemy models, connectors, LangGraph orchestration, and services.
 - `services/api/tests`: backend unit and opt-in PostgreSQL integration tests.
 - `apps/web`: Next.js public site and administrator console.
 - `infra/postgres/migrations`: append-only PostgreSQL migration ledger.

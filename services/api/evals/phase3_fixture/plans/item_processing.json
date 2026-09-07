@@ -1,0 +1,17 @@
+{
+  "experiment_id": "phase3-item-processing-20260907",
+  "dataset_manifest": "../item_processing/manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "baseline-item",
+      "target": "item_processing",
+      "component_versions": {"method": "baseline", "ocr": "fixture"},
+      "parameters": {"method_config": {"message_analysis": "baseline", "importance_scoring": "baseline"}}
+    }
+  ],
+  "max_concurrency": 1,
+  "case_timeout_seconds": 10,
+  "code_version": "phase3-fixture-code-v1",
+  "prompt_version": "phase3-fixture-prompt-v1",
+  "model_version": "fixture-client-v1"
+}

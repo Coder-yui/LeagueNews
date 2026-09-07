@@ -29,8 +29,9 @@ from app.services.automatic_pipeline import (
 )
 from app.services.pipeline_corrections import recover_failed_job, restart_raw_item_from_beginning
 from app.services.pipeline_execution import PipelineExecutionGuard, PipelineLeaseLost
-from app.workflows.reviewed_pipeline import approve_review, reject_review
-from app.workflows.event_aggregation import aggregate_normalized_item
+from app.services.review_actions import reject_review
+from publication_fixture import publish_reviewed_fixture as approve_review
+from test_event_aggregation_workflow import aggregate_normalized_item
 
 
 @pytest.fixture
@@ -151,7 +152,7 @@ class _EmptyEventClient:
 
 
 @pytest.mark.anyio
-async def test_translation_correction_hides_message_and_restores_context(
+async def test_legacy_translation_correction_hides_message_and_rebuilds_from_evidence(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,12 +192,13 @@ async def test_translation_correction_hides_message_and_restores_context(
     assert item.publication_status == "withdrawn"
     assert item.withdrawal_reason == "专有名词翻译错误"
     assert started["restart_from_stage"] == "translation"
-    assert started["context"] == {"approved_media_extraction_ids": [11]}
+    assert started["replay_from_run_id"] is None
+    assert "context" not in started
     assert started["correction_id"] == correction.id
 
 
 @pytest.mark.anyio
-async def test_importance_correction_preserves_new_analysis_context(
+async def test_v3_importance_correction_replays_typed_checkpoints_without_legacy_context(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -214,6 +216,7 @@ async def test_importance_correction_preserves_new_analysis_context(
     run = ProcessingRun(
         raw_item_id=item.raw_item_id,
         workflow_type="item",
+        graph_name="item_processing",
         status="completed",
         outcome="approved",
         current_stage="importance",
@@ -246,12 +249,9 @@ async def test_importance_correction_preserves_new_analysis_context(
         ),
     )
 
-    resumed = started["context"]
-    assert isinstance(resumed, dict)
-    assert resumed["relevance_decision"] == {"decision": "relevant"}
-    assert resumed["approved_message_analysis_proposal"] == analysis
-    assert "approved_fact_proposal" not in resumed
-    assert "approved_classification_proposal" not in resumed
+    assert started["replay_from_run_id"] == run.id
+    assert started["restart_from_stage"] == "importance"
+    assert "context" not in started
 
 
 @pytest.mark.anyio
@@ -736,7 +736,7 @@ async def test_restart_from_beginning_uses_fresh_automatic_recovery(
     assert correction.source_processing_run_id == old_run.id
     assert started["execution_mode"] == "automatic"
     assert started["restart_from_stage"] == "relevance"
-    assert started["context"] == {}
+    assert "context" not in started
     job = db.scalar(select(PipelineJob).where(PipelineJob.correction_id == correction.id))
     assert job is not None
     assert job.status == "queued"
@@ -774,7 +774,7 @@ async def test_restart_from_beginning_recovers_failed_job_automatically(
     assert isinstance(correction, PipelineCorrection)
     assert correction.restart_from_stage == "relevance"
     assert correction.resume_mode == "automatic"
-    assert started["context"] == {}
+    assert "context" not in started
     assert started["execution_mode"] == "automatic"
     replacement = db.scalar(
         select(PipelineJob).where(PipelineJob.correction_id == correction.id)
@@ -969,7 +969,7 @@ async def test_pipeline_retry_reuses_failed_processing_run_and_checkpoint(
 ) -> None:
     item = _published_item(db)
     item.publication_status = "withdrawn"
-    run = ProcessingRun(
+    run = ProcessingRun(graph_name="item_processing",
         raw_item_id=item.raw_item_id,
         workflow_type="item",
         status="failed",
@@ -1023,6 +1023,43 @@ async def test_pipeline_retry_reuses_failed_processing_run_and_checkpoint(
 
 
 @pytest.mark.anyio
+async def test_worker_restarts_legacy_failure_with_withdrawn_projection(
+    db: Session, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db)
+    item.publication_status = "withdrawn"
+    legacy = ProcessingRun(
+        raw_item_id=item.raw_item_id, workflow_type="item", status="failed",
+        execution_mode="automatic", graph_name=None, current_stage="translation",
+    )
+    db.add(legacy)
+    db.flush()
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id, status="running", processing_run_id=legacy.id,
+    )
+    db.add(job)
+    db.commit()
+    started = []
+
+    async def start_from_evidence(current_db, raw_item, **kwargs):
+        assert kwargs["allow_existing_projection"] is True
+        run = ProcessingRun(
+            raw_item_id=raw_item.id, workflow_type="item", graph_name="item_processing",
+            execution_mode="automatic", status="completed", outcome="irrelevant", current_stage="relevance",
+        )
+        current_db.add(run)
+        current_db.flush()
+        started.append(run.id)
+        return run
+
+    monkeypatch.setattr(automatic_pipeline, "start_item_processing", start_from_evidence)
+    await execute_pipeline_job(db, job)
+    assert job.processing_run_id == started[0]
+    assert legacy.status == "failed"
+    assert item.publication_status == "withdrawn"
+
+
+@pytest.mark.anyio
 async def test_worker_loop_survives_maintenance_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1059,37 +1096,28 @@ async def test_automatic_job_accepts_irrelevant_decision_and_records_checkpoint(
     item = _published_item(db)
     db.delete(item)
     db.commit()
-    run = ProcessingRun(
-        raw_item_id=item.raw_item_id,
-        workflow_type="item",
-        status="awaiting_review",
-        current_stage="relevance",
-        execution_mode="automatic",
-    )
-    db.add(run)
-    db.flush()
-    review = ReviewTask(
-        processing_run_id=run.id,
-        stage="relevance",
-        status="pending",
-        proposal={"decision": "irrelevant", "confidence": 0.99, "reason": "not relevant"},
-    )
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
-        status="running",
-        current_stage="relevance",
-    )
-    db.add_all([review, job])
+    from langgraph.checkpoint.memory import InMemorySaver
+    from sqlalchemy.orm import sessionmaker
+    from app.orchestration.item_processing.service import start_item_processing
+    from app.services.llm import RelevanceResult
+    class IrrelevantClient:
+        async def judge_relevance(self, **kwargs):
+            return RelevanceResult(decision="irrelevant", confidence=0.99, reason="not relevant")
+    factory = sessionmaker(db.bind, expire_on_commit=False)
+    saver = InMemorySaver()
+    run = await start_item_processing(db, db.get(RawItem, item.raw_item_id), execution_mode="automatic",
+        defer_execution=True, session_factory=factory, checkpointer=saver, llm_factory=IrrelevantClient)
+    job = PipelineJob(raw_item_id=item.raw_item_id, status="running", current_stage="relevance", processing_run_id=run.id)
+    db.add(job)
     db.commit()
-
-    await execute_pipeline_job(db, job)
-
+    await execute_pipeline_job(db, job, session_factory=factory, checkpointer=saver, llm_factory=IrrelevantClient)
+    db.expire_all()
+    review = db.scalar(select(ReviewTask).where(ReviewTask.processing_run_id == run.id))
     assert run.status == "completed"
     assert run.outcome == "irrelevant"
-    assert review.status == "approved"
-    assert review.decision_source == "automatic"
+    assert review is None  # automatic graph records checkpoints without manual tasks
     checkpoint = db.scalar(
-        select(ProcessingCheckpoint).where(ProcessingCheckpoint.processing_run_id == run.id)
+        select(ProcessingCheckpoint).where(ProcessingCheckpoint.processing_run_id == run.id, ProcessingCheckpoint.stage == "relevance")
     )
     assert checkpoint is not None
     assert checkpoint.stage == "relevance"

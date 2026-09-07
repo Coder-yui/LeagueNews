@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import UTC, date, datetime
 
 from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
@@ -14,37 +12,19 @@ from app.models.raw_item import RawItem
 from app.repositories.events import current_event_mention_conditions
 from app.services.raw_item_versions import latest_normalized_item_condition
 
-DAILY_REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
-DAILY_REPORT_MIN_IMPORTANCE = 0.60
-DAILY_REPORT_SECTION_LIMITS = {"lolpc": 5, "esports": 3, "tft": 3, "other": 3}
-
-
-@dataclass(frozen=True, slots=True)
-class DailyReportCandidate:
-    message_id: int
-    importance_score: float
-    published_at: datetime
-    content_form: str
-    products: tuple[str, ...]
-    event_ids: tuple[int, ...] = ()
-
-
-def daily_report_window(report_date: date) -> tuple[datetime, datetime]:
-    """Return the UTC half-open window for a Shanghai calendar day."""
-    start = datetime.combine(report_date, time.min, tzinfo=DAILY_REPORT_TIMEZONE)
-    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
-
-
-def daily_report_section(products: tuple[str, ...] | list[str]) -> str:
-    """Assign one stable section to a message with possibly multiple products."""
-    product_set = set(products)
-    if "lol_esports" in product_set:
-        return "esports"
-    if "lol_pc" in product_set:
-        return "lolpc"
-    if "tft" in product_set:
-        return "tft"
-    return "other"
+from app.domain.daily_report import (
+    DailyReportCandidate as DailyReportCandidate,
+    daily_report_window as daily_report_window,
+    daily_report_section as daily_report_section,
+    select_daily_sections as select_daily_sections,
+    eligible_daily_candidates as eligible_daily_candidates,
+    deduplicate_daily_candidates as deduplicate_daily_candidates,
+    assign_daily_sections as assign_daily_sections,
+    rank_daily_sections as rank_daily_sections,
+    DAILY_REPORT_TIMEZONE as DAILY_REPORT_TIMEZONE,
+    DAILY_REPORT_MIN_IMPORTANCE as DAILY_REPORT_MIN_IMPORTANCE,
+    DAILY_REPORT_SECTION_LIMITS as DAILY_REPORT_SECTION_LIMITS,
+)
 
 
 def daily_report_eligibility_conditions():
@@ -53,73 +33,7 @@ def daily_report_eligibility_conditions():
     return (
         latest_normalized_item_condition(),
         NormalizedItem.publication_status == "published",
-        NormalizedItem.content_form == "original",
-        NormalizedItem.importance_score >= DAILY_REPORT_MIN_IMPORTANCE,
     )
-
-
-def select_daily_sections(
-    candidates: list[DailyReportCandidate],
-) -> dict[str, list[DailyReportCandidate]]:
-    """Apply V1 eligibility, event deduplication, ranking, and section limits."""
-    eligible = eligible_daily_candidates(candidates)
-    deduplicated = deduplicate_daily_candidates(eligible)
-    return rank_daily_sections(assign_daily_sections(deduplicated))
-
-
-def eligible_daily_candidates(
-    candidates: list[DailyReportCandidate],
-) -> list[DailyReportCandidate]:
-    eligible = [
-        candidate
-        for candidate in candidates
-        if candidate.content_form == "original"
-        and candidate.importance_score >= DAILY_REPORT_MIN_IMPORTANCE
-    ]
-    eligible.sort(
-        key=lambda candidate: (
-            candidate.importance_score,
-            _as_utc(candidate.published_at),
-            candidate.message_id,
-        ),
-        reverse=True,
-    )
-    return eligible
-
-
-def deduplicate_daily_candidates(
-    candidates: list[DailyReportCandidate],
-) -> list[DailyReportCandidate]:
-    """Keep the highest-ranked message for each already-aggregated event."""
-
-    seen_event_ids: set[int] = set()
-    deduplicated: list[DailyReportCandidate] = []
-    for candidate in candidates:
-        event_ids = set(candidate.event_ids)
-        if event_ids and event_ids & seen_event_ids:
-            continue
-        seen_event_ids.update(event_ids)
-        deduplicated.append(candidate)
-    return deduplicated
-
-
-def assign_daily_sections(
-    candidates: list[DailyReportCandidate],
-) -> dict[str, list[DailyReportCandidate]]:
-    sections = {name: [] for name in DAILY_REPORT_SECTION_LIMITS}
-    for candidate in candidates:
-        sections[daily_report_section(candidate.products)].append(candidate)
-    return sections
-
-
-def rank_daily_sections(
-    sections: dict[str, list[DailyReportCandidate]],
-) -> dict[str, list[DailyReportCandidate]]:
-    """Apply the stable V2 order and per-section limits."""
-    return {
-        section: list(candidates[: DAILY_REPORT_SECTION_LIMITS[section]])
-        for section, candidates in sections.items()
-    }
 
 
 def generate_daily_report(db: Session, report_date: date) -> DailyReport:
@@ -129,6 +43,16 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
             text("SELECT pg_advisory_xact_lock(hashtextextended(:identity, 0))"),
             {"identity": f"daily-report:{report_date.isoformat()}"},
         )
+    candidates = load_daily_candidates(db, report_date)
+    from app.methods import MethodAssembly
+    plan = MethodAssembly().plan_daily_report(candidates)
+    by_id = {candidate.message_id: candidate for candidate in candidates}
+    sections = {name: [by_id[row["message_id"]] for row in rows] for name, rows in plan.sections.items()}
+
+    return persist_daily_report(db, report_date, sections)
+
+
+def load_daily_candidates(db: Session, report_date: date) -> list[DailyReportCandidate]:
     window_start, window_end = daily_report_window(report_date)
     statement = (
         select(NormalizedItem)
@@ -165,9 +89,13 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
         for item in items
         if item.raw_item.published_at is not None
     ]
-    sections = select_daily_sections(candidates)
+    return candidates
 
-    return persist_daily_report(db, report_date, sections)
+
+def selected_daily_ids(db: Session, report_date: date) -> set[int]:
+    from app.methods import MethodAssembly
+    plan = MethodAssembly().plan_daily_report(load_daily_candidates(db, report_date))
+    return {row["message_id"] for rows in plan.sections.values() for row in rows}
 
 
 def persist_daily_report(

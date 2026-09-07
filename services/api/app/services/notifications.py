@@ -16,7 +16,7 @@ from app.connectors.baidu_tieba import (
 from app.connectors.weibo import WeiboConnectorCollectionError, WeiboConnectorConfigurationError
 from app.connectors.x_twitter import XConnectorCollectionError, XConnectorConfigurationError
 from app.core.config import settings
-from app.domain.importance import is_featured_message
+from app.services.featured_selection import selected_featured_ids
 from app.models.connector_run import ConnectorRun
 from app.models.normalized_item import NormalizedItem
 from app.models.notification import NotificationOutbox
@@ -143,10 +143,7 @@ def _featured_payload(item: NormalizedItem) -> dict[str, Any]:
 def enqueue_featured_message(db: Session, item: NormalizedItem) -> bool:
     if not settings.feishu_featured_push_enabled:
         return False
-    if item.publication_status != "published" or not is_featured_message(
-        item.importance_score,
-        content_form=item.content_form,
-    ):
+    if item.publication_status != "published" or item.id not in selected_featured_ids(db):
         return False
     return enqueue_notification(
         db,

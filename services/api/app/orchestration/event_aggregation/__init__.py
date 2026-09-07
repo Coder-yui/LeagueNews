@@ -8,8 +8,8 @@ from app.orchestration.event_aggregation.graph import (
     EventAggregationStage,
     build_event_aggregation_graph,
 )
-from app.orchestration.event_aggregation.v2_compat import (
-    V2CompatibilityEventBackend,
+from app.orchestration.event_aggregation.backend import (
+    EventAggregationBackendV3,
     create_event_aggregation_run,
 )
 
@@ -19,9 +19,9 @@ __all__ = [
     "EVENT_AGGREGATION_STAGE_ORDER",
     "EVENT_AGGREGATION_STATE_VERSION",
     "EventAggregationBackend",
+    "EventAggregationBackendV3",
     "EventAggregationRequest",
     "EventAggregationStage",
-    "V2CompatibilityEventBackend",
     "build_event_aggregation_graph",
     "create_event_aggregation_run",
 ]

@@ -1,0 +1,23 @@
+{
+  "experiment_id": "phase3-daily-report-20260907",
+  "dataset_manifest": "../daily_report/manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "baseline-daily",
+      "target": "daily_report",
+      "component_versions": {"method": "baseline", "fixture": "v1"},
+      "parameters": {"method_config": {"daily_report": "baseline"}}
+    },
+    {
+      "candidate_id": "one-lolpc-slot",
+      "target": "daily_report",
+      "component_versions": {"method": "baseline", "fixture": "v1"},
+      "parameters": {"method_config": {"daily_report": "baseline", "strategy_parameters": {"daily_report": {"section_limits": {"lolpc": 1}}}}}
+    }
+  ],
+  "max_concurrency": 1,
+  "case_timeout_seconds": 10,
+  "code_version": "phase3-fixture-code-v1",
+  "prompt_version": "not-applicable-deterministic",
+  "model_version": "not-applicable"
+}

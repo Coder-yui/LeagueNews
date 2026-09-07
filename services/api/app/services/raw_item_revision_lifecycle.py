@@ -23,7 +23,7 @@ def supersede_previous_raw_revision(
         select(PipelineJob).where(
             PipelineJob.raw_item_id == previous.id,
             or_(
-                PipelineJob.status.in_(["queued", "running"]),
+                PipelineJob.status.in_(["queued", "running", "paused"]),
                 and_(
                     PipelineJob.status == "failed",
                     PipelineJob.next_attempt_at.is_not(None),

@@ -8,7 +8,7 @@ from app.orchestration.daily_report.graph import (
     DailyReportStage,
     build_daily_report_graph,
 )
-from app.orchestration.daily_report.v2_compat import V2CompatibilityDailyReportBackend
+from app.orchestration.daily_report.backend import DailyReportBackendV3
 
 __all__ = [
     "DAILY_REPORT_GRAPH",
@@ -16,8 +16,8 @@ __all__ = [
     "DAILY_REPORT_STAGE_ORDER",
     "DAILY_REPORT_STATE_VERSION",
     "DailyReportBackend",
+    "DailyReportBackendV3",
     "DailyReportRequest",
     "DailyReportStage",
-    "V2CompatibilityDailyReportBackend",
     "build_daily_report_graph",
 ]

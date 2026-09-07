@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.models.daily_report import DailyReport
 from app.models.normalized_item import NormalizedItem
-from app.services.daily_reports import daily_report_eligibility_conditions
+from app.services.daily_reports import selected_daily_ids
 from app.services.published_items import published_item_payload, published_item_statement
 
 
@@ -24,7 +24,7 @@ def daily_report_payload(db: Session, report: DailyReport) -> dict[str, Any]:
     if message_ids:
         statement = published_item_statement().where(
             NormalizedItem.id.in_(message_ids),
-            *daily_report_eligibility_conditions(),
+            NormalizedItem.id.in_(selected_daily_ids(db, report.report_date)),
         )
         messages = {item.id: published_item_payload(item) for item in db.scalars(statement)}
     sections: dict[str, list[dict[str, Any]]] = {
@@ -82,22 +82,8 @@ def list_daily_report_summaries(db: Session) -> list[dict[str, Any]]:
             .limit(90)
         )
     )
-    item_ids = {
-        item.normalized_item_id
-        for report in reports
-        if report.status == "published"
-        for item in report.items
-    }
-    visible_item_ids: set[int] = set()
-    if item_ids:
-        visible_item_ids = set(
-            db.scalars(
-                select(NormalizedItem.id).where(
-                    NormalizedItem.id.in_(item_ids),
-                    *daily_report_eligibility_conditions(),
-                )
-            )
-        )
+    visible_item_ids = {item_id for report in reports if report.status == "published"
+                        for item_id in selected_daily_ids(db, report.report_date)}
     return [
         daily_report_summary(
             report,

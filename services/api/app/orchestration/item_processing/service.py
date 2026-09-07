@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import secrets
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -11,7 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.models.pipeline import PipelineCorrection
+from app.core.config import settings
+from app.models.pipeline import PipelineCorrection, PipelineJob
 from app.models.raw_item import RawItem
 from app.models.workflow import ProcessingRun, ReviewTask
 from app.orchestration.checkpointing import open_postgres_checkpointer
@@ -25,10 +27,11 @@ from app.orchestration.contracts import (
     ReviewMode,
     RunMode,
 )
-from app.orchestration.item_processing.v2_compat import create_item_processing_run
+from app.orchestration.item_processing.backend import create_item_processing_run
+from app.methods import MethodAssemblyConfig
 from app.orchestration.runtime import LeagueNewsWorkflowRuntime
 from app.services.llm import LLMClient
-from app.services.pipeline_execution import PipelineExecutionGuard
+from app.services.pipeline_execution import PipelineExecutionGuard, assert_execution_owned
 
 
 SessionFactory = Callable[[], Session]
@@ -76,6 +79,34 @@ def request_for_processing_run(db: Session, run: ProcessingRun) -> ItemProcessin
     return request
 
 
+def method_config_for_run(run: ProcessingRun) -> MethodAssemblyConfig:
+    payload = run.method_config or run.context.get("method_config") or {}
+    return MethodAssemblyConfig.model_validate(payload)
+
+
+def _sync_pipeline_job_after_review(session_factory: SessionFactory, run_id: int) -> None:
+    """Finish or pause an automatic job after an HTTP review delivery.
+
+    A manual run has no PipelineJob.  For an automatic run the job remains the
+    lifecycle owner, so a review endpoint only mirrors the graph result into
+    that owner after the decision has been consumed.
+    """
+    with session_factory() as owned_db:
+        run = owned_db.get(ProcessingRun, run_id)
+        job = owned_db.scalar(
+            select(PipelineJob).where(PipelineJob.processing_run_id == run_id)
+        )
+        if run is None or job is None or job.status not in {"paused", "running"}:
+            return
+        job.status = "completed" if run.status == "completed" else "paused"
+        if job.status == "completed":
+            job.completed_at = datetime.now(UTC)
+        job.lease_token = None
+        job.lease_expires_at = None
+        job.worker_id = None
+        owned_db.commit()
+
+
 def _interrupt_value(result: dict[str, Any]) -> dict[str, Any] | None:
     interrupts = result.get("__interrupt__")
     if not interrupts:
@@ -99,10 +130,15 @@ def _sync_graph_result(
     session_factory: SessionFactory,
     request: ItemProcessingRequest,
     result: dict[str, Any],
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> None:
     interrupt_value = _interrupt_value(result)
     with session_factory() as db:
-        run = db.get(ProcessingRun, request.workflow_run_id)
+        run = db.scalar(
+            select(ProcessingRun)
+            .where(ProcessingRun.id == request.workflow_run_id)
+            .with_for_update()
+        )
         if run is None:
             raise ValueError("processing run disappeared while graph was running")
         if interrupt_value is None:
@@ -138,6 +174,8 @@ def _sync_graph_result(
             raise RuntimeError("processing run already has a different pending review")
         run.status = "awaiting_review"
         run.current_stage = stage
+        if execution_guard is not None:
+            execution_guard.assert_owned(db)
         db.commit()
 
 
@@ -145,6 +183,7 @@ def _mark_failed(
     session_factory: SessionFactory,
     request: ItemProcessingRequest,
     exc: Exception,
+    execution_guard: PipelineExecutionGuard | None = None,
 ) -> None:
     with session_factory() as db:
         run = db.get(ProcessingRun, request.workflow_run_id)
@@ -161,7 +200,12 @@ def _mark_failed(
                 correction.status = "failed"
                 correction.error_message = run.error_message
                 correction.completed_at = now
-        db.commit()
+        try:
+            if execution_guard is not None:
+                execution_guard.assert_owned(db)
+            db.commit()
+        except Exception:
+            db.rollback()
 
 
 async def invoke_item_processing(
@@ -174,6 +218,7 @@ async def invoke_item_processing(
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     checkpointer_context_factory: CheckpointerContextFactory = open_postgres_checkpointer,
     execution_guard: PipelineExecutionGuard | None = None,
+    method_config: MethodAssemblyConfig | None = None,
 ) -> dict[str, Any]:
     async def invoke(active_checkpointer: BaseCheckpointSaver[Any]) -> dict[str, Any]:
         runtime = LeagueNewsWorkflowRuntime(
@@ -181,6 +226,7 @@ async def invoke_item_processing(
             llm_factory=llm_factory,
             checkpointer=active_checkpointer,
             execution_guard=execution_guard,
+            method_config=method_config,
         )
         return await runtime.invoke_item(
             request,
@@ -194,10 +240,10 @@ async def invoke_item_processing(
         else:
             async with checkpointer_context_factory() as active_checkpointer:
                 result = await invoke(active_checkpointer)
-        _sync_graph_result(session_factory, request, result)
+        _sync_graph_result(session_factory, request, result, execution_guard)
         return result
     except Exception as exc:
-        _mark_failed(session_factory, request, exc)
+        _mark_failed(session_factory, request, exc, execution_guard)
         raise
 
 
@@ -211,14 +257,25 @@ async def start_item_processing(
     restart_from_stage: str = ProcessingStage.EVIDENCE.value,
     replay_from_run_id: int | None = None,
     allow_existing_projection: bool = False,
-    context: dict[str, Any] | None = None,
     defer_execution: bool = False,
     execution_guard: PipelineExecutionGuard | None = None,
     session_factory: SessionFactory = SessionLocal,
     llm_factory: LLMFactory = LLMClient,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
+    method_config: MethodAssemblyConfig | None = None,
 ) -> ProcessingRun:
-    del context  # Accepted while V2 callers migrate; V3 restores typed checkpoints.
+    # Serialize manual/automatic starts before creating or invoking a graph.
+    # This row lock is released before any model or checkpoint network call.
+    db.scalar(select(RawItem.id).where(RawItem.id == raw_item.id).with_for_update())
+    active = db.scalar(select(ProcessingRun).where(
+        ProcessingRun.raw_item_id == raw_item.id, ProcessingRun.workflow_type == "item",
+        ProcessingRun.status.in_(["running", "awaiting_review"]),
+    ).order_by(ProcessingRun.id.desc()).limit(1))
+    if active is not None:
+        if active.graph_name != ITEM_PROCESSING_GRAPH:
+            raise ValueError("unsupported legacy execution; apply migration 078 before starting workers")
+        db.commit()
+        return active
     stage = _stage(restart_from_stage)
     if stage != ProcessingStage.EVIDENCE and replay_from_run_id is None:
         stage = ProcessingStage.EVIDENCE
@@ -231,6 +288,8 @@ async def start_item_processing(
         restart_from_stage=stage,
         replay_from_run_id=replay_from_run_id,
         allow_existing_projection=allow_existing_projection,
+        method_config=method_config,
+        execution_guard=execution_guard,
     )
     if defer_execution:
         run = db.get(ProcessingRun, request.workflow_run_id)
@@ -245,6 +304,7 @@ async def start_item_processing(
         llm_factory=llm_factory,
         checkpointer=checkpointer,
         execution_guard=execution_guard,
+        method_config=method_config,
     )
     db.expire_all()
     run = db.get(ProcessingRun, request.workflow_run_id)
@@ -261,6 +321,7 @@ async def resume_item_processing(
     session_factory: SessionFactory = SessionLocal,
     llm_factory: LLMFactory = LLMClient,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
+    method_config: MethodAssemblyConfig | None = None,
 ) -> ProcessingRun:
     request = request_for_processing_run(db, run)
     graph_started = run.context.get("graph_started", True) is not False
@@ -274,6 +335,7 @@ async def resume_item_processing(
         llm_factory=llm_factory,
         checkpointer=checkpointer,
         execution_guard=execution_guard,
+        method_config=method_config or method_config_for_run(run),
     )
     db.expire_all()
     return db.get(ProcessingRun, run.id)  # type: ignore[return-value]
@@ -288,32 +350,119 @@ async def approve_review(
     session_factory: SessionFactory = SessionLocal,
     llm_factory: LLMFactory = LLMClient,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
+    replacement: dict[str, Any] | None = None,
+    decision_source: str = "manual",
+    policy_version: str | None = None,
 ) -> ProcessingRun:
-    if review.status != "pending":
+    if review.status not in {"pending", "approved"}:
         raise ValueError(f"review task cannot be resolved from status={review.status}")
-    run = review.processing_run
+    review_id = review.id
+    delivery_token = secrets.token_hex(24)
+    with session_factory() as owned_db:
+        locked_review = owned_db.scalar(
+            select(ReviewTask)
+            .where(ReviewTask.id == review_id)
+            .with_for_update()
+        )
+        if locked_review is None:
+            raise ValueError("review task not found")
+        now = datetime.now(UTC)
+        if locked_review.status == "pending":
+            if replacement is not None:
+                locked_review.proposal = dict(replacement)
+            locked_review.status = "approved"
+            locked_review.feedback = {"note": note} if note else {}
+            locked_review.resolved_at = now
+            locked_review.delivery_status = "recorded"
+            locked_review.decision_source = decision_source
+            locked_review.policy_version = policy_version
+        if (
+            locked_review.status == "approved"
+            and locked_review.delivery_status == "recorded"
+            and locked_review.delivery_claim_expires_at is not None
+            and locked_review.delivery_claim_expires_at > now
+            and locked_review.delivery_claim_token != delivery_token
+        ):
+            raise ValueError("review decision delivery is already in progress")
+        if locked_review.status == "approved" and locked_review.delivery_status == "recorded":
+            locked_review.delivery_attempts += 1
+            locked_review.delivery_claim_token = delivery_token
+            locked_review.delivery_claimed_at = now
+            locked_review.delivery_claim_expires_at = now + timedelta(
+                seconds=settings.review_delivery_lease_seconds
+            )
+            owned_db.commit()
+        elif locked_review.status == "approved" and locked_review.delivery_status == "consumed":
+            existing_run = db.get(ProcessingRun, locked_review.processing_run_id)
+            if existing_run is None:
+                raise ValueError("processing run not found")
+            return existing_run
+        elif locked_review.status != "approved" or locked_review.delivery_status != "recorded":
+            raise ValueError("review task is not ready for delivery")
+    # The decision was committed by the short delivery transaction above.
+    # Refresh the caller's identity map before building the LangGraph command;
+    # this also makes correct-and-approve use the committed replacement rather
+    # than a stale pending ReviewTask object.
+    db.expire_all()
+    review = db.get(ReviewTask, review_id)
+    run = db.get(ProcessingRun, review.processing_run_id) if review is not None else None
+    if review is None or run is None:
+        raise ValueError("review task or processing run not found")
     request = request_for_processing_run(db, run)
-    review.status = "approved"
-    review.feedback = {"note": note} if note else {}
-    review.resolved_at = datetime.now(UTC)
     run.status = "running"
     run.error_message = None
     run.completed_at = None
+    assert_execution_owned(db, execution_guard)
     db.commit()
-    await invoke_item_processing(
-        request,
-        command=Command(
-            resume=ReviewDecision(
-                action="approve",
-                note=note,
-                replacement=dict(review.proposal),
-            ).model_dump(mode="json")
-        ),
-        session_factory=session_factory,
-        llm_factory=llm_factory,
-        checkpointer=checkpointer,
-        execution_guard=execution_guard,
-    )
+    try:
+        await invoke_item_processing(
+            request,
+            command=Command(
+                resume=ReviewDecision(
+                    action="approve",
+                    note=note,
+                    replacement=dict(review.proposal),
+                ).model_dump(mode="json")
+            ),
+            session_factory=session_factory,
+            llm_factory=llm_factory,
+            checkpointer=checkpointer,
+            execution_guard=execution_guard,
+            method_config=method_config_for_run(run),
+        )
+    except Exception:
+        with session_factory() as owned_db:
+            failed_delivery = owned_db.scalar(
+                select(ReviewTask)
+                .where(
+                    ReviewTask.id == review_id,
+                    ReviewTask.delivery_claim_token == delivery_token,
+                )
+                .with_for_update()
+            )
+            if failed_delivery is not None:
+                failed_delivery.delivery_claim_token = None
+                failed_delivery.delivery_claimed_at = None
+                failed_delivery.delivery_claim_expires_at = None
+                owned_db.commit()
+        raise
+    with session_factory() as owned_db:
+        delivered = owned_db.scalar(
+            select(ReviewTask)
+            .where(
+                ReviewTask.id == review_id,
+                ReviewTask.delivery_claim_token == delivery_token,
+            )
+            .with_for_update()
+        )
+        if delivered is not None:
+            delivered.delivery_status = "consumed"
+            delivered.consumed_at = datetime.now(UTC)
+            delivered.delivery_claim_token = None
+            delivered.delivery_claimed_at = None
+            delivered.delivery_claim_expires_at = None
+            owned_db.commit()
+    _sync_pipeline_job_after_review(session_factory, run.id)
     db.expire_all()
     return db.get(ProcessingRun, run.id)  # type: ignore[return-value]
 
@@ -328,6 +477,10 @@ async def resume_rejected_review(
 ) -> ProcessingRun:
     if review.status != "rejected":
         raise ValueError("review task has not been rejected")
+    if review.delivery_status == "consumed":
+        return db.get(ProcessingRun, review.processing_run_id)  # type: ignore[return-value]
+    if review.delivery_status != "recorded":
+        raise ValueError("rejected review decision has not been recorded")
     run = review.processing_run
     request = request_for_processing_run(db, run)
     note = str(review.feedback.get("reason") or "review rejected")
@@ -339,7 +492,15 @@ async def resume_rejected_review(
         session_factory=session_factory,
         llm_factory=llm_factory,
         checkpointer=checkpointer,
+        method_config=method_config_for_run(run),
     )
+    with session_factory() as owned_db:
+        delivered = owned_db.get(ReviewTask, review.id)
+        if delivered is not None:
+            delivered.delivery_status = "consumed"
+            delivered.consumed_at = datetime.now(UTC)
+            owned_db.commit()
+    _sync_pipeline_job_after_review(session_factory, run.id)
     db.expire_all()
     return db.get(ProcessingRun, run.id)  # type: ignore[return-value]
 
@@ -353,8 +514,22 @@ async def retry_processing_run(
     llm_factory: LLMFactory = LLMClient,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> ProcessingRun:
+    pending_job = db.scalar(select(PipelineJob).where(
+        PipelineJob.raw_item_id == run.raw_item_id,
+        (PipelineJob.status.in_(["queued", "running", "paused"])) |
+        ((PipelineJob.status == "failed") & PipelineJob.next_attempt_at.is_not(None)),
+    ))
+    if pending_job is not None and execution_guard is None:
+        raise ValueError("active pipeline job owns the pending retry")
     if run.status != "failed":
         raise ValueError(f"processing run cannot retry from status={run.status}")
+    if run.graph_name != ITEM_PROCESSING_GRAPH:
+        return await start_item_processing(
+            db, run.raw_item, execution_mode=run.execution_mode,
+            supersedes_run_id=run.id, allow_existing_projection=True,
+            session_factory=session_factory, llm_factory=llm_factory,
+            checkpointer=checkpointer, execution_guard=execution_guard,
+        )
     request = request_for_processing_run(db, run)
     run.status = "running"
     run.outcome = None
@@ -368,6 +543,7 @@ async def retry_processing_run(
         llm_factory=llm_factory,
         checkpointer=checkpointer,
         execution_guard=execution_guard,
+        method_config=method_config_for_run(run),
     )
     db.expire_all()
     return db.get(ProcessingRun, run.id)  # type: ignore[return-value]

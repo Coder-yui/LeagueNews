@@ -1,0 +1,15 @@
+{
+  "name": "phase3-importance-synthetic",
+  "version": "2026-09-07-v1",
+  "target": "importance_scoring",
+  "input_schema_version": "importance-input-v1",
+  "shape": "independent",
+  "dataset_schema_version": "frozen-dataset-v1",
+  "source_description": "Synthetic, credential-free Phase 3 fixture; not production data.",
+  "label_schema_version": "importance-labels-v1",
+  "split_strategy": "explicit",
+  "group_strategy": "story-group",
+  "cases_file": "cases.jsonl",
+  "case_count": 2,
+  "fingerprint": "e76a9ba2c566d98cee478ee764fbc88bd6308cf74516714f719673a1782cb560"
+}

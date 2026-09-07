@@ -41,6 +41,10 @@ class ReviewTaskRead(BaseModel):
     feedback: dict[str, Any]
     decision_source: str
     policy_version: str | None
+    command_id: str
+    delivery_status: Literal["pending", "recorded", "consumed"]
+    delivery_attempts: int
+    consumed_at: datetime | None
     created_at: datetime
     resolved_at: datetime | None
 

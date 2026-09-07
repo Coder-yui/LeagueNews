@@ -14,7 +14,7 @@ def test_v3_catalog_exposes_exact_versions_and_planned_boundaries() -> None:
 
     item = registry.resolve(GraphName.ITEM_PROCESSING, "v3.0.0-dev2")
     event = registry.resolve(GraphName.EVENT_AGGREGATION, "v3.0.0-dev2")
-    daily = registry.resolve(GraphName.DAILY_REPORT_GENERATION, "v3.0.0-dev2")
+    daily = registry.resolve(GraphName.DAILY_REPORT_GENERATION, "v3.1.0")
 
     assert item.status == ImplementationStatus.IMPLEMENTED
     assert item.stages[0] == "evidence"
@@ -22,7 +22,7 @@ def test_v3_catalog_exposes_exact_versions_and_planned_boundaries() -> None:
     assert event.status == ImplementationStatus.IMPLEMENTED
     assert "semantic_decision" in event.stages
     assert daily.status == ImplementationStatus.IMPLEMENTED
-    assert "rank_items" in daily.stages
+    assert "plan" in daily.stages
 
 
 def test_graph_registry_rejects_ambiguous_or_invalid_registration() -> None:

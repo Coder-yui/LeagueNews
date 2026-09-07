@@ -1,0 +1,15 @@
+{
+  "name": "phase3-message-analysis-synthetic",
+  "version": "2026-09-07-v1",
+  "target": "message_analysis",
+  "input_schema_version": "message-analysis-input-v1",
+  "shape": "independent",
+  "dataset_schema_version": "frozen-dataset-v1",
+  "source_description": "Synthetic, credential-free Phase 3 fixture; not production data.",
+  "label_schema_version": "message-analysis-labels-v1",
+  "split_strategy": "explicit",
+  "group_strategy": "story-group",
+  "cases_file": "cases.jsonl",
+  "case_count": 2,
+  "fingerprint": "763bec8d6da0c4b6443d967da4dd3edfbfe70a08d9cc8aae671282e3486553d5"
+}

@@ -1,3 +1,4 @@
+from app.orchestration.contracts import ITEM_PROCESSING_GRAPH
 import asyncio
 import logging
 import os
@@ -7,7 +8,7 @@ import time
 from datetime import UTC, datetime
 from datetime import timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -24,6 +25,7 @@ from app.services.pipeline_execution import (
 from app.services.event_metrics import refresh_stale_event_metrics
 from app.services.pipeline_queue import enqueue_pipeline_job
 from app.services.notifications import enqueue_pipeline_failure
+from app.services.llm import LLMClient
 from app.services.raw_item_versions import (
     is_latest_raw_item,
     latest_raw_item_condition,
@@ -34,11 +36,7 @@ from app.orchestration.item_processing.service import (
     resume_item_processing as resume_v3_item_processing,
     start_item_processing,
 )
-from app.orchestration.contracts import ITEM_PROCESSING_GRAPH
-from app.workflows.reviewed_pipeline import (
-    approve_review as approve_v2_review,
-    resume_item_processing as resume_v2_item_processing,
-)
+from app.methods import MethodAssemblyConfig
 
 
 logger = logging.getLogger(__name__)
@@ -49,14 +47,21 @@ async def resume_item_processing(
     db: Session,
     run: ProcessingRun,
     *,
-    execution_guard: PipelineExecutionGuard | None = None,
+    execution_guard=None,
+    method_config=None,
+    session_factory=SessionLocal,
+    llm_factory=LLMClient,
+    checkpointer=None,
 ) -> ProcessingRun:
-    resume = (
-        resume_v3_item_processing
-        if run.graph_name == ITEM_PROCESSING_GRAPH
-        else resume_v2_item_processing
+    return await resume_v3_item_processing(
+        db,
+        run,
+        execution_guard=execution_guard,
+        method_config=method_config,
+        session_factory=session_factory,
+        llm_factory=llm_factory,
+        checkpointer=checkpointer,
     )
-    return await resume(db, run, execution_guard=execution_guard)
 
 
 def _worker_id() -> str:
@@ -155,9 +160,7 @@ def _is_retryable_pipeline_error(exc: Exception) -> bool:
 
 def _retry_delay_seconds(attempts: int) -> int:
     index = max(attempts - 1, 0)
-    return PIPELINE_RETRY_BACKOFF_SECONDS[
-        min(index, len(PIPELINE_RETRY_BACKOFF_SECONDS) - 1)
-    ]
+    return PIPELINE_RETRY_BACKOFF_SECONDS[min(index, len(PIPELINE_RETRY_BACKOFF_SECONDS) - 1)]
 
 
 async def execute_pipeline_job(
@@ -165,6 +168,9 @@ async def execute_pipeline_job(
     job: PipelineJob,
     *,
     execution_guard: PipelineExecutionGuard | None = None,
+    session_factory=SessionLocal,
+    llm_factory=LLMClient,
+    checkpointer=None,
 ) -> None:
     raw_item = db.get(RawItem, job.raw_item_id)
     if raw_item is None:
@@ -175,33 +181,64 @@ async def execute_pipeline_job(
         job.completed_at = datetime.now(UTC)
         return
 
-    if job.current_stage == "event_aggregation":
+    if job.job_type == "event" or job.current_stage == "event_aggregation":
         item = raw_item.normalized_item
         if item is None or item.publication_status != "published":
             job.status = "cancelled"
             job.error_message = "published NormalizedItem is no longer available"
             job.completed_at = datetime.now(UTC)
             return
-        assert_execution_owned(db, execution_guard)
-        if execution_guard is None:
+        # The event job is an independent execution identity.  Release the
+        # worker Session transaction before the graph performs model/network
+        # work; graph backends use short-lived Sessions for each side effect.
+        db.rollback()
+        if (
+            execution_guard is None
+            and session_factory is SessionLocal
+            and llm_factory is LLMClient
+            and checkpointer is None
+        ):
             await publish_normalized_item_downstream(db, item)
         else:
             await publish_normalized_item_downstream(
-                db, item, execution_guard=execution_guard
+                db,
+                item,
+                execution_guard=execution_guard,
+                session_factory=session_factory,
+                llm_factory=llm_factory,
+                checkpointer=checkpointer,
+                method_config=MethodAssemblyConfig.model_validate(job.method_config or {}),
             )
         return
 
     item_run = _active_item_run(db, raw_item.id) or _failed_item_run(db, job)
+    if item_run is not None and item_run.execution_mode == "manual":
+        job.status = "cancelled"
+        job.error_message = "manual processing run owns this RawItem"
+        job.completed_at = datetime.now(UTC)
+        return
+    if item_run is not None and item_run.graph_name != ITEM_PROCESSING_GRAPH:
+        if item_run.status in {"running", "awaiting_review"}:
+            raise ValueError(
+                "unsupported legacy execution; apply migration 078 before starting workers"
+            )
+        item_run = None  # terminal history stays intact; new work starts at source evidence
     if item_run is None and (
         raw_item.normalized_item is None
         or raw_item.normalized_item.publication_status == "withdrawn"
     ):
+        db.rollback()
         item_run = await start_item_processing(
             db,
             raw_item,
             execution_mode="automatic",
             correction_id=job.correction_id,
+            allow_existing_projection=raw_item.normalized_item is not None,
             execution_guard=execution_guard,
+            session_factory=session_factory,
+            llm_factory=llm_factory,
+            checkpointer=checkpointer,
+            method_config=MethodAssemblyConfig.model_validate(job.method_config or {}),
         )
     if item_run is not None:
         if item_run.execution_mode == "manual":
@@ -225,10 +262,15 @@ async def execute_pipeline_job(
             db.commit()
             db.refresh(item_run)
         if item_run.status == "running":
+            db.rollback()
             item_run = await resume_item_processing(
                 db,
                 item_run,
                 execution_guard=execution_guard,
+                method_config=MethodAssemblyConfig.model_validate(job.method_config or {}),
+                session_factory=session_factory,
+                llm_factory=llm_factory,
+                checkpointer=checkpointer,
             )
         while item_run.status == "awaiting_review":
             review = _pending_item_review(db, item_run.id)
@@ -236,22 +278,23 @@ async def execute_pipeline_job(
                 raise RuntimeError("automatic item run has no pending review")
             if review.proposal.get("requires_manual_review"):
                 job.current_stage = review.stage
+                job.status = "paused"
                 return
             job.current_stage = review.stage
             review.decision_source = "automatic"
             review.policy_version = "auto-approve-v1"
             assert_execution_owned(db, execution_guard)
             db.commit()
-            approve = (
-                approve_v3_review
-                if item_run.graph_name == ITEM_PROCESSING_GRAPH
-                else approve_v2_review
-            )
-            item_run = await approve(
+            item_run = await approve_v3_review(
                 db,
                 review,
                 note="automatic pipeline approval",
                 execution_guard=execution_guard,
+                session_factory=session_factory,
+                llm_factory=llm_factory,
+                checkpointer=checkpointer,
+                decision_source="automatic",
+                policy_version="auto-approve-v1",
             )
         if item_run.status != "completed":
             raise RuntimeError(f"automatic item run stopped with status={item_run.status}")
@@ -262,15 +305,9 @@ async def execute_pipeline_job(
     item = raw_item.normalized_item
     if item is None or item.publication_status != "published":
         raise RuntimeError("automatic item pipeline did not publish a normalized item")
-    job.current_stage = "event_aggregation"
-    assert_execution_owned(db, execution_guard)
-    db.commit()
-    if execution_guard is None:
-        await publish_normalized_item_downstream(db, item)
-    else:
-        await publish_normalized_item_downstream(
-            db, item, execution_guard=execution_guard
-        )
+    # Publication has already enqueued the independent event job in the same
+    # transaction as the projection and revision.  The message job ends here.
+    return
 
 
 def _finalize_expired_exhausted_job(db: Session, now: datetime) -> bool:
@@ -278,7 +315,11 @@ def _finalize_expired_exhausted_job(db: Session, now: datetime) -> bool:
         select(PipelineJob)
         .where(
             PipelineJob.status == "running",
-            PipelineJob.attempts >= settings.pipeline_worker_max_attempts,
+            PipelineJob.attempts
+            >= case(
+                (PipelineJob.workflow_version.is_not(None), PipelineJob.max_attempts),
+                else_=settings.pipeline_worker_max_attempts,
+            ),
             or_(
                 PipelineJob.lease_expires_at.is_(None),
                 PipelineJob.lease_expires_at <= now,
@@ -324,13 +365,31 @@ def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob
             or_(
                 (
                     (PipelineJob.status == "queued")
-                    & (PipelineJob.attempts < settings.pipeline_worker_max_attempts)
+                    & (
+                        PipelineJob.attempts
+                        < case(
+                            (
+                                PipelineJob.workflow_version.is_not(None),
+                                PipelineJob.max_attempts,
+                            ),
+                            else_=settings.pipeline_worker_max_attempts,
+                        )
+                    )
                 ),
                 (
                     (PipelineJob.status == "failed")
                     & PipelineJob.next_attempt_at.is_not(None)
                     & (PipelineJob.next_attempt_at <= now)
-                    & (PipelineJob.attempts < settings.pipeline_worker_max_attempts)
+                    & (
+                        PipelineJob.attempts
+                        < case(
+                            (
+                                PipelineJob.workflow_version.is_not(None),
+                                PipelineJob.max_attempts,
+                            ),
+                            else_=settings.pipeline_worker_max_attempts,
+                        )
+                    )
                 ),
                 (
                     (PipelineJob.status == "running")
@@ -338,7 +397,16 @@ def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob
                         PipelineJob.lease_expires_at.is_(None)
                         | (PipelineJob.lease_expires_at <= now)
                     )
-                    & (PipelineJob.attempts < settings.pipeline_worker_max_attempts)
+                    & (
+                        PipelineJob.attempts
+                        < case(
+                            (
+                                PipelineJob.workflow_version.is_not(None),
+                                PipelineJob.max_attempts,
+                            ),
+                            else_=settings.pipeline_worker_max_attempts,
+                        )
+                    )
                 ),
             )
         )
@@ -441,7 +509,8 @@ async def process_next_job() -> bool:
                 job,
                 execution_guard=execution_guard,
             )
-            if job.status == "cancelled":
+            if job.status in {"cancelled", "paused"}:
+                assert_execution_owned(db, execution_guard)
                 job.next_attempt_at = None
                 job.lease_token = None
                 job.lease_expires_at = None
@@ -465,9 +534,7 @@ async def process_next_job() -> bool:
                     if job.processing_run_id is not None
                     else None
                 )
-                if correction is not None and (
-                    item_run is None or item_run.status == "completed"
-                ):
+                if correction is not None and (item_run is None or item_run.status == "completed"):
                     correction.status = "completed"
                     correction.completed_at = job.completed_at
                     correction.error_message = None
@@ -496,15 +563,14 @@ async def process_next_job() -> bool:
             job.lease_token = None
             job.lease_expires_at = None
             job.worker_id = None
-            can_retry = (
-                job.attempts < settings.pipeline_worker_max_attempts
-                and _is_retryable_pipeline_error(exc)
-            )
+            can_retry = job.attempts < (
+                job.max_attempts
+                if job.workflow_version is not None
+                else settings.pipeline_worker_max_attempts
+            ) and _is_retryable_pipeline_error(exc)
             if can_retry:
                 job.completed_at = None
-                job.next_attempt_at = now + timedelta(
-                    seconds=_retry_delay_seconds(job.attempts)
-                )
+                job.next_attempt_at = now + timedelta(seconds=_retry_delay_seconds(job.attempts))
                 logger.warning(
                     "pipeline job %s failed on attempt %s; retry scheduled at %s: %s",
                     job.id,

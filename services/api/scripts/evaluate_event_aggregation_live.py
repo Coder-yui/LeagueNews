@@ -12,7 +12,7 @@ from app.core.database import SessionLocal
 from app.domain.event_admission import derive_event_space
 from app.models.normalized_item import NormalizedItem
 from app.services.llm import LLMClient
-from app.workflows.event_aggregation import _message_payload
+from app.services.event_method_support import build_event_message_payload as _message_payload
 from scripts.evaluate_event_aggregation import DEFAULT_FIXTURE, evaluate
 
 

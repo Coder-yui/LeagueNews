@@ -53,7 +53,8 @@ def operational_metrics(db: Session = Depends(get_db)) -> dict[str, object]:
         trace
         for checkpoint in checkpoints
         for trace in _execution_traces(
-            checkpoint.output_snapshot.get("_execution_metadata")
+            checkpoint.output_snapshot.get("execution_metadata")
+            or checkpoint.output_snapshot.get("_execution_metadata")
         )
     ]
     return {

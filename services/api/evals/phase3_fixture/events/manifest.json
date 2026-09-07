@@ -1,0 +1,15 @@
+{
+  "name": "phase3-events-synthetic",
+  "version": "2026-09-07-v2",
+  "target": "event_aggregation",
+  "input_schema_version": "event-aggregation-input-v1",
+  "shape": "stateful_scenario",
+  "dataset_schema_version": "frozen-dataset-v1",
+  "source_description": "Synthetic ordered scenarios; one case intentionally fails to prove dependent-step invalidation.",
+  "label_schema_version": "event-labels-v1",
+  "split_strategy": "explicit",
+  "group_strategy": "event-story",
+  "cases_file": "cases.jsonl",
+  "case_count": 2,
+  "fingerprint": "c3f4ccb9103286a7e9bc9eb25686051f560e421c1b0d95d294d1d48c627029d0"
+}

@@ -1,0 +1,39 @@
+{
+  "experiment_id": "phase3-message-analysis-20260907",
+  "dataset_manifest": "../message_analysis/manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "baseline",
+      "target": "message_analysis",
+      "component_versions": {
+        "method": "baseline",
+        "fixture": "v1"
+      },
+      "parameters": {
+        "method_config": {
+          "message_analysis": "baseline"
+        }
+      }
+    },
+    {
+      "candidate_id": "heuristic",
+      "target": "message_analysis",
+      "component_versions": {
+        "method": "heuristic",
+        "fixture": "v1"
+      },
+      "parameters": {
+        "method_config": {
+          "message_analysis": "heuristic"
+        },
+        "note": "synthetic alternate"
+      }
+    }
+  ],
+  "max_concurrency": 2,
+  "case_timeout_seconds": 10,
+  "code_version": "phase3-fixture-code-v1",
+  "prompt_version": "phase3-fixture-prompt-v1",
+  "model_version": "fixture-client-v1",
+  "evaluator_version": "phase3-v1"
+}

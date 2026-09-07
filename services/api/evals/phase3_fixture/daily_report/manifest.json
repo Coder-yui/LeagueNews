@@ -1,0 +1,15 @@
+{
+  "name": "phase3-daily-report-synthetic",
+  "version": "2026-09-07-v1",
+  "target": "daily_report",
+  "input_schema_version": "daily-report-candidate-set-v1",
+  "shape": "candidate_collection",
+  "dataset_schema_version": "frozen-dataset-v1",
+  "source_description": "Synthetic time-window candidate collection; no online report is persisted.",
+  "label_schema_version": "daily-report-labels-v1",
+  "split_strategy": "time-window",
+  "group_strategy": "story-group",
+  "cases_file": "cases.jsonl",
+  "case_count": 1,
+  "fingerprint": "3a7d126f1bbae923ce8b63b80d26182a8a79debd3a2634178dfb9c6c70e0ddc5"
+}

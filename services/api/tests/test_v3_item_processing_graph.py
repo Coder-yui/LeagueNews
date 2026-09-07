@@ -88,7 +88,14 @@ class FakeBackend:
             reason="fixture",
         )
 
-    async def understand_media(self, _evidence: EvidenceSnapshot) -> MediaProposal:
+    async def understand_media(
+        self,
+        _evidence: EvidenceSnapshot,
+        *,
+        run_mode: RunMode = RunMode.PRODUCTION,
+        workflow_run_id: int | None = None,
+    ) -> MediaProposal:
+        del run_mode, workflow_run_id
         self.calls.append("media")
         return MediaProposal()
 

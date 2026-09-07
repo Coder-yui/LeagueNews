@@ -6,17 +6,18 @@ from langgraph.types import Command
 from sqlalchemy.orm import Session
 
 from app.orchestration.catalog import GraphName, GraphRegistry, create_v3_graph_registry
+from app.methods import MethodAssembly, MethodAssemblyConfig, MethodCallRecord
 from app.orchestration.daily_report import (
     DAILY_REPORT_GRAPH_VERSION,
     DailyReportRequest,
-    V2CompatibilityDailyReportBackend,
+    DailyReportBackendV3,
 )
 from app.orchestration.event_aggregation import (
     EVENT_AGGREGATION_GRAPH_VERSION,
     EventAggregationRequest,
-    V2CompatibilityEventBackend,
+    EventAggregationBackendV3,
 )
-from app.orchestration.item_processing import V2CompatibilityItemBackend
+from app.orchestration.item_processing import ItemProcessingBackendV3
 from app.orchestration.contracts import (
     ITEM_PROCESSING_GRAPH_VERSION,
     ItemProcessingRequest,
@@ -45,20 +46,28 @@ class LeagueNewsWorkflowRuntime:
         checkpointer: BaseCheckpointSaver[Any] | None = None,
         registry: GraphRegistry | None = None,
         execution_guard: PipelineExecutionGuard | None = None,
+        method_config: MethodAssemblyConfig | None = None,
+        method_assembly: MethodAssembly | None = None,
     ) -> None:
         self._registry = registry or create_v3_graph_registry()
         self._checkpointer = checkpointer
-        self._item_backend = V2CompatibilityItemBackend(
+        self._method_assembly = method_assembly or MethodAssembly(method_config)
+        self._item_backend = ItemProcessingBackendV3(
             session_factory,
             llm_factory=llm_factory,
             execution_guard=execution_guard,
+            method_assembly=self._method_assembly,
         )
-        self._event_backend = V2CompatibilityEventBackend(
+        self._event_backend = EventAggregationBackendV3(
             session_factory,
             llm_factory=llm_factory,
             execution_guard=execution_guard,
+            method_assembly=self._method_assembly,
         )
-        self._daily_backend = V2CompatibilityDailyReportBackend(session_factory)
+        self._daily_backend = DailyReportBackendV3(
+            session_factory,
+            method_assembly=self._method_assembly,
+        )
 
     async def invoke_item(
         self,
@@ -126,6 +135,12 @@ class LeagueNewsWorkflowRuntime:
             GraphName.EVENT_AGGREGATION.value: EVENT_AGGREGATION_GRAPH_VERSION,
             GraphName.DAILY_REPORT_GENERATION.value: DAILY_REPORT_GRAPH_VERSION,
         }
+
+    @property
+    def method_calls(self) -> tuple[MethodCallRecord, ...]:
+        """Actual method selections made since this runtime was created."""
+
+        return self._method_assembly.calls
 
 
 def _config(thread_id: str) -> dict[str, dict[str, str]]:

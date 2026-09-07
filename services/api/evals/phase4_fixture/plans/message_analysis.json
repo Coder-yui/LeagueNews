@@ -1,0 +1,29 @@
+{
+  "experiment_id": "phase4-message-analysis-20260907",
+  "dataset_manifest": "../../phase3_fixture/message_analysis/manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "baseline",
+      "target": "message_analysis",
+      "component_versions": {"method": "baseline", "fixture": "v1"},
+      "parameters": {"method_config": {"message_analysis": "baseline"}}
+    },
+    {
+      "candidate_id": "heuristic-example",
+      "target": "message_analysis",
+      "component_versions": {"method": "heuristic", "fixture": "v1"},
+      "parameters": {
+        "method_config": {
+          "message_analysis": "heuristic",
+          "strategy_parameters": {"message_analysis": {"summary_max_chars": 8}}
+        }
+      }
+    }
+  ],
+  "max_concurrency": 2,
+  "case_timeout_seconds": 10,
+  "code_version": "phase4-method-candidates-v1",
+  "prompt_version": "not-applicable-deterministic",
+  "model_version": "not-applicable",
+  "evaluator_version": "phase3-v1"
+}

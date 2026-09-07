@@ -1,0 +1,24 @@
+{
+  "experiment_id": "phase4-daily-report-20260907",
+  "dataset_manifest": "../../phase3_fixture/daily_report/manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "baseline",
+      "target": "daily_report",
+      "component_versions": {"method": "baseline", "fixture": "v1"},
+      "parameters": {"method_config": {"daily_report": "baseline"}}
+    },
+    {
+      "candidate_id": "balanced-example",
+      "target": "daily_report",
+      "component_versions": {"method": "balanced", "fixture": "v1"},
+      "parameters": {"method_config": {"daily_report": "balanced"}}
+    }
+  ],
+  "max_concurrency": 2,
+  "case_timeout_seconds": 10,
+  "code_version": "phase4-method-candidates-v1",
+  "prompt_version": "not-applicable-deterministic",
+  "model_version": "not-applicable",
+  "evaluator_version": "phase3-v1"
+}

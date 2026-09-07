@@ -86,7 +86,13 @@ class ItemProcessingBackend(Protocol):
 
     async def judge_relevance(self, evidence: EvidenceSnapshot) -> RelevanceProposal: ...
 
-    async def understand_media(self, evidence: EvidenceSnapshot) -> MediaProposal: ...
+    async def understand_media(
+        self,
+        evidence: EvidenceSnapshot,
+        *,
+        run_mode: RunMode = RunMode.PRODUCTION,
+        workflow_run_id: int | None = None,
+    ) -> MediaProposal: ...
 
     async def translate(
         self, evidence: EvidenceSnapshot, media: MediaProposal
@@ -227,8 +233,11 @@ def build_item_processing_graph(
         return "irrelevant" if proposal.decision == "irrelevant" else "continue"
 
     async def media(state: ItemProcessingState) -> ItemProcessingState:
+        request = ItemProcessingRequest.model_validate(state["request"])
         proposal = await backend.understand_media(
-            _model(state, "evidence", EvidenceSnapshot)
+            _model(state, "evidence", EvidenceSnapshot),
+            run_mode=request.run_mode,
+            workflow_run_id=request.workflow_run_id,
         )
         return {"media": proposal.model_dump(mode="json"), "trace": ["media"]}
 

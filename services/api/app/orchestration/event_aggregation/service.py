@@ -16,10 +16,11 @@ from app.orchestration.event_aggregation.graph import (
     EVENT_AGGREGATION_GRAPH_VERSION,
     EventAggregationRequest,
 )
-from app.orchestration.event_aggregation.v2_compat import create_event_aggregation_run
+from app.orchestration.event_aggregation.backend import create_event_aggregation_run
 from app.orchestration.runtime import LeagueNewsWorkflowRuntime
 from app.services.llm import LLMClient
 from app.services.pipeline_execution import PipelineExecutionGuard
+from app.methods import MethodAssemblyConfig
 
 
 SessionFactory = Callable[[], Session]
@@ -34,6 +35,7 @@ async def invoke_event_aggregation(
     llm_factory: LLMFactory = LLMClient,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     execution_guard: PipelineExecutionGuard | None = None,
+    method_config: MethodAssemblyConfig | None = None,
 ) -> dict[str, Any]:
     try:
         if checkpointer is not None:
@@ -42,6 +44,7 @@ async def invoke_event_aggregation(
                 llm_factory=llm_factory,
                 checkpointer=checkpointer,
                 execution_guard=execution_guard,
+                method_config=method_config,
             )
             return await runtime.invoke_event(
                 request, resume_existing=resume_existing
@@ -52,6 +55,7 @@ async def invoke_event_aggregation(
                 llm_factory=llm_factory,
                 checkpointer=saver,
                 execution_guard=execution_guard,
+                method_config=method_config,
             )
             return await runtime.invoke_event(
                 request, resume_existing=resume_existing
@@ -64,7 +68,12 @@ async def invoke_event_aggregation(
                 run.outcome = "apply_error"
                 run.error_message = str(exc)[:4000]
                 run.completed_at = datetime.now(UTC)
-                db.commit()
+                try:
+                    if execution_guard is not None:
+                        execution_guard.assert_owned(db)
+                    db.commit()
+                except Exception:
+                    db.rollback()
         raise
 
 
@@ -76,6 +85,7 @@ async def publish_normalized_item_downstream(
     session_factory: SessionFactory = SessionLocal,
     llm_factory: LLMFactory = LLMClient,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
+    method_config: MethodAssemblyConfig | None = None,
 ) -> EventAggregationRun | None:
     if not settings.event_aggregation_enabled:
         return None
@@ -90,6 +100,9 @@ async def publish_normalized_item_downstream(
     )
     if existing is not None and existing.status == "completed":
         return existing
+    resolved_method_config = method_config or MethodAssemblyConfig.model_validate(
+        (existing.decision_draft if existing is not None else {}).get("method_config") or {}
+    )
     resume_existing = bool(
         existing is not None
         and existing.decision_draft.get("graph_version")
@@ -100,6 +113,8 @@ async def publish_normalized_item_downstream(
         normalized_item_id=item.id,
         normalized_item_revision=item.current_revision,
         review_mode=ReviewMode.AUTOMATIC,
+        method_config=resolved_method_config,
+        execution_guard=execution_guard,
     )
     if resume_existing:
         with session_factory() as owned_db:
@@ -117,6 +132,7 @@ async def publish_normalized_item_downstream(
         llm_factory=llm_factory,
         checkpointer=checkpointer,
         execution_guard=execution_guard,
+        method_config=resolved_method_config,
     )
     if result.get("__interrupt__"):
         raise RuntimeError("automatic event aggregation unexpectedly requested review")

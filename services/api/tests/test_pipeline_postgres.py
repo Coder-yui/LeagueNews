@@ -19,7 +19,7 @@ from app.services.automatic_pipeline import _claim_next_job
 import app.services.collection_scheduler as scheduler_service
 from app.services.collection_scheduler import execute_claimed_schedule
 from app.models.connector_run import ConnectorRun
-from app.workflows.reviewed_pipeline import start_item_processing
+from app.orchestration.item_processing.service import start_item_processing
 
 pytestmark = pytest.mark.postgres
 
@@ -118,20 +118,13 @@ def test_workers_claim_one_job_once_and_manual_auto_share_active_run(
             claims = list(executor.map(claim, ["worker-a", "worker-b"]))
         assert sorted(value for value in claims if value is not None) == [job_id]
 
-        async def no_generation(_db: Session, run: ProcessingRun) -> None:
-            return None
-
-        monkeypatch.setattr(
-            "app.workflows.reviewed_pipeline._evaluate_relevance",
-            no_generation,
-        )
         start_barrier = Barrier(2)
 
         def start(mode: str) -> int:
             with Session(engine, expire_on_commit=False) as db:
                 raw = db.get(RawItem, raw_item_id)
                 start_barrier.wait()
-                run = asyncio.run(start_item_processing(db, raw, execution_mode=mode))
+                run = asyncio.run(start_item_processing(db, raw, execution_mode=mode, defer_execution=True))
                 return run.id
 
         with ThreadPoolExecutor(max_workers=2) as executor:

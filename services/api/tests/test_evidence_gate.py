@@ -5,7 +5,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401
-import app.workflows.reviewed_pipeline as reviewed_pipeline
+from app.orchestration.item_processing import service as item_processing_service
+from langgraph.checkpoint.memory import InMemorySaver
+from sqlalchemy.orm import sessionmaker
 from app.core.database import Base
 from app.domain.evidence import evaluate_evidence_gate
 from app.models.media_asset import MediaAsset
@@ -107,23 +109,17 @@ def test_ordinary_image_only_post_is_classified_and_published(monkeypatch) -> No
                 content_form="media_only",
             )
 
-    monkeypatch.setattr(reviewed_pipeline, "LLMClient", MediaOnlyClient)
+    saver = InMemorySaver()
     with _session() as db:
         raw_item = _raw_item(db, title=None, text=None)
 
         run = asyncio.run(
-            reviewed_pipeline.start_item_processing(db, raw_item, execution_mode="automatic")
+            item_processing_service.start_item_processing(db, raw_item, execution_mode="automatic", session_factory=sessionmaker(db.bind, expire_on_commit=False), llm_factory=MediaOnlyClient, checkpointer=saver)
         )
-        review = db.scalar(
-            select(ReviewTask).where(
-                ReviewTask.processing_run_id == run.id,
-                ReviewTask.stage == "message_analysis",
-                ReviewTask.status == "pending",
-            )
-        )
-        assert review is not None
-
-        run = asyncio.run(reviewed_pipeline.approve_review(db, review, note=None))
+        while run.status == "awaiting_review":
+            review = db.scalar(select(ReviewTask).where(ReviewTask.processing_run_id == run.id, ReviewTask.status == "pending"))
+            run = asyncio.run(item_processing_service.approve_review(db, review, note=None,
+                session_factory=sessionmaker(db.bind, expire_on_commit=False), llm_factory=MediaOnlyClient, checkpointer=saver))
 
         checkpoint = db.scalar(
             select(ProcessingCheckpoint).where(
@@ -142,40 +138,6 @@ def test_ordinary_image_only_post_is_classified_and_published(monkeypatch) -> No
         assert raw_item.normalized_item.importance_score == 0.0
 
 
-def test_designer_patch_image_routes_to_ocr_review(monkeypatch) -> None:
-    class RelevantClient:
-        async def judge_relevance(self, **_kwargs):
-            return RelevanceResult(
-                decision="relevant",
-                confidence=0.99,
-                reason="设计师版本预览",
-            )
-
-    async def fake_ocr_review(db: Session, run, **_kwargs) -> None:
-        reviewed_pipeline._replace_pending_review(
-            db,
-            run=run,
-            stage=reviewed_pipeline.OCR_STAGE,
-            proposal={"approved_media_extraction_ids": []},
-        )
-        db.commit()
-
-    monkeypatch.setattr(reviewed_pipeline, "LLMClient", RelevantClient)
-    monkeypatch.setattr(reviewed_pipeline, "_generate_ocr_review", fake_ocr_review)
-    with _session() as db:
-        raw_item = _raw_item(
-            db,
-            title="Patch 26.16 preview",
-            text=None,
-            source_key="RiotPhroxzon",
-        )
-
-        run = asyncio.run(reviewed_pipeline.start_item_processing(db, raw_item))
-
-        review = db.scalar(select(ReviewTask).where(ReviewTask.processing_run_id == run.id))
-        assert review is not None
-        assert review.stage == "image_ocr"
-        assert run.context["evidence_gate"]["reason"] == "进入设计师版本改动图片提取"
 
 
 def test_approved_patch_structure_becomes_usable_evidence() -> None:

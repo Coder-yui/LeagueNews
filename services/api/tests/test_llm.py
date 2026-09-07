@@ -15,7 +15,7 @@ from app.services.llm import (
     TranslationResult,
     execution_metadata,
 )
-from app.workflows.translate_item import build_translation, detect_language
+from app.services.message_translation import build_translation, detect_language
 
 
 def test_missing_api_key_raises_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:

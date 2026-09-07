@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"
+    processing_method_config: dict[str, object] = {}
     llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 1
     media_root: str = "../../apps/web/public/media"
@@ -45,6 +46,7 @@ class Settings(BaseSettings):
     pipeline_worker_lease_seconds: int = 300
     pipeline_worker_heartbeat_seconds: int = 30
     pipeline_worker_max_attempts: int = 4
+    review_delivery_lease_seconds: int = 300
     rumor_expiry_days: int = 14
     collection_scheduler_poll_seconds: float = 5.0
     collection_scheduler_lease_minutes: int = 30
@@ -82,6 +84,8 @@ class Settings(BaseSettings):
             )
         if self.pipeline_worker_max_attempts <= 0:
             raise ValueError("pipeline_worker_max_attempts must be greater than 0")
+        if self.review_delivery_lease_seconds <= 0:
+            raise ValueError("review_delivery_lease_seconds must be greater than 0")
         if self.rumor_expiry_days <= 0:
             raise ValueError("rumor_expiry_days must be greater than 0")
         if self.event_metrics_refresh_seconds <= 0:

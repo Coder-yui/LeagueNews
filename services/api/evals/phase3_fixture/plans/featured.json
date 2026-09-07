@@ -1,0 +1,23 @@
+{
+  "experiment_id": "phase3-featured-20260907",
+  "dataset_manifest": "../featured/manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "baseline-threshold-075",
+      "target": "featured_selection",
+      "component_versions": {"method": "threshold", "fixture": "v1"},
+      "parameters": {"method_config": {"featured_selection": "threshold"}}
+    },
+    {
+      "candidate_id": "lower-threshold-065",
+      "target": "featured_selection",
+      "component_versions": {"method": "threshold", "fixture": "v1"},
+      "parameters": {"method_config": {"featured_selection": "threshold", "strategy_parameters": {"featured_selection": {"min_importance_score": 0.65}}}}
+    }
+  ],
+  "max_concurrency": 1,
+  "case_timeout_seconds": 10,
+  "code_version": "phase3-fixture-code-v1",
+  "prompt_version": "not-applicable-deterministic",
+  "model_version": "not-applicable"
+}

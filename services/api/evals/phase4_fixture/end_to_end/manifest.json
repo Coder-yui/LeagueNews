@@ -1,0 +1,15 @@
+{
+  "name": "phase4-end-to-end-synthetic",
+  "version": "2026-09-07-v2",
+  "target": "end_to_end",
+  "input_schema_version": "end-to-end-input-v1",
+  "shape": "candidate_collection",
+  "dataset_schema_version": "frozen-dataset-v1",
+  "source_description": "Synthetic complete-flow fixture: message analysis -> importance -> event -> distribution plans.",
+  "label_schema_version": "end-to-end-labels-v1",
+  "split_strategy": "explicit",
+  "group_strategy": "story-group",
+  "cases_file": "cases.jsonl",
+  "case_count": 1,
+  "fingerprint": "34d98442f5d4a13b90cf367f902dddaf0117b1f944f21cb953b3a197d0b382fa"
+}

@@ -1,0 +1,24 @@
+{
+  "experiment_id": "phase4-end-to-end-20260907",
+  "dataset_manifest": "manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "baseline-composed",
+      "target": "end_to_end",
+      "component_versions": {"message_analysis": "baseline", "importance": "baseline", "event": "baseline", "featured": "threshold", "daily": "baseline"},
+      "parameters": {"method_config": {"message_analysis": "baseline", "importance_scoring": "baseline", "event_aggregation": "baseline", "featured_selection": "threshold", "daily_report": "baseline"}}
+    },
+    {
+      "candidate_id": "candidate-composed",
+      "target": "end_to_end",
+      "component_versions": {"message_analysis": "heuristic", "importance": "rule_v2", "event": "token_recall_v2", "featured": "top_n", "daily": "balanced"},
+      "parameters": {"method_config": {"message_analysis": "heuristic", "importance_scoring": "rule_v2", "event_aggregation": "token_recall_v2", "featured_selection": "top_n", "daily_report": "balanced", "strategy_parameters": {"featured_selection": {"max_items": 1}, "daily_report": {}}}}
+    }
+  ],
+  "max_concurrency": 1,
+  "case_timeout_seconds": 10,
+  "code_version": "phase4-candidate-code-v1",
+  "prompt_version": "phase4-candidate-prompt-v1",
+  "model_version": "fixture-or-no-model",
+  "evaluator_version": "phase4-v1"
+}

@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from typing import Any
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
@@ -14,14 +13,14 @@ from app.schemas.pipeline import PipelineCorrectionCreate
 from app.services.media_publication import withdraw_raw_item_media
 from app.services.pipeline_queue import enqueue_pipeline_job
 from app.services.raw_item_versions import is_latest_raw_item
-from app.workflows.reviewed_pipeline import (
+from app.services.review_actions import (
     IMPORTANCE_STAGE,
     MESSAGE_ANALYSIS_STAGE,
     OCR_STAGE,
     RELEVANCE_STAGE,
     TRANSLATION_STAGE,
 )
-from app.workflows.understand_media import is_patch_preview
+from app.services.media_methods import is_patch_preview
 
 
 def _latest_processing_run(db: Session, raw_item_id: int) -> ProcessingRun | None:
@@ -83,59 +82,6 @@ def _checkpoint_before(
         .order_by(ProcessingCheckpoint.id.desc())
         .limit(1)
     )
-
-
-def _resume_context(
-    *,
-    source_run: ProcessingRun | None,
-    checkpoint: ProcessingCheckpoint | None,
-    restart_from_stage: str,
-) -> dict[str, Any]:
-    if restart_from_stage == RELEVANCE_STAGE:
-        return {}
-    context = dict(source_run.context) if source_run is not None else {}
-    relevance_context = {
-        key: context[key] for key in ("evidence_gate", "relevance_decision") if key in context
-    }
-    if restart_from_stage == OCR_STAGE:
-        return relevance_context
-    if restart_from_stage == TRANSLATION_STAGE:
-        extraction_ids = context.get("approved_media_extraction_ids")
-        if extraction_ids is None and checkpoint is not None:
-            extraction_ids = checkpoint.artifact_references.get("approved_media_extraction_ids", [])
-        return {
-            **relevance_context,
-            "approved_media_extraction_ids": extraction_ids or [],
-        }
-    if restart_from_stage in {MESSAGE_ANALYSIS_STAGE, IMPORTANCE_STAGE}:
-        translation = context.get("approved_translation_proposal")
-        if (
-            translation is None
-            and restart_from_stage == MESSAGE_ANALYSIS_STAGE
-            and checkpoint is not None
-        ):
-            translation = checkpoint.output_snapshot
-        if translation is None:
-            raise ValueError(
-                "no approved translation checkpoint is available; restart from translation"
-            )
-        result = {
-            **relevance_context,
-            "approved_media_extraction_ids": context.get("approved_media_extraction_ids", []),
-            "approved_translation_proposal": translation,
-        }
-        if restart_from_stage == IMPORTANCE_STAGE:
-            analysis = context.get("approved_message_analysis_proposal")
-            if analysis is None and checkpoint is not None:
-                analysis = checkpoint.output_snapshot
-            if analysis is None:
-                raise ValueError(
-                    "no approved message analysis checkpoint is available; "
-                    "restart from message_analysis"
-                )
-            result["approved_message_analysis_proposal"] = analysis
-        return result
-    return {}
 
 
 def _supersede_active_work(db: Session, *, raw_item_id: int) -> None:
@@ -202,11 +148,6 @@ async def create_and_start_correction(
     graph_stage, replay_from_run_id = _graph_restart(
         source_run, payload.restart_from_stage
     )
-    resume_context = _resume_context(
-        source_run=source_run,
-        checkpoint=checkpoint,
-        restart_from_stage=payload.restart_from_stage,
-    )
     correction = PipelineCorrection(
         raw_item_id=item.raw_item_id,
         normalized_item_id=item.id,
@@ -239,7 +180,6 @@ async def create_and_start_correction(
             restart_from_stage=graph_stage.value,
             replay_from_run_id=replay_from_run_id,
             allow_existing_projection=True,
-            context=resume_context,
             defer_execution=payload.resume_mode == "automatic",
         )
         if payload.resume_mode == "automatic":
@@ -342,11 +282,6 @@ async def recover_failed_job(
     graph_stage, replay_from_run_id = _graph_restart(
         source_run, payload.restart_from_stage
     )
-    context = _resume_context(
-        source_run=source_run,
-        checkpoint=checkpoint,
-        restart_from_stage=payload.restart_from_stage,
-    )
     correction = PipelineCorrection(
         raw_item_id=raw_item.id,
         source_processing_run_id=source_run.id if source_run else None,
@@ -369,7 +304,6 @@ async def recover_failed_job(
             correction_id=correction.id,
             restart_from_stage=graph_stage.value,
             replay_from_run_id=replay_from_run_id,
-            context=context,
             defer_execution=payload.resume_mode == "automatic",
         )
         if payload.resume_mode == "automatic":
@@ -432,7 +366,7 @@ async def restart_raw_item_from_beginning(
     active_job = db.scalar(
         select(PipelineJob).where(
             PipelineJob.raw_item_id == raw_item.id,
-            PipelineJob.status.in_(["queued", "running"]),
+            PipelineJob.status.in_(["queued", "running", "paused"]),
         )
     )
     if active_job is not None:
@@ -464,7 +398,6 @@ async def restart_raw_item_from_beginning(
             restart_from_stage=graph_stage.value,
             replay_from_run_id=replay_from_run_id,
             allow_existing_projection=raw_item.normalized_item is not None,
-            context={},
             defer_execution=True,
         )
         enqueue_pipeline_job(

@@ -14,6 +14,15 @@ class MediaExtraction(Base):
     media_asset_id: Mapped[int] = mapped_column(
         ForeignKey("media_assets.id", ondelete="CASCADE"), index=True
     )
+    # Derived artifacts are scoped so experiment/shadow OCR can never be
+    # mistaken for production evidence.  ``processing_run_id`` is nullable
+    # for historical/V2 artifacts created before V3 execution identities.
+    processing_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("processing_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    artifact_scope: Mapped[str] = mapped_column(
+        String(20), default="production", index=True
+    )
     task_type: Mapped[str] = mapped_column(String(60), index=True)
     provider: Mapped[str] = mapped_column(String(120))
     ocr_engine: Mapped[str] = mapped_column(String(120))

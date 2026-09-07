@@ -11,7 +11,6 @@ from app.orchestration.experiments import (
     ExperimentPlan,
     ExperimentRunner,
     ExperimentTarget,
-    ExactMatchEvaluator,
     LocalExperimentArtifactStore,
 )
 from app.orchestration.experiments.contracts import ExperimentExecutionContext
@@ -43,6 +42,26 @@ class SlowExecutor:
     async def execute(self, *, case, candidate, context):
         await asyncio.sleep(0.05)
         return {"case": case.case_id, "candidate": candidate.candidate_id}
+
+
+class ExactMatchForRunnerTest:
+    def evaluate(self, *, dataset, cases):
+        expected_by_id = {
+            case.case_id: case.expected
+            for case in dataset.cases
+            if case.expected is not None
+        }
+        labeled_results = [case for case in cases if case.case_id in expected_by_id]
+        matched = sum(
+            case.status == "succeeded"
+            and case.actual == expected_by_id[case.case_id]
+            for case in labeled_results
+        )
+        return {
+            "labeled": len(labeled_results),
+            "matched": matched,
+            "exact_match": matched / len(labeled_results) if labeled_results else None,
+        }
 
 
 def _plan() -> ExperimentPlan:
@@ -90,9 +109,7 @@ def test_experiment_runner_bounds_concurrency_and_isolates_case_failures() -> No
     plan = _plan()
     runner = ExperimentRunner(
         {ExperimentTarget.MESSAGE_IMPORTANCE: executor},
-        evaluators={
-            ExperimentTarget.MESSAGE_IMPORTANCE: ExactMatchEvaluator()
-        },
+        evaluators={ExperimentTarget.MESSAGE_IMPORTANCE: ExactMatchForRunnerTest()},
     )
 
     report = asyncio.run(runner.run(plan))

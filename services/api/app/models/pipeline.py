@@ -134,6 +134,14 @@ class PipelineJob(Base):
     raw_item_id: Mapped[int] = mapped_column(
         ForeignKey("raw_items.id", ondelete="RESTRICT"), index=True
     )
+    job_type: Mapped[str] = mapped_column(String(20), default="message", index=True)
+    target_entity_type: Mapped[str] = mapped_column(String(40), default="raw_item")
+    target_entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    target_revision: Mapped[int] = mapped_column(Integer, default=1)
+    workflow_name: Mapped[str] = mapped_column(String(80), default="item_processing")
+    workflow_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    method_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=4)
     correction_id: Mapped[int | None] = mapped_column(
         ForeignKey("pipeline_corrections.id", ondelete="SET NULL"),
         nullable=True,
@@ -169,14 +177,25 @@ class PipelineJob(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'running', 'completed', 'failed', 'cancelled')",
+            "status IN ('queued', 'running', 'paused', 'completed', 'failed', 'cancelled')",
             name="ck_pipeline_jobs_status",
         ),
+        CheckConstraint(
+            "job_type IN ('message', 'event')",
+            name="ck_pipeline_jobs_type",
+        ),
+        CheckConstraint(
+            "target_entity_type IN ('raw_item', 'normalized_item')",
+            name="ck_pipeline_jobs_target_type",
+        ),
+        CheckConstraint("target_revision >= 1", name="ck_pipeline_jobs_target_revision"),
         CheckConstraint("attempts >= 0", name="ck_pipeline_jobs_attempts"),
+        CheckConstraint("max_attempts > 0", name="ck_pipeline_jobs_max_attempts"),
         CheckConstraint("recovery_count >= 0", name="ck_pipeline_jobs_recovery_count"),
         Index(
-            "uq_pipeline_jobs_active_raw_item",
+            "uq_pipeline_jobs_active_target",
             "raw_item_id",
+            "job_type",
             unique=True,
             postgresql_where=text(
                 "status IN ('queued', 'running') OR "

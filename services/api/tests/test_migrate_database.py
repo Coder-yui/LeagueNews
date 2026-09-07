@@ -72,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name == "001_initial_schema.sql"
-    assert files[-1].name == "076_add_langgraph_checkpoint_store.sql"
+    assert files[-1].name == "078_retire_legacy_execution.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -161,6 +161,28 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     ):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in checkpoint_store
     assert "'076_add_langgraph_checkpoint_store'" in checkpoint_store
+
+    reliable_execution = (
+        MIGRATIONS / "077_add_reliable_execution_boundaries.sql"
+    ).read_text()
+    for column in (
+        "job_type",
+        "target_entity_type",
+        "target_entity_id",
+        "target_revision",
+        "workflow_name",
+        "workflow_version",
+        "method_config",
+        "max_attempts",
+        "command_id",
+        "delivery_status",
+        "delivery_claim_token",
+        "processing_run_id",
+        "artifact_scope",
+    ):
+        assert column in reliable_execution
+    assert "uq_pipeline_jobs_active_target" in reliable_execution
+    assert "'077_add_reliable_execution_boundaries'" in reliable_execution
 
     event_schema = (MIGRATIONS / "063_replace_event_system_with_v1.sql").read_text()
     assert "DROP TABLE IF EXISTS event_messages" in event_schema

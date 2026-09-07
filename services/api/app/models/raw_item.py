@@ -61,7 +61,7 @@ class RawItem(Base):
     def processing_status(self) -> str:
         if self.processing_runs:
             latest = max(self.processing_runs, key=lambda run: run.id)
-            if latest.status in {"running", "awaiting_review", "failed"}:
+            if latest.status in {"running", "awaiting_review", "failed", "paused"}:
                 return latest.status
         if (
             self.normalized_item

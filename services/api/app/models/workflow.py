@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import (
     Boolean,
@@ -7,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     JSON,
     String,
     Text,
@@ -45,6 +47,7 @@ class ProcessingRun(Base):
     )
     restart_from_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
     context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    method_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -107,6 +110,19 @@ class ReviewTask(Base):
     feedback: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     decision_source: Mapped[str] = mapped_column(String(20), default="manual", index=True)
     policy_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    command_id: Mapped[str] = mapped_column(
+        String(80), default=lambda: f"review-command-{uuid4().hex}", unique=True
+    )
+    delivery_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    delivery_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    delivery_claim_token: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    delivery_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delivery_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -126,6 +142,11 @@ class ReviewTask(Base):
             "decision_source IN ('manual', 'automatic')",
             name="ck_review_tasks_decision_source",
         ),
+        CheckConstraint(
+            "delivery_status IN ('pending', 'recorded', 'consumed')",
+            name="ck_review_tasks_delivery_status",
+        ),
+        CheckConstraint("delivery_attempts >= 0", name="ck_review_tasks_delivery_attempts"),
         Index(
             "uq_review_tasks_pending_run",
             "processing_run_id",

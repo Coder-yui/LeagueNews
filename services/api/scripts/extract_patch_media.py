@@ -3,7 +3,7 @@ import asyncio
 
 from app.core.database import SessionLocal, engine
 from app.models.media_asset import MediaAsset
-from app.workflows.understand_media import extract_patch_preview
+from app.services.media_methods import extract_patch_preview
 
 
 async def main(media_asset_ids: list[int]) -> None:

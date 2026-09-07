@@ -25,14 +25,17 @@ from app.orchestration.item_processing.service import (
     resume_rejected_review,
     retry_processing_run as retry_v3_processing_run,
 )
-from app.workflows.reviewed_pipeline import (
-    approve_review as approve_v2_review,
+from app.services.review_actions import (
     correct_ocr_review,
     reject_review,
-    retry_processing_run as retry_v2_processing_run,
 )
 
 router = APIRouter()
+
+
+def _require_current_graph(run: ProcessingRun) -> None:
+    if run.graph_name != ITEM_PROCESSING_GRAPH:
+        raise HTTPException(status_code=409, detail="旧运行已归档，请通过重新处理从原始证据创建 V3 运行")
 
 
 def _corrected_review_proposal(
@@ -288,13 +291,9 @@ async def approve_review_task(
     review = db.get(ReviewTask, review_id)
     if not review:
         raise HTTPException(status_code=404, detail="review task not found")
+    _require_current_graph(review.processing_run)
     try:
-        approve = (
-            approve_v3_review
-            if review.processing_run.graph_name == ITEM_PROCESSING_GRAPH
-            else approve_v2_review
-        )
-        return await approve(db, review, note=payload.note)
+        return await approve_v3_review(db, review, note=payload.note)
     except LLMConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -333,17 +332,11 @@ async def correct_and_approve_review_task(
     review = db.get(ReviewTask, review_id)
     if not review:
         raise HTTPException(status_code=404, detail="review task not found")
-    review.proposal = _corrected_review_proposal(review, payload, db=db)
+    _require_current_graph(review.processing_run)
     try:
-        approve = (
-            approve_v3_review
-            if review.processing_run.graph_name == ITEM_PROCESSING_GRAPH
-            else approve_v2_review
-        )
-        return await approve(
-            db,
-            review,
-            note=payload.note or "管理台修正后批准",
+        return await approve_v3_review(
+            db, review, note=payload.note or "管理台修正后批准",
+            replacement=_corrected_review_proposal(review, payload, db=db),
         )
     except LLMConfigurationError as exc:
         raise HTTPException(
@@ -385,12 +378,7 @@ async def retry_run(run_id: int, db: Session = Depends(get_db)) -> object:
     if not run:
         raise HTTPException(status_code=404, detail="processing run not found")
     try:
-        retry = (
-            retry_v3_processing_run
-            if run.graph_name == ITEM_PROCESSING_GRAPH
-            else retry_v2_processing_run
-        )
-        return await retry(db, run)
+        return await retry_v3_processing_run(db, run)
     except LLMConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)

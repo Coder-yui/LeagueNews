@@ -7,7 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.query_filters import json_array_contains
-from app.domain.importance import FEATURED_MESSAGE_MIN_IMPORTANCE
+from app.services.featured_selection import selected_featured_ids
 from app.domain.message_taxonomy import Product
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem, NormalizedItemMediaExtraction
@@ -88,10 +88,8 @@ def published_item_conditions(
         conditions.append(json_array_contains(db, NormalizedItem.topics, topic))
     if min_importance is not None:
         conditions.append(NormalizedItem.importance_score >= min_importance)
-    elif featured:
-        conditions.append(NormalizedItem.importance_score >= FEATURED_MESSAGE_MIN_IMPORTANCE)
     if featured:
-        conditions.append(NormalizedItem.content_form != "repost")
+        conditions.append(NormalizedItem.id.in_(selected_featured_ids(db)))
     if search:
         search_value = search.strip()
         if search_value.isdigit():

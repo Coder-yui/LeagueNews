@@ -1,0 +1,15 @@
+{
+  "name": "phase3-item-processing-synthetic",
+  "version": "2026-09-07-v2",
+  "target": "item_processing",
+  "input_schema_version": "item-processing-input-v1",
+  "shape": "independent",
+  "dataset_schema_version": "frozen-dataset-v1",
+  "source_description": "Synthetic media/OCR fixture; derived output stays in experiment scope.",
+  "label_schema_version": "item-processing-labels-v1",
+  "split_strategy": "explicit",
+  "group_strategy": "story-group",
+  "cases_file": "cases.jsonl",
+  "case_count": 1,
+  "fingerprint": "eae4a324c03f13381aab3ecb8a69b7f0773f973861c47e035d9b1fa810d721a0"
+}

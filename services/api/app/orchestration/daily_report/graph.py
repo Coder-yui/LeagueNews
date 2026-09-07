@@ -12,16 +12,14 @@ from app.orchestration.contracts import ReviewDecision, ReviewMode, RunMode
 
 
 DAILY_REPORT_GRAPH = "daily_report_generation"
-DAILY_REPORT_GRAPH_VERSION = "v3.0.0-dev2"
+DAILY_REPORT_GRAPH_VERSION = "v3.1.0"
 DAILY_REPORT_STATE_VERSION = 1
 
 
 class DailyReportStage(StrEnum):
     LOAD_WINDOW = "load_window"
     SELECT_CANDIDATES = "select_candidates"
-    DEDUPLICATE_EVENTS = "deduplicate_events"
-    ASSIGN_SECTIONS = "assign_sections"
-    RANK_ITEMS = "rank_items"
+    PLAN = "plan"
     PUBLISH = "publish"
 
 
@@ -100,8 +98,6 @@ class DailyReportState(TypedDict, total=False):
     request: dict[str, object]
     window: dict[str, object]
     selected: dict[str, object]
-    deduplicated: dict[str, object]
-    assigned: dict[str, object]
     ranked: dict[str, object]
     review_decision: dict[str, object]
     publication: dict[str, object]
@@ -116,13 +112,7 @@ class DailyReportBackend(Protocol):
         self, request: DailyReportRequest, window: DailyWindow
     ) -> DailyCandidateSet: ...
 
-    async def deduplicate_events(
-        self, candidates: DailyCandidateSet
-    ) -> DailyCandidateSet: ...
-
-    async def assign_sections(self, candidates: DailyCandidateSet) -> DailySections: ...
-
-    async def rank_items(self, sections: DailySections) -> DailySections: ...
+    async def plan(self, candidates: DailyCandidateSet) -> DailySections: ...
 
     async def publish(
         self, request: DailyReportRequest, sections: DailySections
@@ -147,21 +137,9 @@ def build_daily_report_graph(
         )
         return {"selected": value.model_dump(mode="json"), "trace": ["select_candidates"]}
 
-    async def deduplicate(state: DailyReportState) -> DailyReportState:
-        value = await backend.deduplicate_events(
-            DailyCandidateSet.model_validate(state["selected"])
-        )
-        return {"deduplicated": value.model_dump(mode="json"), "trace": ["deduplicate_events"]}
-
-    async def assign(state: DailyReportState) -> DailyReportState:
-        value = await backend.assign_sections(
-            DailyCandidateSet.model_validate(state["deduplicated"])
-        )
-        return {"assigned": value.model_dump(mode="json"), "trace": ["assign_sections"]}
-
-    async def rank(state: DailyReportState) -> DailyReportState:
-        value = await backend.rank_items(DailySections.model_validate(state["assigned"]))
-        return {"ranked": value.model_dump(mode="json"), "trace": ["rank_items"]}
+    async def plan(state: DailyReportState) -> DailyReportState:
+        value = await backend.plan(DailyCandidateSet.model_validate(state["selected"]))
+        return {"ranked": value.model_dump(mode="json"), "trace": ["plan"]}
 
     def review(state: DailyReportState) -> DailyReportState:
         request = DailyReportRequest.model_validate(state["request"])
@@ -215,19 +193,15 @@ def build_daily_report_graph(
     builder = StateGraph(DailyReportState)
     builder.add_node("load_window", load_window)
     builder.add_node("select_candidates", select_candidates)
-    builder.add_node("deduplicate_events", deduplicate)
-    builder.add_node("assign_sections", assign)
-    builder.add_node("rank_items", rank)
+    builder.add_node("plan", plan)
     builder.add_node("review", review)
     builder.add_node("publish", publish)
     builder.add_node("complete_preview", terminal("preview_completed"))
     builder.add_node("complete_rejected", terminal("review_rejected"))
     builder.add_edge(START, "load_window")
     builder.add_edge("load_window", "select_candidates")
-    builder.add_edge("select_candidates", "deduplicate_events")
-    builder.add_edge("deduplicate_events", "assign_sections")
-    builder.add_edge("assign_sections", "rank_items")
-    builder.add_edge("rank_items", "review")
+    builder.add_edge("select_candidates", "plan")
+    builder.add_edge("plan", "review")
     builder.add_conditional_edges(
         "review",
         route_review,

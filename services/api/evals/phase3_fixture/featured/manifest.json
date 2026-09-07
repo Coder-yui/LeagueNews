@@ -1,0 +1,15 @@
+{
+  "name": "phase3-featured-synthetic",
+  "version": "2026-09-07-v1",
+  "target": "featured_selection",
+  "input_schema_version": "featured-candidate-set-v1",
+  "shape": "candidate_collection",
+  "dataset_schema_version": "frozen-dataset-v1",
+  "source_description": "Synthetic candidate collection; no online publication is performed.",
+  "label_schema_version": "featured-labels-v1",
+  "split_strategy": "explicit",
+  "group_strategy": "story-group",
+  "cases_file": "cases.jsonl",
+  "case_count": 1,
+  "fingerprint": "b284dce73e0a275045834376e7a1288b53e66f467d5c3c46cbbc1b00b2567b83"
+}

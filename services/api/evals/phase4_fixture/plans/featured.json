@@ -1,0 +1,29 @@
+{
+  "experiment_id": "phase4-featured-20260907",
+  "dataset_manifest": "../../phase3_fixture/featured/manifest.json",
+  "candidates": [
+    {
+      "candidate_id": "threshold-baseline",
+      "target": "featured_selection",
+      "component_versions": {"method": "threshold", "fixture": "v1"},
+      "parameters": {"method_config": {"featured_selection": "threshold"}}
+    },
+    {
+      "candidate_id": "top-n-example",
+      "target": "featured_selection",
+      "component_versions": {"method": "top_n", "fixture": "v1"},
+      "parameters": {
+        "method_config": {
+          "featured_selection": "top_n",
+          "strategy_parameters": {"featured_selection": {"max_items": 1}}
+        }
+      }
+    }
+  ],
+  "max_concurrency": 2,
+  "case_timeout_seconds": 10,
+  "code_version": "phase4-method-candidates-v1",
+  "prompt_version": "not-applicable-deterministic",
+  "model_version": "not-applicable",
+  "evaluator_version": "phase3-v1"
+}

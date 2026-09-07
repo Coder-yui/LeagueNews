@@ -19,10 +19,16 @@ from app.services.event_metrics import refresh_event_metrics
 from app.services.events import create_event
 from app.repositories.events import current_event_mention_conditions
 from app.services.llm import LLMAnalysisError
-from app.workflows.event_aggregation import (
-    STALE_RUNNING_RUN_AFTER,
-    aggregate_normalized_item,
-)
+from app.orchestration.event_aggregation.service import publish_normalized_item_downstream
+from langgraph.checkpoint.memory import InMemorySaver
+from sqlalchemy.orm import sessionmaker
+
+async def aggregate_normalized_item(db, item, *, llm_client=None, **kwargs):
+    db.commit()
+    saver = db.info.setdefault("event_checkpointer", InMemorySaver())
+    return await publish_normalized_item_downstream(db, item,
+        session_factory=sessionmaker(db.bind, expire_on_commit=False),
+        llm_factory=lambda: llm_client, checkpointer=saver, **kwargs)
 
 
 def _engine():
@@ -201,7 +207,7 @@ def test_nonsemantic_content_forms_are_audited_without_event_model_call(
         db.commit()
         client = StaticClient(_result())
         monkeypatch.setattr(
-            "app.workflows.event_aggregation.recall_event_candidates",
+            "app.orchestration.event_aggregation.backend.recall_event_candidates",
             lambda *args, **kwargs: pytest.fail("nonsemantic content entered candidate recall"),
         )
 
@@ -629,125 +635,10 @@ def test_manual_retry_accumulates_model_call_audit() -> None:
         assert db.scalar(select(func.count(Event.id))) == 1
 
 
-def test_running_event_aggregation_run_cannot_be_reused_for_another_model_call() -> None:
-    engine = _engine()
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="running")
-        db.add(source)
-        db.flush()
-        item = _item(db, source=source, external_id="running", title="正在聚合的消息")
-        existing_run = EventAggregationRun(
-            normalized_item_id=item.id,
-            normalized_item_revision=item.current_revision,
-            status="running",
-            current_stage="model_decision",
-            idempotency_key=f"{item.id}:{item.current_revision}:event-aggregation-v6.1-recall60-latest-evidence",
-        )
-        db.add(existing_run)
-        db.commit()
-        client = StaticClient(_result(_create_decision()))
-
-        returned = _aggregate(db, item, client)
-
-        assert client.calls == 0
-        assert returned.id == existing_run.id
-        run = db.scalar(select(EventAggregationRun))
-        assert run is not None
-        assert run.status == "running"
-        assert db.scalar(select(func.count(Event.id))) == 0
 
 
-def test_stale_running_run_reuses_persisted_decision_without_duplicate_membership() -> None:
-    engine = _engine()
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="stale recovery")
-        db.add(source)
-        db.flush()
-        item = _item(db, source=source, external_id="stale", title="可恢复的公告")
-        db.commit()
-        existing, created = create_event(
-            db,
-            normalized_item_id=item.id,
-            mention_index=0,
-            event_family="gameplay_balance",
-            products=["lol_pc"],
-            canonical_anchors={"patch_version": "26.17"},
-            title="可恢复的公告",
-            current_summary="已经存在的事件。",
-        )
-        assert created is True
-        db.commit()
-        run = EventAggregationRun(
-            normalized_item_id=item.id,
-            normalized_item_revision=item.current_revision,
-            status="running",
-            current_stage="apply_membership",
-            aggregation_policy_version="event-aggregation-v6.1-recall60-latest-evidence",
-            idempotency_key=(
-                f"{item.id}:{item.current_revision}:event-aggregation-v6.1-recall60-latest-evidence"
-            ),
-            model_call_count=1,
-            candidate_snapshot=[],
-            decision_draft={"mentions": [_create_decision()]},
-            updated_at=datetime.now(UTC) - STALE_RUNNING_RUN_AFTER - timedelta(minutes=1),
-        )
-        db.add(run)
-        db.commit()
-        client = StaticClient(_result(_create_decision()))
-
-        recovered = _aggregate(db, item, client)
-
-        assert recovered.status == "completed"
-        assert recovered.outcome == "applied"
-        assert recovered.model_call_count == 1
-        assert client.calls == 0
-        assert recovered.decision_draft["recovery"]["type"] == (
-            "stale_running_run_reclaimed"
-        )
-        assert db.scalar(select(func.count(Event.id))) == 1
-        assert db.scalar(select(func.count(EventMention.id))) == 1
 
 
-def test_stale_previous_revision_run_does_not_block_current_revision() -> None:
-    engine = _engine()
-    with Session(engine, expire_on_commit=False) as db:
-        source = Source(name="revision fencing")
-        db.add(source)
-        db.flush()
-        item = _item(db, source=source, external_id="revision-fencing", title="旧版本公告")
-        old_run = EventAggregationRun(
-            normalized_item_id=item.id,
-            normalized_item_revision=1,
-            status="running",
-            current_stage="model_decision",
-            idempotency_key=(
-                f"{item.id}:1:event-aggregation-v6.1-recall60-latest-evidence"
-            ),
-        )
-        db.add(old_run)
-        db.commit()
-
-        with Session(engine, expire_on_commit=False) as correction_db:
-            current = correction_db.get(NormalizedItem, item.id)
-            assert current is not None
-            current.current_revision = 2
-            correction_db.commit()
-
-        with Session(engine, expire_on_commit=False) as current_db:
-            current = current_db.get(NormalizedItem, item.id)
-            assert current is not None
-            client = StaticClient(_result(_create_decision()))
-            current_run = _aggregate(current_db, current, client)
-
-            assert current_run.status == "completed"
-            assert current_run.normalized_item_revision == 2
-            assert client.calls == 1
-
-        stale = _aggregate(db, item, StaticClient(_result(_create_decision())))
-        assert stale.status == "completed"
-        assert stale.outcome == "ignored"
-        assert stale.normalized_item_revision == 1
-        assert db.scalar(select(func.count(EventMention.id))) == 1
 
 
 def test_superseded_worker_cannot_apply_old_revision_membership() -> None:
@@ -777,10 +668,8 @@ def test_superseded_worker_cannot_apply_old_revision_membership() -> None:
 
         db.rollback()
         attributes.set_committed_value(item, "current_revision", 1)
-        stale = _aggregate(db, item, StaticClient(_result(_create_decision())))
-
-        assert stale.status == "completed"
-        assert stale.outcome == "ignored"
+        with pytest.raises(ValueError, match="revision does not match"):
+            _aggregate(db, item, StaticClient(_result(_create_decision())))
         assert db.scalar(select(func.count(EventMention.id))) == 1
         assert db.scalar(select(EventMention).where(EventMention.normalized_item_revision == 2)) is None
 

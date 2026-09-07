@@ -1,3 +1,5 @@
+from copy import copy
+
 import json
 import hashlib
 import os
@@ -182,7 +184,8 @@ class PatchPreviewExtraction(BaseModel):
 class LLMClient:
     """Thin OpenAI-compatible boundary; workflow code does not depend on a provider."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, before_request=None) -> None:
+        self.before_request = before_request
         self.enabled = bool(settings.openai_api_key)
         self.client = (
             AsyncOpenAI(
@@ -198,6 +201,26 @@ class LLMClient:
             if self.enabled
             else None
         )
+
+    def configured(self, *, prompt_ref=None, prompt_contents=None, model_parameters=None):
+        """Create a per-call view; never change shared clients or global settings."""
+        parameters = dict(model_parameters or {})
+        unsupported = set(parameters) - {"model", "temperature", "max_tokens"}
+        if unsupported:
+            raise ValueError(f"unsupported model parameters: {sorted(unsupported)}")
+        if "model" in parameters and (not isinstance(parameters["model"], str) or not parameters["model"].strip()):
+            raise ValueError("model must be a nonempty string")
+        if "temperature" in parameters and (not isinstance(parameters["temperature"], (int, float)) or not 0 <= parameters["temperature"] <= 2):
+            raise ValueError("temperature must be between 0 and 2")
+        if "max_tokens" in parameters and (type(parameters["max_tokens"]) is not int or parameters["max_tokens"] < 1):
+            raise ValueError("max_tokens must be a positive integer")
+        if prompt_ref and not (prompt_contents or {}).get(prompt_ref):
+            raise ValueError(f"prompt content is missing for ref: {prompt_ref}")
+        configured = copy(self)
+        configured._request_parameters = parameters
+        configured._prompt_ref = prompt_ref
+        configured._prompt_content = (prompt_contents or {}).get(prompt_ref)
+        return configured
 
     async def analyze_message_content(
         self,
@@ -756,6 +779,9 @@ event_family 语义边界：
             raise LLMConfigurationError(
                 "未配置 OPENAI_API_KEY，无法执行 AI 工作流。请配置 Key 后重试。"
             )
+        parameters = getattr(self, "_request_parameters", {})
+        model = parameters.get("model", settings.model_name)
+        prompt = getattr(self, "_prompt_content", None) or prompt
         provider_options: dict[str, object] = {}
         if "api.deepseek.com" in settings.openai_base_url:
             provider_options["extra_body"] = {"thinking": {"type": "disabled"}}
@@ -791,12 +817,14 @@ event_family 语义边界：
         ).hexdigest()
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
         for attempt in range(1, 3):
+            if getattr(self, "before_request", None) is not None:
+                await self.before_request()
             try:
                 response = await self.client.chat.completions.create(
-                    model=settings.model_name,
+                    model=model,
                     response_format={"type": "json_object"},
-                    max_tokens=max_tokens,
-                    temperature=0.1,
+                    max_tokens=parameters.get("max_tokens", max_tokens),
+                    temperature=parameters.get("temperature", 0.1),
                     messages=messages,
                     **provider_options,
                 )
@@ -828,14 +856,14 @@ event_family 语义边界：
                     result,
                     "_llm_execution_metadata",
                     {
-                        "workflow_version": "reviewed-pipeline-v2",
-                        "prompt_name": prompt_spec.name,
-                        "prompt_version": prompt_spec.version,
+                        "workflow_version": "method-client-v3",
+                        "prompt_name": getattr(self, "_prompt_ref", None) or prompt_spec.name,
+                        "prompt_version": f"sha256:{prompt_hash}" if getattr(self, "_prompt_ref", None) else prompt_spec.version,
                         "prompt_hash": f"sha256:{prompt_hash}",
-                        "model": settings.model_name,
+                        "model": model,
                         "provider": urlsplit(settings.openai_base_url).hostname,
-                        "temperature": 0.1,
-                        "max_tokens": max_tokens,
+                        "temperature": parameters.get("temperature", 0.1),
+                        "max_tokens": parameters.get("max_tokens", max_tokens),
                         "input_hash": input_hash,
                         "json_schema_version": prompt_spec.schema_version,
                         "raw_response": raw_content[:16000],
@@ -879,14 +907,14 @@ event_family 语义边界：
                 fallback_result,
                 "_llm_execution_metadata",
                 {
-                    "workflow_version": "reviewed-pipeline-v2",
-                    "prompt_name": prompt_spec.name,
-                    "prompt_version": prompt_spec.version,
+                    "workflow_version": "method-client-v3",
+                    "prompt_name": getattr(self, "_prompt_ref", None) or prompt_spec.name,
+                    "prompt_version": f"sha256:{prompt_hash}" if getattr(self, "_prompt_ref", None) else prompt_spec.version,
                     "prompt_hash": f"sha256:{prompt_hash}",
-                    "model": settings.model_name,
+                    "model": model,
                     "provider": urlsplit(settings.openai_base_url).hostname,
-                    "temperature": 0.1,
-                    "max_tokens": max_tokens,
+                    "temperature": parameters.get("temperature", 0.1),
+                    "max_tokens": parameters.get("max_tokens", max_tokens),
                     "input_hash": input_hash,
                     "json_schema_version": prompt_spec.schema_version,
                     "raw_response": last_raw_content[:16000],

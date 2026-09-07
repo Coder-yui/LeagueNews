@@ -13,9 +13,9 @@ from app.models.raw_item import RawItem
 from app.orchestration.daily_report.service import generate_daily_report
 from app.services.daily_reports import (
     DAILY_REPORT_TIMEZONE,
-    daily_report_eligibility_conditions,
+    selected_daily_ids,
     daily_report_window,
-    generate_daily_report as generate_daily_report_v2,
+    generate_daily_report as generate_daily_report_sync,
 )
 
 
@@ -61,6 +61,10 @@ def _due_generation(
             {"identity": f"daily-report:{report_date.isoformat()}"},
         )
 
+    selected_ids = selected_daily_ids(db, report_date)
+    if not selected_ids:
+        return None
+
     scheduled_at_utc = scheduled_generation_at(report_date).astimezone(UTC)
     existing = db.scalar(
         select(DailyReport).where(DailyReport.report_date == report_date)
@@ -82,7 +86,7 @@ def _due_generation(
                 select(NormalizedItem.id)
                 .join(NormalizedItem.raw_item)
                 .where(
-                    *daily_report_eligibility_conditions(),
+                    NormalizedItem.id.in_(selected_ids),
                     NormalizedItem.updated_at > updated_at,
                     RawItem.published_at >= window_start,
                     RawItem.published_at < window_end,
@@ -91,20 +95,6 @@ def _due_generation(
             )
             if has_late_eligible_message is None:
                 return None
-
-    window_start, window_end = daily_report_window(report_date)
-    has_eligible_message = db.scalar(
-        select(NormalizedItem.id)
-        .join(NormalizedItem.raw_item)
-        .where(
-            *daily_report_eligibility_conditions(),
-            RawItem.published_at >= window_start,
-            RawItem.published_at < window_end,
-        )
-        .limit(1)
-    )
-    if has_eligible_message is None:
-        return None
 
     return report_date, current
 
@@ -123,7 +113,7 @@ def generate_due_daily_report(
     if due is None:
         return None
     report_date, current = due
-    report = generate_daily_report_v2(db, report_date)
+    report = generate_daily_report_sync(db, report_date)
     report.updated_at = current.astimezone(UTC)
     db.commit()
     db.refresh(report)

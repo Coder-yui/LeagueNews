@@ -14,9 +14,9 @@ from app.models.raw_item_source_payload import RawItemSourcePayload
 from app.models.source import Source
 from app.services.media_repair import (
     MediaStorageProtocol,
-    repair_raw_item_media,
     storage_digest,
 )
+from app.services.media_publication import publish_raw_item_media
 from app.services.media_storage import MediaStorage
 from app.services.pipeline_queue import enqueue_pipeline_job
 from app.services.raw_item_revision_lifecycle import (
@@ -42,23 +42,47 @@ async def ingest_connector_items(
     """Persist canonical connector items through one source-independent path."""
     storage = media_storage or MediaStorage()
     result = IngestionResult()
+    prepared: list[tuple[RawItemCandidate, list[dict[str, object]], str, list[dict[str, object]]]] = []
+    # Remote media preparation is deliberately completed before opening the
+    # batch transaction.  A failed download therefore cannot hold an identity
+    # advisory lock or a database snapshot.
+    for item in items:
+        if source.connector_type != "manual" and not item.external_id:
+            raise ValueError(f"{source.connector_type} candidate has no external_id")
+        blocks = normalize_content_blocks(item.content_blocks)
+        if not blocks:
+            raise ValueError("connector item has no content blocks")
+        content_hash = hash_content_blocks(blocks)
+        db.rollback()
+        existing, _latest_revision = _find_existing(
+            db,
+            source_id=source.id,
+            external_id=item.external_id,
+            content_hash=content_hash,
+        )
+        has_missing_media = bool(
+            existing is not None
+            and any(asset.storage_path is None for asset in existing.media_assets)
+        )
+        db.rollback()
+        if existing is not None and not has_missing_media:
+            prepared.append((item, blocks, content_hash, blocks))
+            continue
+        stored_blocks = await storage.materialize_blocks(
+            blocks, namespace=source.connector_type
+        )
+        stored_blocks = normalize_content_blocks(stored_blocks)
+        prepared.append((item, blocks, content_hash, stored_blocks))
+
+    db.rollback()
     try:
-        for item in items:
-            if source.connector_type != "manual" and not item.external_id:
-                raise ValueError(
-                    f"{source.connector_type} candidate has no external_id"
-                )
-            blocks = normalize_content_blocks(item.content_blocks)
-            if not blocks:
-                raise ValueError("connector item has no content blocks")
-            content_hash = hash_content_blocks(blocks)
+        for item, _blocks, content_hash, stored_blocks in prepared:
             _lock_ingestion_identity(
                 db,
                 source_id=source.id,
                 external_id=item.external_id,
                 content_hash=content_hash,
             )
-
             existing, latest_revision = _find_existing(
                 db,
                 source_id=source.id,
@@ -66,20 +90,9 @@ async def ingest_connector_items(
                 content_hash=content_hash,
             )
             if existing:
-                await repair_raw_item_media(
-                    db,
-                    raw_item=existing,
-                    namespace=source.connector_type,
-                    candidate_blocks=blocks,
-                    media_storage=storage,
-                )
+                _apply_prepared_media_repair(db, existing, stored_blocks)
                 result.skipped.append(existing)
                 continue
-
-            stored_blocks = await storage.materialize_blocks(
-                blocks, namespace=source.connector_type
-            )
-            stored_blocks = normalize_content_blocks(stored_blocks)
             raw_item = RawItem(
                 source_id=source.id,
                 external_id=item.external_id,
@@ -138,6 +151,30 @@ async def ingest_connector_items(
     for raw_item in result.created:
         db.refresh(raw_item)
     return result
+
+
+def _apply_prepared_media_repair(
+    db: Session,
+    raw_item: RawItem,
+    stored_blocks: list[dict[str, object]],
+) -> None:
+    """Persist paths downloaded before the ingestion transaction began."""
+    changed = False
+    for asset in raw_item.media_assets:
+        if asset.storage_path or not (0 <= asset.block_index < len(stored_blocks)):
+            continue
+        block = stored_blocks[asset.block_index]
+        storage_path = block.get("storage_path")
+        if not isinstance(storage_path, str) or not storage_path:
+            continue
+        asset.storage_path = storage_path
+        asset.sha256 = storage_digest(storage_path)
+        mime_type = block.get("mime_type")
+        if isinstance(mime_type, str) and mime_type:
+            asset.mime_type = mime_type
+        changed = True
+    if changed and raw_item.normalized_item is not None:
+        publish_raw_item_media(raw_item)
 
 
 def _lock_ingestion_identity(

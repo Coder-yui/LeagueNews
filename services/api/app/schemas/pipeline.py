@@ -61,6 +61,13 @@ class PipelineJobRead(BaseModel):
 
     id: int
     raw_item_id: int
+    job_type: Literal["message", "event"]
+    target_entity_type: Literal["raw_item", "normalized_item"]
+    target_entity_id: int | None
+    target_revision: int
+    workflow_name: str
+    workflow_version: str | None
+    method_config: dict
     correction_id: int | None
     status: str
     current_stage: str
@@ -78,3 +85,4 @@ class PipelineJobRead(BaseModel):
     heartbeat_at: datetime | None
     recovery_count: int
     recovery_provenance: list[dict]
+    max_attempts: int

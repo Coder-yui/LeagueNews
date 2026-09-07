@@ -1,7 +1,7 @@
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 ITEM_PROCESSING_GRAPH = "item_processing"
@@ -87,6 +87,8 @@ class ItemProcessingRequest(BaseModel):
 
 
 class EvidenceSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     raw_item_id: int = Field(ge=1)
     raw_item_revision: int = Field(ge=1)
     title: str = ""

@@ -13,7 +13,7 @@ from app.core.database import SessionLocal, engine
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.services.llm import LLMAnalysisError
-from app.workflows.event_aggregation import aggregate_normalized_item
+from app.orchestration.event_aggregation.service import publish_normalized_item_downstream as aggregate_normalized_item
 
 
 def _validate_local_database(expected_database: str) -> None:

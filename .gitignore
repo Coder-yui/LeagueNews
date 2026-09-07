@@ -39,3 +39,8 @@ leagueNewsdeploy.txt
 
 # Production deployment environment
 .env.production
+
+# Reproducible experiment outputs (datasets and plans stay versioned).
+services/api/evals/**/reports/
+services/api/evals/**/artifacts/
+artifacts/experiments/

@@ -8,6 +8,7 @@ import app.models  # noqa: F401
 import app.services.notification_dispatcher as dispatcher
 from app.core.config import settings
 from app.core.database import Base
+from app.methods import MethodAssembly
 from app.connectors.baidu_tieba import BaiduTiebaConnectorCollectionError
 from app.connectors.weibo import WeiboConnectorConfigurationError
 from app.connectors.x_twitter import XConnectorConfigurationError
@@ -80,17 +81,18 @@ def test_featured_enqueue_reuses_authoritative_rule_and_is_idempotent(
     monkeypatch.setattr(settings, "feishu_featured_push_enabled", True)
     item = _published_item(db, score=0.74)
 
-    assert enqueue_featured_message(db, item) is False
+    assembly = MethodAssembly()
+    assert enqueue_featured_message(db, item, assembly=assembly) is False
     assert db.scalar(select(NotificationOutbox.id)) is None
 
     item.importance_score = 0.75
-    assert enqueue_featured_message(db, item) is True
+    assert enqueue_featured_message(db, item, assembly=assembly) is True
     db.commit()
 
     item.current_revision += 1
     item.summary = "Updated summary"
     db.commit()
-    assert enqueue_featured_message(db, item) is False
+    assert enqueue_featured_message(db, item, assembly=assembly) is False
     notifications = list(db.scalars(select(NotificationOutbox)))
     assert len(notifications) == 1
     assert notifications[0].dedupe_key == f"featured:{item.id}"
@@ -106,7 +108,7 @@ def test_featured_enqueue_excludes_reposts(
     item = _published_item(db, score=1.0)
     item.content_form = "repost"
 
-    assert enqueue_featured_message(db, item) is False
+    assert enqueue_featured_message(db, item, assembly=MethodAssembly()) is False
     assert db.scalar(select(NotificationOutbox.id)) is None
 
 
@@ -186,6 +188,9 @@ def test_pipeline_failure_payload_is_alert_only_and_stage_specific(
     db.flush()
     job = PipelineJob(
         raw_item_id=raw.id,
+        target_entity_type="raw_item",
+        target_entity_id=raw.id,
+        target_revision=raw.revision,
         status="failed",
         current_stage="image_ocr",
         error_message="OCR provider failed",
@@ -232,6 +237,9 @@ def test_pipeline_failure_prefers_processing_run_stage_for_normal_processing(
     db.flush()
     job = PipelineJob(
         raw_item_id=raw.id,
+        target_entity_type="raw_item",
+        target_entity_id=raw.id,
+        target_revision=raw.revision,
         processing_run_id=processing_run.id,
         status="failed",
         current_stage="importance",
@@ -274,6 +282,9 @@ def test_event_aggregation_failure_keeps_pipeline_job_stage(
     db.flush()
     job = PipelineJob(
         raw_item_id=raw.id,
+        target_entity_type="raw_item",
+        target_entity_id=raw.id,
+        target_revision=raw.revision,
         processing_run_id=processing_run.id,
         job_type="event",
         status="failed",

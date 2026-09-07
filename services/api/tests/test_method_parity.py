@@ -93,6 +93,7 @@ def test_missing_prompt_and_unsupported_model_options_fail_before_request():
 
 def test_daily_graph_receives_complete_candidates_and_matches_offline_method():
     factory = _database()
+    assembly = MethodAssembly()
     with factory() as db:
         source = Source(name="daily-parity")
         db.add(source)
@@ -191,6 +192,7 @@ def test_featured_policy_controls_both_public_reads_and_notification_queue(monke
     monkeypatch.setattr(settings, "feishu_featured_push_enabled", True)
     # Only queues notifications; no delivery worker is started.
     factory = _database()
+    assembly = MethodAssembly()
     with factory() as db:
         source = Source(name="featured-parity")
         db.add(source)
@@ -210,9 +212,12 @@ def test_featured_policy_controls_both_public_reads_and_notification_queue(monke
             published_at=datetime(2026, 8, 20, 2, tzinfo=UTC),
         )
         db.commit()
-        assert [row["id"] for row in search_published_items(db, featured=True).items] == [first.id]
-        assert enqueue_featured_message(db, first)
-        assert not enqueue_featured_message(db, second)
+        assert [
+            row["id"]
+            for row in search_published_items(db, featured=True, assembly=assembly).items
+        ] == [first.id]
+        assert enqueue_featured_message(db, first, assembly=assembly)
+        assert not enqueue_featured_message(db, second, assembly=assembly)
         assert len(list(db.scalars(select(NotificationOutbox)))) == 1
 
 

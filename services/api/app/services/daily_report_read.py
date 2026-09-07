@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.methods import MethodAssembly
 from app.models.daily_report import DailyReport
 from app.models.normalized_item import NormalizedItem
 from app.services.daily_reports import selected_daily_ids
@@ -18,13 +19,17 @@ def load_daily_report(db: Session, report_date: date) -> DailyReport | None:
     )
 
 
-def daily_report_payload(db: Session, report: DailyReport) -> dict[str, Any]:
+def daily_report_payload(
+    db: Session, report: DailyReport, *, assembly: MethodAssembly
+) -> dict[str, Any]:
     message_ids = [item.normalized_item_id for item in report.items]
     messages: dict[int, dict[str, Any]] = {}
     if message_ids:
         statement = published_item_statement().where(
             NormalizedItem.id.in_(message_ids),
-            NormalizedItem.id.in_(selected_daily_ids(db, report.report_date)),
+            NormalizedItem.id.in_(
+                selected_daily_ids(db, report.report_date, assembly=assembly)
+            ),
         )
         messages = {item.id: published_item_payload(item) for item in db.scalars(statement)}
     sections: dict[str, list[dict[str, Any]]] = {
@@ -73,7 +78,9 @@ def daily_report_summary(
     }
 
 
-def list_daily_report_summaries(db: Session) -> list[dict[str, Any]]:
+def list_daily_report_summaries(
+    db: Session, *, assembly: MethodAssembly
+) -> list[dict[str, Any]]:
     reports = list(
         db.scalars(
             select(DailyReport)
@@ -83,7 +90,9 @@ def list_daily_report_summaries(db: Session) -> list[dict[str, Any]]:
         )
     )
     visible_item_ids = {item_id for report in reports if report.status == "published"
-                        for item_id in selected_daily_ids(db, report.report_date)}
+                        for item_id in selected_daily_ids(
+                            db, report.report_date, assembly=assembly
+                        )}
     return [
         daily_report_summary(
             report,
@@ -93,14 +102,18 @@ def list_daily_report_summaries(db: Session) -> list[dict[str, Any]]:
     ]
 
 
-def get_published_daily_report(db: Session, report_date: date) -> dict[str, Any] | None:
+def get_published_daily_report(
+    db: Session, report_date: date, *, assembly: MethodAssembly
+) -> dict[str, Any] | None:
     report = load_daily_report(db, report_date)
     if report is None or report.status != "published":
         return None
-    return daily_report_payload(db, report)
+    return daily_report_payload(db, report, assembly=assembly)
 
 
-def get_latest_published_daily_report(db: Session) -> dict[str, Any] | None:
+def get_latest_published_daily_report(
+    db: Session, *, assembly: MethodAssembly
+) -> dict[str, Any] | None:
     report = db.scalar(
         select(DailyReport)
         .options(selectinload(DailyReport.items))
@@ -108,4 +121,8 @@ def get_latest_published_daily_report(db: Session) -> dict[str, Any] | None:
         .order_by(DailyReport.report_date.desc())
         .limit(1)
     )
-    return daily_report_payload(db, report) if report is not None else None
+    return (
+        daily_report_payload(db, report, assembly=assembly)
+        if report is not None
+        else None
+    )

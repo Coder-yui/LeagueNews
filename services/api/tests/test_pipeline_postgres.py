@@ -52,6 +52,9 @@ def test_active_pipeline_index_rejects_retry_pending_and_queued_jobs() -> None:
             db.add(
                 PipelineJob(
                     raw_item_id=raw.id,
+                    target_entity_type="raw_item",
+                    target_entity_id=raw.id,
+                    target_revision=raw.revision,
                     status="failed",
                     next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
                 )
@@ -59,7 +62,15 @@ def test_active_pipeline_index_rejects_retry_pending_and_queued_jobs() -> None:
             db.commit()
 
         with Session(engine) as db:
-            db.add(PipelineJob(raw_item_id=raw_item_id, status="queued"))
+            db.add(
+                PipelineJob(
+                    raw_item_id=raw_item_id,
+                    target_entity_type="raw_item",
+                    target_entity_id=raw_item_id,
+                    target_revision=1,
+                    status="queued",
+                )
+            )
             with pytest.raises(IntegrityError):
                 db.commit()
     finally:
@@ -101,7 +112,13 @@ def test_workers_claim_one_job_once_and_manual_auto_share_active_run(
             db.add(raw)
             db.flush()
             raw_item_id = raw.id
-            job = PipelineJob(raw_item_id=raw.id, status="queued")
+            job = PipelineJob(
+                raw_item_id=raw.id,
+                target_entity_type="raw_item",
+                target_entity_id=raw.id,
+                target_revision=raw.revision,
+                status="queued",
+            )
             db.add(job)
             db.commit()
             job_id = job.id

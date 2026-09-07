@@ -30,19 +30,13 @@ class GraphName(StrEnum):
     DAILY_REPORT_GENERATION = "daily_report_generation"
 
 
-class ImplementationStatus(StrEnum):
-    IMPLEMENTED = "implemented"
-    PLANNED = "planned"
-
-
 @dataclass(frozen=True, slots=True)
 class GraphDefinition:
     name: GraphName
     graph_version: str
     state_version: int
     stages: tuple[str, ...]
-    status: ImplementationStatus
-    builder: Callable[..., Any] | None = None
+    builder: Callable[..., Any]
 
     def __post_init__(self) -> None:
         if not self.graph_version.strip():
@@ -51,10 +45,6 @@ class GraphDefinition:
             raise ValueError("state_version must be positive")
         if not self.stages or len(self.stages) != len(set(self.stages)):
             raise ValueError("graph stages must be non-empty and unique")
-        if self.status == ImplementationStatus.IMPLEMENTED and self.builder is None:
-            raise ValueError("implemented graphs require a builder")
-        if self.status == ImplementationStatus.PLANNED and self.builder is not None:
-            raise ValueError("planned graphs cannot expose a builder")
 
 
 class GraphRegistry:
@@ -77,11 +67,6 @@ class GraphRegistry:
 
     def build(self, name: GraphName, graph_version: str, **kwargs: Any) -> Any:
         definition = self.resolve(name, graph_version)
-        if definition.status != ImplementationStatus.IMPLEMENTED:
-            raise RuntimeError(
-                f"graph is not implemented: {name}:{graph_version}"
-            )
-        assert definition.builder is not None
         return definition.builder(**kwargs)
 
     def definitions(self) -> tuple[GraphDefinition, ...]:
@@ -101,7 +86,6 @@ def create_v3_graph_registry() -> GraphRegistry:
             graph_version=ITEM_PROCESSING_GRAPH_VERSION,
             state_version=ITEM_PROCESSING_STATE_VERSION,
             stages=tuple(stage.value for stage in PROCESSING_STAGE_ORDER),
-            status=ImplementationStatus.IMPLEMENTED,
             builder=build_item_processing_graph,
         )
     )
@@ -111,7 +95,6 @@ def create_v3_graph_registry() -> GraphRegistry:
             graph_version=EVENT_AGGREGATION_GRAPH_VERSION,
             state_version=EVENT_AGGREGATION_STATE_VERSION,
             stages=tuple(stage.value for stage in EVENT_AGGREGATION_STAGE_ORDER),
-            status=ImplementationStatus.IMPLEMENTED,
             builder=build_event_aggregation_graph,
         )
     )
@@ -121,7 +104,6 @@ def create_v3_graph_registry() -> GraphRegistry:
             graph_version=DAILY_REPORT_GRAPH_VERSION,
             state_version=DAILY_REPORT_STATE_VERSION,
             stages=tuple(stage.value for stage in DAILY_REPORT_STAGE_ORDER),
-            status=ImplementationStatus.IMPLEMENTED,
             builder=build_daily_report_graph,
         )
     )

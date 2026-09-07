@@ -18,12 +18,17 @@
 
 ## 历史数据与部署
 
-新增 `078_retire_legacy_execution.sql`。部署时先停止旧 Worker，再按顺序迁移并部署新版。
+新增 `078_retire_legacy_execution.sql` 与 `079_finalize_v3_execution_identity.sql`。部署时先停止旧 Worker，再按顺序迁移并部署新版。
 迁移使未完成旧运行退出执行，将相关待审核任务 supersede、相关 Job/correction cancel；保留全部原始证据、
 历史提案、检查点、发布投影及修订。旧审核记录仍可查询，不能直接交付给 V3 图。
 旧失败运行的 retry 会从原始证据创建新的 V3 运行，以 supersedes_run_id 保留关联。
 迁移不自动重新发布或发送通知；需要重新处理的项目通过正常 retry/correction 入口进入新流程。
-既有 001～077 迁移未编辑。本次未对现有开发库或生产库执行迁移。
+既有 001～078 迁移未编辑。本次未对现有开发库或生产库执行迁移。
+
+079 将 PipelineJob 的目标身份收敛为 `workflow_name + target_entity_type + target_entity_id + target_revision`，
+并使 `target_entity_id` 与事件运行 `thread_id` 在 ORM 中与数据库的非空约束一致。`raw_item_id` 保留为
+来源、所有权、查询和 RawItem 修订 supersession 字段；事件失败恢复按完整执行身份和活动状态判断。
+事件 membership/projection 结果也继续使用严格的 `extra="forbid"` 图契约。
 
 ## 验收方式
 
@@ -42,7 +47,7 @@
 ## 本轮验证结果
 
 - Ruff、git diff --check 通过。
-- 后端完整套件：369 passed，4 skipped；这 4 项 PostgreSQL 测试在独立临时库中另行执行，4 passed。
+- 后端完整套件：373 passed，4 skipped；PostgreSQL 测试仍需在显式指定的可销毁独立测试库中执行。
 - 前端 lint 与生产构建通过。
 - 临时 PostgreSQL 全量初始化、含历史数据的顺序升级均通过；未修改既有迁移。
 - raw_to_daily CLI 的 baseline 与替代方法组合各完成 1 个完整案例；模型使用 fixture，无真实模型请求。

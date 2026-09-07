@@ -84,13 +84,13 @@ class EventDecisionProposal(StrictGraphModel):
     execution_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class EventMembershipResult(BaseModel):
+class EventMembershipResult(StrictGraphModel):
     applied_count: int = Field(ge=0)
     affected_event_ids: list[int] = Field(default_factory=list)
     historical_event_ids: list[int] = Field(default_factory=list)
 
 
-class EventProjectionResult(BaseModel):
+class EventProjectionResult(StrictGraphModel):
     refreshed_event_ids: list[int] = Field(default_factory=list)
 
 

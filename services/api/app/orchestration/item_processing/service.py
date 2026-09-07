@@ -28,7 +28,7 @@ from app.orchestration.contracts import (
     RunMode,
 )
 from app.orchestration.item_processing.backend import create_item_processing_run
-from app.methods import MethodAssemblyConfig
+from app.methods import MethodAssembly, MethodAssemblyConfig
 from app.orchestration.runtime import LeagueNewsWorkflowRuntime
 from app.services.llm import LLMClient
 from app.services.pipeline_execution import PipelineExecutionGuard, assert_execution_owned
@@ -316,6 +316,7 @@ async def start_item_processing(
     stage = ProcessingStage(restart_from_stage)
     if stage != ProcessingStage.EVIDENCE and replay_from_run_id is None:
         stage = ProcessingStage.EVIDENCE
+    resolved_method_config = method_config or MethodAssembly().config
     request = create_item_processing_run(
         db,
         raw_item_id=raw_item.id,
@@ -325,7 +326,7 @@ async def start_item_processing(
         restart_from_stage=stage,
         replay_from_run_id=replay_from_run_id,
         allow_existing_projection=allow_existing_projection,
-        method_config=method_config,
+        method_config=resolved_method_config,
         execution_guard=execution_guard,
     )
     if defer_execution:
@@ -570,11 +571,14 @@ async def retry_processing_run(
     llm_factory: LLMFactory = LLMClient,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> ProcessingRun:
+    raw_item = db.get(RawItem, run.raw_item_id)
+    if raw_item is None:
+        raise ValueError("processing run raw item no longer exists")
     pending_job = db.scalar(select(PipelineJob).where(
-        PipelineJob.raw_item_id == run.raw_item_id,
         PipelineJob.workflow_name == ITEM_PROCESSING_GRAPH,
         PipelineJob.target_entity_type == "raw_item",
         PipelineJob.target_entity_id == run.raw_item_id,
+        PipelineJob.target_revision == raw_item.revision,
         (PipelineJob.status.in_(["queued", "running", "paused"])) |
         ((PipelineJob.status == "failed") & PipelineJob.next_attempt_at.is_not(None)),
     ))

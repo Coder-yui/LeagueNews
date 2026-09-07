@@ -12,6 +12,7 @@ from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.methods import MethodAssembly
 from app.orchestration.contracts import ReviewMode, RunMode
 from app.orchestration.daily_report import (
     DailyReportBackendV3,
@@ -116,7 +117,9 @@ def test_daily_report_graph_preserves_v2_rules_and_preview_is_write_free() -> No
         db.commit()
         expected_id = second.id
 
-    graph = build_daily_report_graph(DailyReportBackendV3(factory))
+    graph = build_daily_report_graph(
+        DailyReportBackendV3(factory, method_assembly=MethodAssembly())
+    )
     experiment_request = DailyReportRequest(
         workflow_run_id=8001,
         report_date=date(2026, 8, 20),

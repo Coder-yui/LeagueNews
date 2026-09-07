@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.methods import MethodAssembly
 from app.domain.message_taxonomy import MESSAGE_TYPE_ORDER, PRODUCTS, TOPIC_RULES, Product
 from app.models.normalized_item import NormalizedItem
 from app.schemas.normalized_item import (
@@ -64,7 +65,7 @@ def list_normalized_items(db: Session = Depends(get_db)) -> list[NormalizedItem]
 
 @router.get("/published", response_model=list[PublishedItemRead])
 def list_published_items(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    return search_published_items(db, limit=100).items
+    return search_published_items(db, limit=100, assembly=MethodAssembly()).items
 
 
 @router.get("/published-page", response_model=PublishedItemPageRead)
@@ -93,6 +94,7 @@ def list_published_items_page(
             featured=featured,
             published_date=published_date,
             timezone_name=timezone_name,
+            assembly=MethodAssembly(),
             sort_by=sort_by,
             sort=sort,
             limit=limit,
@@ -126,6 +128,7 @@ def list_published_days(
             message_type=message_type,
             featured=featured,
             search=search,
+            assembly=MethodAssembly(),
             timezone_name=timezone_name,
             limit=limit,
         )

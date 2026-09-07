@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
+from app.methods import MethodAssembly
 from app.models.daily_report import DailyReport, DailyReportItem
 from app.models.event import EventMention
 from app.models.normalized_item import NormalizedItem
@@ -28,7 +29,7 @@ from app.domain.daily_report import (
 
 
 def daily_report_eligibility_conditions():
-    """Return the shared current-projection eligibility contract for V1 reports."""
+    """Return the current-projection contract shared by report reads and the graph."""
 
     return (
         latest_normalized_item_condition(),
@@ -36,7 +37,19 @@ def daily_report_eligibility_conditions():
     )
 
 
-def generate_daily_report(db: Session, report_date: date) -> DailyReport:
+def daily_report_scheduler_eligibility_conditions():
+    """Return SQL-safe eligibility without running report selection methods."""
+
+    return (
+        *daily_report_eligibility_conditions(),
+        NormalizedItem.content_form == "original",
+        NormalizedItem.importance_score >= DAILY_REPORT_MIN_IMPORTANCE,
+    )
+
+
+def generate_daily_report(
+    db: Session, report_date: date, *, assembly: MethodAssembly
+) -> DailyReport:
     """Generate or replace one persisted report for a Shanghai calendar day."""
     if db.bind is not None and db.bind.dialect.name == "postgresql":
         db.execute(
@@ -44,8 +57,7 @@ def generate_daily_report(db: Session, report_date: date) -> DailyReport:
             {"identity": f"daily-report:{report_date.isoformat()}"},
         )
     candidates = load_daily_candidates(db, report_date)
-    from app.methods import MethodAssembly
-    plan = MethodAssembly().plan_daily_report(candidates)
+    plan = assembly.plan_daily_report(candidates)
     by_id = {candidate.message_id: candidate for candidate in candidates}
     sections = {name: [by_id[row["message_id"]] for row in rows] for name, rows in plan.sections.items()}
 
@@ -92,9 +104,10 @@ def load_daily_candidates(db: Session, report_date: date) -> list[DailyReportCan
     return candidates
 
 
-def selected_daily_ids(db: Session, report_date: date) -> set[int]:
-    from app.methods import MethodAssembly
-    plan = MethodAssembly().plan_daily_report(load_daily_candidates(db, report_date))
+def selected_daily_ids(
+    db: Session, report_date: date, *, assembly: MethodAssembly
+) -> set[int]:
+    plan = assembly.plan_daily_report(load_daily_candidates(db, report_date))
     return {row["message_id"] for rows in plan.sections.values() for row in rows}
 
 

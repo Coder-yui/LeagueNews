@@ -10,8 +10,7 @@ from app.methods import FeaturedCandidate, MethodAssembly
 from app.services.raw_item_versions import latest_normalized_item_condition
 
 
-def selected_featured_ids(db: Session, *, assembly: MethodAssembly | None = None) -> set[int]:
-    assembly = assembly or MethodAssembly()
+def selected_featured_ids(db: Session, *, assembly: MethodAssembly) -> set[int]:
     items = db.scalars(
         select(NormalizedItem)
         .options(selectinload(NormalizedItem.raw_item))

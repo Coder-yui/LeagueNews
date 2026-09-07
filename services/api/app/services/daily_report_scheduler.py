@@ -13,7 +13,7 @@ from app.models.raw_item import RawItem
 from app.orchestration.daily_report.service import generate_daily_report
 from app.services.daily_reports import (
     DAILY_REPORT_TIMEZONE,
-    selected_daily_ids,
+    daily_report_scheduler_eligibility_conditions,
     daily_report_window,
 )
 
@@ -60,8 +60,18 @@ def _due_generation(
             {"identity": f"daily-report:{report_date.isoformat()}"},
         )
 
-    selected_ids = selected_daily_ids(db, report_date)
-    if not selected_ids:
+    window_start, window_end = daily_report_window(report_date)
+    has_eligible_message = db.scalar(
+        select(NormalizedItem.id)
+        .join(NormalizedItem.raw_item)
+        .where(
+            *daily_report_scheduler_eligibility_conditions(),
+            RawItem.published_at >= window_start,
+            RawItem.published_at < window_end,
+        )
+        .limit(1)
+    )
+    if has_eligible_message is None:
         return None
 
     scheduled_at_utc = scheduled_generation_at(report_date).astimezone(UTC)
@@ -80,12 +90,11 @@ def _due_generation(
             )
             if current.astimezone(UTC) > grace_ends_at_utc:
                 return None
-            window_start, window_end = daily_report_window(report_date)
             has_late_eligible_message = db.scalar(
                 select(NormalizedItem.id)
                 .join(NormalizedItem.raw_item)
                 .where(
-                    NormalizedItem.id.in_(selected_ids),
+                    *daily_report_scheduler_eligibility_conditions(),
                     NormalizedItem.updated_at > updated_at,
                     RawItem.published_at >= window_start,
                     RawItem.published_at < window_end,

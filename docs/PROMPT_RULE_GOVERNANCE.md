@@ -25,8 +25,8 @@
 
 ## 离线评测
 
-`app.evaluation.runner` 只接受当前五个任务：`relevance`、`image_ocr`、`translation`、
-`message_analysis`、`importance`。JSONL 每行至少包含 `case_id`、`task` 和 `expected`；
+`app.evaluation.runner` 只接受当前五个任务：`relevance`、`media`、`translation`、
+`message_analysis`、`importance`。旧评测记录中的 `image_ocr` 只作为历史读取兼容名。JSONL 每行至少包含 `case_id`、`task` 和 `expected`；
 `message_analysis` 样本会验证产品与内容形式约束；`importance` 样本应同时覆盖过滤后的消息类型、
 主题和重要性结果。
 

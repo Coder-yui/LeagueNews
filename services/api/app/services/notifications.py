@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.methods import MethodAssembly
 from app.connectors.baidu_tieba import (
     BaiduTiebaConnectorCollectionError,
     BaiduTiebaConnectorConfigurationError,
@@ -140,10 +141,14 @@ def _featured_payload(item: NormalizedItem) -> dict[str, Any]:
     }
 
 
-def enqueue_featured_message(db: Session, item: NormalizedItem) -> bool:
+def enqueue_featured_message(
+    db: Session, item: NormalizedItem, *, assembly: MethodAssembly
+) -> bool:
     if not settings.feishu_featured_push_enabled:
         return False
-    if item.publication_status != "published" or item.id not in selected_featured_ids(db):
+    if item.publication_status != "published" or item.id not in selected_featured_ids(
+        db, assembly=assembly
+    ):
         return False
     return enqueue_notification(
         db,

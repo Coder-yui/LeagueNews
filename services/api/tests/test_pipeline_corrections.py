@@ -75,6 +75,35 @@ def _published_item(db: Session, *, suffix: str = "") -> NormalizedItem:
     return item
 
 
+def _job_for_item(
+    item: NormalizedItem,
+    *,
+    job_type: str = "message",
+    **kwargs: object,
+) -> PipelineJob:
+    is_event = job_type == "event"
+    return PipelineJob(
+        raw_item_id=item.raw_item_id,
+        job_type=job_type,
+        target_entity_type="normalized_item" if is_event else "raw_item",
+        target_entity_id=item.id if is_event else item.raw_item_id,
+        target_revision=item.current_revision if is_event else item.raw_item.revision,
+        workflow_name="event_aggregation" if is_event else "item_processing",
+        **kwargs,
+    )
+
+
+def _job_for_raw(raw: RawItem, **kwargs: object) -> PipelineJob:
+    return PipelineJob(
+        raw_item_id=raw.id,
+        target_entity_type="raw_item",
+        target_entity_id=raw.id,
+        target_revision=raw.revision,
+        workflow_name="item_processing",
+        **kwargs,
+    )
+
+
 def _final_manual_review(
     db: Session,
     item: NormalizedItem,
@@ -357,8 +386,8 @@ async def test_event_failure_does_not_fail_published_message(
 @pytest.mark.anyio
 async def test_event_job_does_not_advance_manual_processing_run(db: Session) -> None:
     item = _published_item(db, suffix=" event job manual fence")
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    job = _job_for_item(
+        item,
         job_type="event",
         status="queued",
         current_stage="load_message",
@@ -380,7 +409,7 @@ async def test_event_job_does_not_advance_manual_processing_run(db: Session) -> 
 @pytest.mark.anyio
 async def test_message_job_does_not_auto_approve_manual_processing_run(db: Session) -> None:
     item = _published_item(db, suffix=" message job manual fence")
-    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued", current_stage="relevance")
+    job = _job_for_item(item, status="queued", current_stage="relevance")
     db.add(job)
     _correction, review = _final_manual_review(db, item)
     db.commit()
@@ -400,8 +429,8 @@ async def test_correction_cancels_old_event_job_and_new_publish_queues_fresh_job
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = _published_item(db, suffix=" event job supersession")
-    old_job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    old_job = _job_for_item(
+        item,
         job_type="event",
         status="failed",
         current_stage="load_message",
@@ -477,8 +506,8 @@ async def test_failed_event_job_recovery_requeues_without_message_correction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = _published_item(db, suffix=" event retry")
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    job = _job_for_item(
+        item,
         job_type="event",
         status="failed",
         current_stage="load_message",
@@ -534,8 +563,8 @@ async def test_failed_event_job_recovery_requeues_without_message_correction(
 @pytest.mark.anyio
 async def test_manual_recover_resets_exhausted_event_job_attempts(db: Session) -> None:
     item = _published_item(db, suffix=" exhausted event retry")
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    job = _job_for_item(
+        item,
         job_type="event",
         status="failed",
         current_stage="load_message",
@@ -571,8 +600,8 @@ async def test_manual_recover_resets_exhausted_event_job_attempts(db: Session) -
 async def test_manual_recover_rejects_job_already_scheduled_for_retry(db: Session) -> None:
     item = _published_item(db, suffix=" manual retry conflict")
     next_attempt_at = datetime.now(UTC) + timedelta(minutes=5)
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    job = _job_for_item(
+        item,
         job_type="event",
         status="failed",
         current_stage="load_message",
@@ -603,8 +632,8 @@ async def test_manual_recover_rejects_job_already_scheduled_for_retry(db: Sessio
 async def test_event_recovery_cancels_job_when_publication_is_withdrawn(db: Session) -> None:
     item = _published_item(db, suffix=" withdrawn event retry")
     item.publication_status = "withdrawn"
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    job = _job_for_item(
+        item,
         job_type="event",
         status="failed",
         current_stage="load_message",
@@ -631,14 +660,14 @@ async def test_event_recovery_cancels_job_when_publication_is_withdrawn(db: Sess
 @pytest.mark.anyio
 async def test_event_recovery_cancels_old_job_when_active_job_exists(db: Session) -> None:
     item = _published_item(db, suffix=" active event retry")
-    old_event_job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    old_event_job = _job_for_item(
+        item,
         job_type="event",
         status="failed",
         current_stage="load_message",
     )
-    current_event_job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    current_event_job = _job_for_item(
+        item,
         job_type="event",
         status="queued",
         current_stage="load_message",
@@ -666,6 +695,50 @@ async def test_event_recovery_cancels_old_job_when_active_job_exists(db: Session
 
 
 @pytest.mark.anyio
+async def test_event_recovery_keeps_different_execution_identity_active_job(
+    db: Session,
+) -> None:
+    item = _published_item(db, suffix=" different event identity")
+    item.current_revision = 2
+    old_event_job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        job_type="event",
+        target_entity_type="normalized_item",
+        target_entity_id=item.id,
+        target_revision=1,
+        workflow_name="event_aggregation",
+        status="failed",
+        current_stage="load_message",
+    )
+    current_event_job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        job_type="event",
+        target_entity_type="normalized_item",
+        target_entity_id=item.id,
+        target_revision=2,
+        workflow_name="event_aggregation",
+        status="queued",
+        current_stage="load_message",
+    )
+    db.add_all([old_event_job, current_event_job])
+    db.commit()
+
+    recovered = await recover_failed_job(
+        db,
+        job_id=old_event_job.id,
+        payload=PipelineCorrectionCreate(
+            restart_from_stage="importance",
+            resume_mode="automatic",
+            reason="按目标修订重试事件聚合",
+        ),
+    )
+
+    assert recovered.id == old_event_job.id
+    assert old_event_job.status == "queued"
+    assert current_event_job.status == "queued"
+
+
+@pytest.mark.anyio
 async def test_message_job_recovery_still_creates_message_correction(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -680,11 +753,7 @@ async def test_message_job_recovery_still_creates_message_correction(
     )
     db.add(raw)
     db.flush()
-    job = PipelineJob(
-        raw_item_id=raw.id,
-        status="failed",
-        current_stage="relevance",
-    )
+    job = _job_for_raw(raw, status="failed", current_stage="relevance")
     db.add(job)
     db.commit()
     started: dict[str, object] = {}
@@ -768,7 +837,7 @@ async def test_restart_from_beginning_recovers_failed_job_automatically(
         execution_mode="manual",
         context={"approved_message_analysis_proposal": {"stale": True}},
     )
-    failed_job = PipelineJob(raw_item_id=raw.id, status="failed", current_stage="importance")
+    failed_job = _job_for_raw(raw, status="failed", current_stage="importance")
     db.add_all([old_run, failed_job])
     db.commit()
     started: dict[str, object] = {}
@@ -846,11 +915,7 @@ def test_pipeline_job_enqueue_reuses_retry_pending_job(db: Session) -> None:
 
 def test_pipeline_job_stale_lease_is_reclaimed_with_provenance(db: Session) -> None:
     item = _published_item(db)
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
-        status="queued",
-        max_attempts=2,
-    )
+    job = _job_for_item(item, status="queued", max_attempts=2)
     db.add(job)
     db.commit()
 
@@ -904,7 +969,7 @@ async def test_pipeline_job_retries_transient_failure_and_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = _published_item(db)
-    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued")
+    job = _job_for_item(item, status="queued")
     db.add(job)
     db.commit()
     calls = 0
@@ -944,7 +1009,7 @@ async def test_pipeline_job_failure_alert_is_sent_only_after_attempts_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = _published_item(db)
-    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued", max_attempts=2)
+    job = _job_for_item(item, status="queued", max_attempts=2)
     db.add(job)
     db.commit()
     notifications: list[dict[str, object]] = []
@@ -1004,8 +1069,8 @@ async def test_pipeline_retry_reuses_failed_processing_run_and_checkpoint(
     )
     db.add(checkpoint)
     db.flush()
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
+    job = _job_for_item(
+        item,
         status="failed",
         current_stage="translation",
         processing_run_id=run.id,
@@ -1050,9 +1115,7 @@ async def test_worker_restarts_legacy_failure_with_withdrawn_projection(
     )
     db.add(legacy)
     db.flush()
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id, status="running", processing_run_id=legacy.id,
-    )
+    job = _job_for_item(item, status="running", processing_run_id=legacy.id)
     db.add(job)
     db.commit()
     started = []
@@ -1123,7 +1186,12 @@ async def test_automatic_job_accepts_irrelevant_decision_and_records_checkpoint(
     saver = InMemorySaver()
     run = await start_item_processing(db, db.get(RawItem, item.raw_item_id), execution_mode="automatic",
         defer_execution=True, session_factory=factory, checkpointer=saver, llm_factory=IrrelevantClient)
-    job = PipelineJob(raw_item_id=item.raw_item_id, status="running", current_stage="relevance", processing_run_id=run.id)
+    job = _job_for_item(
+        item,
+        status="running",
+        current_stage="relevance",
+        processing_run_id=run.id,
+    )
     db.add(job)
     db.commit()
     await execute_pipeline_job(db, job, session_factory=factory, checkpointer=saver, llm_factory=IrrelevantClient)
@@ -1150,11 +1218,7 @@ async def test_automatic_job_cancels_superseded_raw_revision(db: Session) -> Non
         revision=2,
         supersedes_raw_item_id=item.raw_item_id,
     )
-    job = PipelineJob(
-        raw_item_id=item.raw_item_id,
-        status="running",
-        current_stage="importance",
-    )
+    job = _job_for_item(item, status="running", current_stage="importance")
     db.add_all([successor, job])
     db.commit()
 

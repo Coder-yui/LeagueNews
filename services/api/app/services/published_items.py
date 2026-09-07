@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.methods import MethodAssembly
 from app.api.query_filters import json_array_contains
 from app.services.featured_selection import selected_featured_ids
 from app.domain.message_taxonomy import Product
@@ -75,6 +76,7 @@ def published_item_conditions(
     until: datetime | None = None,
     published_date: date | None = None,
     timezone_name: str = DEFAULT_PUBLICATION_TIMEZONE,
+    assembly: MethodAssembly | None = None,
 ) -> list[Any]:
     conditions: list[Any] = [
         latest_normalized_item_condition(),
@@ -89,7 +91,11 @@ def published_item_conditions(
     if min_importance is not None:
         conditions.append(NormalizedItem.importance_score >= min_importance)
     if featured:
-        conditions.append(NormalizedItem.id.in_(selected_featured_ids(db)))
+        if assembly is None:
+            raise ValueError("featured filtering requires an explicit MethodAssembly")
+        conditions.append(
+            NormalizedItem.id.in_(selected_featured_ids(db, assembly=assembly))
+        )
     if search:
         search_value = search.strip()
         if search_value.isdigit():
@@ -135,6 +141,7 @@ def search_published_items(
     sort: str = "desc",
     limit: int = 25,
     offset: int = 0,
+    assembly: MethodAssembly | None = None,
 ) -> PublishedItemSearchResult:
     conditions = published_item_conditions(
         db,
@@ -148,6 +155,7 @@ def search_published_items(
         until=until,
         published_date=published_date,
         timezone_name=timezone_name,
+        assembly=assembly,
     )
     total = db.scalar(
         select(func.count(NormalizedItem.id))
@@ -201,6 +209,7 @@ def list_published_days(
     search: str | None = None,
     timezone_name: str = DEFAULT_PUBLICATION_TIMEZONE,
     limit: int = 30,
+    assembly: MethodAssembly | None = None,
 ) -> dict[str, Any]:
     """List newest publication dates with counts in the requested civil timezone."""
     timezone = publication_timezone(timezone_name)
@@ -210,6 +219,7 @@ def list_published_days(
         message_type=message_type,
         featured=featured,
         search=search,
+        assembly=assembly,
     )
     publication_time = publication_time_column()
     timestamps = db.scalars(

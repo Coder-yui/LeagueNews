@@ -6,6 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
 from app.core.database import Base
+from app.methods import MethodAssembly
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.normalized_item import NormalizedItem
@@ -142,7 +143,11 @@ def _patch_database():
 def test_v2_baseline_runs_in_experiment_mode_without_business_writes() -> None:
     factory, raw_item_id = _database()
     llm = BaselineLLM()
-    backend = ItemProcessingBackendV3(factory, llm_factory=lambda: llm)
+    backend = ItemProcessingBackendV3(
+        factory,
+        llm_factory=lambda: llm,
+        method_assembly=MethodAssembly(),
+    )
     graph = build_item_processing_graph(backend)
     request = ItemProcessingRequest(
         workflow_run_id=101,
@@ -202,7 +207,7 @@ def test_experiment_ocr_artifact_is_scoped_and_does_not_mutate_production_media(
         lambda *_args, **_kwargs: table,
     )
 
-    backend = ItemProcessingBackendV3(factory)
+    backend = ItemProcessingBackendV3(factory, method_assembly=MethodAssembly())
     request = ItemProcessingRequest(
         workflow_run_id=run_id,
         raw_item_id=raw_item_id,
@@ -239,10 +244,18 @@ def test_experiment_ocr_artifact_is_scoped_and_does_not_mutate_production_media(
 def test_v2_baseline_publishes_through_v3_graph_with_stage_checkpoints() -> None:
     factory, raw_item_id = _database()
     llm = BaselineLLM()
-    backend = ItemProcessingBackendV3(factory, llm_factory=lambda: llm)
+    backend = ItemProcessingBackendV3(
+        factory,
+        llm_factory=lambda: llm,
+        method_assembly=MethodAssembly(),
+    )
     graph = build_item_processing_graph(backend)
     with factory() as db:
-        request = create_item_processing_run(db, raw_item_id=raw_item_id)
+        request = create_item_processing_run(
+            db,
+            raw_item_id=raw_item_id,
+            method_config=MethodAssembly().config,
+        )
 
     result = asyncio.run(
         graph.ainvoke({"request": request.model_dump(mode="json"), "trace": []})

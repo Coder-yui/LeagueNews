@@ -136,9 +136,7 @@ class PipelineJob(Base):
     )
     job_type: Mapped[str] = mapped_column(String(20), default="message", index=True)
     target_entity_type: Mapped[str] = mapped_column(String(40), default="raw_item")
-    # Kept nullable in the ORM so historical rows can still be loaded before
-    # the ordered migration backfills them; V3 enqueue always supplies it.
-    target_entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    target_entity_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     target_revision: Mapped[int] = mapped_column(Integer, default=1)
     workflow_name: Mapped[str] = mapped_column(String(80), default="item_processing")
     workflow_version: Mapped[str | None] = mapped_column(String(80), nullable=True)

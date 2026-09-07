@@ -11,7 +11,7 @@ from app.orchestration.contracts import ITEM_PROCESSING_GRAPH, ProcessingStage
 from app.orchestration.item_processing.service import start_item_processing
 from app.schemas.pipeline import PipelineCorrectionCreate
 from app.services.media_publication import withdraw_raw_item_media
-from app.services.pipeline_queue import enqueue_pipeline_job
+from app.services.pipeline_queue import enqueue_pipeline_job, execution_identity_conditions
 from app.services.raw_item_versions import is_latest_raw_item
 from app.services.review_actions import (
     IMPORTANCE_STAGE,
@@ -39,11 +39,11 @@ def _graph_restart(
     source_run: ProcessingRun | None,
     requested_stage: str,
 ) -> tuple[ProcessingStage, int | None]:
-    """Map the V2 correction vocabulary onto a V3 replay request.
+    """Translate a correction request into the V3 graph restart contract.
 
     Legacy runs do not contain the V3 evidence checkpoint, so their first V3
-    correction is intentionally rebuilt from immutable RawItem evidence.
-    Subsequent V3 runs can replay any preserved prefix.
+    correction is rebuilt from immutable RawItem evidence. Subsequent V3 runs
+    can replay a preserved typed prefix.
     """
 
     stage = {
@@ -238,8 +238,7 @@ async def recover_failed_job(
             job.completed_at = datetime.now(UTC)
         elif db.scalar(
             select(PipelineJob).where(
-                PipelineJob.raw_item_id == job.raw_item_id,
-                PipelineJob.id != job.id,
+                *execution_identity_conditions(job, include_self=False),
                 or_(
                     PipelineJob.status.in_(["queued", "running"]),
                     and_(

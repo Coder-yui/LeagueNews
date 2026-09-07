@@ -123,12 +123,12 @@ class ItemProcessingBackendV3:
         *,
         llm_factory: LLMFactory = LLMClient,
         execution_guard: PipelineExecutionGuard | None = None,
-        method_assembly: MethodAssembly | None = None,
+        method_assembly: MethodAssembly,
     ) -> None:
         self._session_factory = session_factory
         self._llm_factory = llm_factory
         self._execution_guard = execution_guard
-        self._method_assembly = method_assembly or MethodAssembly()
+        self._method_assembly = method_assembly
 
     def _assert_execution_owned(self, db: Session) -> None:
         assert_execution_owned(db, self._execution_guard)
@@ -678,6 +678,7 @@ class ItemProcessingBackendV3:
                     knowledge_snapshot=analysis.knowledge_rules,
                     ocr_corrections=media.ocr_corrections,
                 ),
+                method_assembly=self._method_assembly,
                 processing_run_id=run.id,
             )
             enqueue_pipeline_job(
@@ -744,7 +745,7 @@ def create_item_processing_run(
     restart_from_stage: ProcessingStage = ProcessingStage.EVIDENCE,
     replay_from_run_id: int | None = None,
     allow_existing_projection: bool = False,
-    method_config: MethodAssemblyConfig | None = None,
+    method_config: MethodAssemblyConfig,
     execution_guard: PipelineExecutionGuard | None = None,
 ) -> ItemProcessingRequest:
     raw_item = _load_raw(db, raw_item_id)
@@ -765,7 +766,7 @@ def create_item_processing_run(
         graph_version=ITEM_PROCESSING_GRAPH_VERSION,
         state_version=ITEM_PROCESSING_STATE_VERSION,
         context={},
-        method_config=(method_config or MethodAssembly().config).model_dump(mode="json"),
+        method_config=method_config.model_dump(mode="json"),
     )
     db.add(run)
     db.flush()

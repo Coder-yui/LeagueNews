@@ -1,6 +1,6 @@
 # LeagueNews 当前架构
 
-更新时间：2026-09-03
+更新时间：2026-09-07
 
 ## 当前主链路
 
@@ -17,7 +17,9 @@ Source 调度或手工触发
      load_message -> minimal_filter -> candidate_retrieval
      -> semantic_decision -> apply_membership -> refresh_projection
   -> Event current projection + evidence
+  -> Daily report scheduler（只负责窗口、资格与重生成判断）
   -> LangGraph Daily Report Graph
+     load_window -> select_candidates -> plan -> publish
 
 Published messages and durable failures also produce records in the notification outbox. The
 collection-scheduler process runs the notification dispatcher, which delivers those records to the
@@ -29,6 +31,51 @@ changes the success or rollback semantics of the core pipeline.
 OCR、翻译、受控消息分类、实体/摘要提取、消息重要性算法、事件聚合、公开消息/事件页和管理台。
 消息、事件和日报的在线入口统一通过 `app/orchestration` 的版本化 Graph Registry 与 Runtime；
 `app/workflows` 中仍被引用的代码是 V2 领域算法 baseline 和历史运行兼容层，不再是新运行入口。
+
+运行时分层如下：PostgreSQL 保存 RawItem、业务投影、PipelineJob、审计记录和 LangGraph checkpoint；
+Pipeline Worker 负责 claim、lease/fencing、重试和下游任务编排；LangGraph 负责有版本的节点状态机、
+checkpoint 恢复和人工 interrupt；`app/methods` 只承载可替换的领域方法与策略；`app/services` 负责
+入库、查询、队列、通知和业务边界。Connector 不直接调用图或写 NormalizedItem，图也不绕过共享服务
+直接实现采集能力。
+
+### 图版本、状态版本与方法配置
+
+`ITEM_PROCESSING_GRAPH_VERSION`、`EVENT_AGGREGATION_GRAPH_VERSION` 和
+`DAILY_REPORT_GRAPH_VERSION` 是 LeagueNews 的业务图版本，不是 LangGraph Python 包版本。业务图注册表
+严格按 `(GraphName, graph_version)` 查找，只注册已实现的真实图；未实现版本不会以 `PLANNED`、占位图
+或 latest/fallback 协商方式进入运行时。LangGraph 包升级不自动改变这些业务版本。
+
+每个运行同时保存 `graph_version`、`state_version` 和方法快照。例如：
+
+```json
+{
+  "graph_version": "v3.0.0-dev2",
+  "state_version": 1,
+  "method_config": {
+    "message_analysis": "baseline",
+  }
+}
+```
+
+版本不做自动兼容：旧 checkpoint 或旧业务状态必须由显式迁移、重启或新的 graph 入口处理，不能由
+Registry 静默选择其他版本，也不在本轮提供跨版本 checkpoint adapter。
+
+### 方法组装与调用边界
+
+当前生产 `MethodAssembly` 由 Runtime、后端或明确的 use-case 入口组装并传递。事件候选召回、精选
+选择、日报候选/排序和发布通知都必须收到显式 assembly；低层 service、scheduler 和 backend 不再
+偷偷创建 baseline assembly。日报 scheduler 只判断上海自然日窗口、消息资格、既有报告与 late update
+重生成条件，然后触发日报图；它不提前执行 selection，避免图外重复选择。
+
+日报图的唯一阶段顺序是 `load_window -> select_candidates -> plan -> publish`，日报没有人工 review
+阶段。查询和通知使用与图相同的 assembly/config，方法替换因此在实验、在线读取和入队之间保持一致。
+
+### 媒体与 OCR
+
+`media` 是当前消息图的活动阶段：媒体下载/解析后，patch 图片走
+`image -> OCR -> parse -> MediaExtraction`，结果以媒体提取和检查点形式进入后续翻译、分析和发布。
+`image_ocr` 仅作为旧运行、旧审核任务和旧通知的历史读取兼容值；新运行、新审核和新 API schema 使用
+`media`，不得把 `image_ocr` 当作当前阶段重新写入。
 
 事件 baseline 包含确定性准入/召回、单次多 mention 模型接口、原子 membership 应用，以及
 相互独立的重要性/可信度/热度投影。Pipeline Worker 在 NormalizedItem 发布后消费 durable
@@ -67,6 +114,9 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
   RawItem 持久化和任务入队。
 - `raw_items.content_blocks` 是不可变原始证据，处理和审核不得回写。
 - `normalized_items` 是当前消息发布投影，历史保存在 `normalized_item_revisions`。
+- PipelineJob 的执行身份唯一由 `workflow_name + target_entity_type + target_entity_id + target_revision`
+  决定。`raw_item_id` 只用于 provenance、所有权、查询和 RawItem 修订 supersession；执行去重、活动任务
+  冲突和失败恢复不得只按 `raw_item_id` 判断。
 - 自动与人工路径共享提案、Schema/业务校验和 checkpoint。
 - LangGraph PostgreSQL checkpoint 保存节点级技术恢复状态；`processing_checkpoints`、
   `review_tasks` 和 revision 表保存长期业务审计，二者不互相替代。
@@ -132,10 +182,10 @@ NormalizedItem 之上，不回写 RawItem，也不重复执行消息处理阶段
 | `daily_reports` / `daily_report_items` | 日报当前投影与消息排序 |
 | `notification_outbox` | 精选消息与系统失败告警的幂等记录、租约和重试状态 |
 
-最新迁移为 `076_add_langgraph_checkpoint_store.sql`。SQL migration 是数据库结构的
+最新迁移为 `079_finalize_v3_execution_identity.sql`。SQL migration 是数据库结构的
 唯一结构来源：新数据库和历史数据库都执行同一条有序 migration 链，不再使用 ORM `create_all()`
-初始化正式结构。不得绕过追加迁移直接修改。全新 001→076 初始化与现有本地库顺序升级已在
-可销毁 PostgreSQL 17 上验证。
+初始化正式结构。不得绕过追加迁移直接修改。ORM 模型必须与 079 的最终约束一致，但 079 及此前
+迁移都属于不可修改的历史；后续结构变化只能追加新编号迁移。
 
 ## 验证
 

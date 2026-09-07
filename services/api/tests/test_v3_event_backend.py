@@ -1,10 +1,12 @@
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import ValidationError
 
 import app.models  # noqa: F401
 from app.core.database import Base
@@ -12,6 +14,7 @@ from app.models.event import Event, EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
+from app.methods import MethodAssembly
 from app.orchestration.contracts import RunMode
 from app.orchestration.event_aggregation import (
     EventAggregationBackendV3,
@@ -19,10 +22,21 @@ from app.orchestration.event_aggregation import (
     build_event_aggregation_graph,
     create_event_aggregation_run,
 )
+from app.orchestration.event_aggregation.graph import (
+    EventMembershipResult,
+    EventProjectionResult,
+)
 from app.schemas.event_aggregation import EventAggregationResult
 from app.orchestration.event_aggregation.service import (
     publish_normalized_item_downstream,
 )
+
+
+def test_event_membership_and_projection_contracts_reject_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        EventMembershipResult(applied_count=0, unexpected=True)
+    with pytest.raises(ValidationError):
+        EventProjectionResult(refreshed_event_ids=[], unexpected=True)
 
 
 class EventLLM:
@@ -109,7 +123,11 @@ def _published_item(factory: sessionmaker[Session]) -> tuple[int, int]:
 def test_event_graph_reuses_v2_semantics_without_experiment_writes() -> None:
     factory = _database()
     item_id, revision = _published_item(factory)
-    backend = EventAggregationBackendV3(factory, llm_factory=EventLLM)
+    backend = EventAggregationBackendV3(
+        factory,
+        llm_factory=EventLLM,
+        method_assembly=MethodAssembly(),
+    )
     graph = build_event_aggregation_graph(backend)
 
     preview = asyncio.run(
@@ -136,6 +154,7 @@ def test_event_graph_reuses_v2_semantics_without_experiment_writes() -> None:
         factory,
         normalized_item_id=item_id,
         normalized_item_revision=revision,
+        method_config=MethodAssembly().config,
     )
     result = asyncio.run(
         graph.ainvoke({"request": request.model_dump(mode="json")})

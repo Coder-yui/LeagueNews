@@ -3,6 +3,7 @@ from typing import Any
 
 from mcp.server import MCPServer
 
+from app.methods import MethodAssembly
 from app.mcp.tools._common import mcp_db_session
 from app.mcp.tools.news import news_list_projection
 from app.services.daily_report_read import (
@@ -37,7 +38,9 @@ def register(mcp: MCPServer) -> None:
     )
     def get_daily_report(report_date: date) -> dict[str, Any]:
         with mcp_db_session() as db:
-            report = get_published_daily_report(db, report_date)
+            report = get_published_daily_report(
+                db, report_date, assembly=MethodAssembly()
+            )
         if report is None:
             raise ValueError(f"no published daily report for {report_date.isoformat()}")
         return _report_projection(report)
@@ -54,7 +57,9 @@ def register(mcp: MCPServer) -> None:
     )
     def get_latest_daily_report() -> dict[str, Any]:
         with mcp_db_session() as db:
-            report = get_latest_published_daily_report(db)
+            report = get_latest_published_daily_report(
+                db, assembly=MethodAssembly()
+            )
         if report is None:
             raise ValueError("no published daily report available")
         return _report_projection(report)

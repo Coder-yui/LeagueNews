@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from typing import Any
 
 from app.core.config import settings
-from app.methods import MethodAssembly
+from app.methods import MethodAssemblyConfig
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.orchestration.contracts import ITEM_PROCESSING_GRAPH, ITEM_PROCESSING_GRAPH_VERSION
@@ -13,6 +13,22 @@ from app.orchestration.event_aggregation.graph import (
     EVENT_AGGREGATION_GRAPH_VERSION,
     EventAggregationStage,
 )
+
+
+def execution_identity_conditions(
+    job: PipelineJob, *, include_self: bool = True
+) -> tuple[Any, ...]:
+    """Match PipelineJob executions by their authoritative target identity."""
+
+    conditions: list[Any] = [
+        PipelineJob.workflow_name == job.workflow_name,
+        PipelineJob.target_entity_type == job.target_entity_type,
+        PipelineJob.target_entity_id == job.target_entity_id,
+        PipelineJob.target_revision == job.target_revision,
+    ]
+    if not include_self:
+        conditions.append(PipelineJob.id != job.id)
+    return tuple(conditions)
 
 
 def enqueue_pipeline_job(
@@ -75,7 +91,13 @@ def enqueue_pipeline_job(
     if hasattr(method_config, "model_dump"):
         serialized_method_config = method_config.model_dump(mode="json")
     else:
-        serialized_method_config = dict(method_config) if method_config is not None else MethodAssembly().config.model_dump(mode="json")
+        serialized_method_config = (
+            dict(method_config)
+            if method_config is not None
+            else MethodAssemblyConfig.model_validate(
+                settings.processing_method_config
+            ).model_dump(mode="json")
+        )
     active_identity = (
         PipelineJob.workflow_name == resolved_workflow,
         PipelineJob.target_entity_type == resolved_target_type,

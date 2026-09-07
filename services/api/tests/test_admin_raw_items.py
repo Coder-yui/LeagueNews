@@ -183,6 +183,9 @@ def test_raw_item_admin_treats_retry_pending_job_as_processing() -> None:
         db.add(
             PipelineJob(
                 raw_item_id=raw.id,
+                target_entity_type="raw_item",
+                target_entity_id=raw.id,
+                target_revision=raw.revision,
                 status="failed",
                 next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
             )

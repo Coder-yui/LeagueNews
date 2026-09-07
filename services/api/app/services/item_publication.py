@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.methods import MethodAssembly
 from app.domain.importance import IMPORTANCE_POLICY_VERSION
 from app.domain.message_entities import normalize_entities
 from app.domain.message_taxonomy import CLASSIFICATION_VERSION
@@ -179,6 +180,8 @@ def apply_normalized_item(
     db: Session,
     raw_item: RawItem,
     proposal: dict[str, Any],
+    *,
+    method_assembly: MethodAssembly,
     processing_run_id: int | None = None,
 ) -> NormalizedItem:
     """Apply an already validated proposal inside the caller's transaction."""
@@ -237,7 +240,7 @@ def apply_normalized_item(
             db.delete(link)
     db.flush()
     publish_raw_item_media(raw_item)
-    enqueue_featured_message(db, item)
+    enqueue_featured_message(db, item, assembly=method_assembly)
 
     translated_by_id = {
         int(value["extraction_id"]): value

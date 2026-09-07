@@ -9,6 +9,7 @@ import app.models  # noqa: F401
 from app.services import item_processing_context, item_publication
 from app.api.routes.workflows import _corrected_review_proposal
 from app.core.database import Base
+from app.methods import MethodAssembly
 from app.models.media_asset import MediaAsset
 from app.models.media_extraction import MediaExtraction
 from app.models.ocr_lab import OCRProfile
@@ -634,7 +635,12 @@ def test_published_nonsemantic_message_uses_deterministic_title(
             },
             importance_proposal=None,
         )
-        item = item_publication.apply_normalized_item(db, raw, proposal)
+        item = item_publication.apply_normalized_item(
+            db,
+            raw,
+            proposal,
+            method_assembly=MethodAssembly(),
+        )
         db.commit()
 
         assert item.normalized_title == expected_title
@@ -981,7 +987,6 @@ def test_relevance_rejection_stops_run_without_creating_analysis_rule() -> None:
 
         assert run.status == "rejected"
         assert db.scalar(select(KnowledgeRule)) is None
-
 
 
 

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.methods import MethodAssembly
 from app.schemas.daily_report import DailyReportRead, DailyReportSummaryRead
 from app.services.daily_report_read import (
     daily_report_payload,
@@ -27,7 +28,7 @@ def _load_report(db: Session, report_date: date):
 
 @router.get("/daily", response_model=list[DailyReportSummaryRead])
 def list_daily_reports(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    return list_daily_report_summaries(db)
+    return list_daily_report_summaries(db, assembly=MethodAssembly())
 
 
 @router.get("/daily/{report_date}", response_model=DailyReportRead)
@@ -35,7 +36,7 @@ def get_daily_report(report_date: date, db: Session = Depends(get_db)) -> dict[s
     report = _load_report(db, report_date)
     if report.status != "published":
         raise HTTPException(status_code=404, detail="daily report not published")
-    return daily_report_payload(db, report)
+    return daily_report_payload(db, report, assembly=MethodAssembly())
 
 
 @router.post("/daily/{report_date}/generate", response_model=DailyReportRead)
@@ -44,7 +45,7 @@ async def create_daily_report(
 ) -> dict[str, Any]:
     await generate_daily_report(db, report_date)
     report = _load_report(db, report_date)
-    return daily_report_payload(db, report)
+    return daily_report_payload(db, report, assembly=MethodAssembly())
 
 
 @router.post("/daily/{report_date}/withdraw", response_model=DailyReportSummaryRead)

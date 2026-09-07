@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, attributes
 
 import app.models  # noqa: F401
 from app.core.database import Base
+from app.methods import MethodAssembly
 from app.domain.event_admission import derive_event_space, minimal_event_filter
 from app.models.event import Event, EventAggregationRun, EventMention, EventRevision
 from app.models.normalized_item import NormalizedItem
@@ -1030,6 +1031,7 @@ def test_candidate_recall_is_generic_high_recall_and_bounded() -> None:
         candidates = recall_event_candidates(
             db,
             item=item,
+            assembly=MethodAssembly(),
             possible_families=["gameplay_balance"],
             entity_hints={"activity_name": "星界"},
             total_limit=4,
@@ -1078,6 +1080,7 @@ def test_candidate_recall_window_is_60_days() -> None:
         candidates = recall_event_candidates(
             db,
             item=item,
+            assembly=MethodAssembly(),
             possible_families=["gameplay_balance"],
             entity_hints={"activity_name": "星界"},
         )
@@ -1118,6 +1121,7 @@ def test_candidate_recall_uses_translated_semantic_projection() -> None:
         candidates = recall_event_candidates(
             db,
             item=item,
+            assembly=MethodAssembly(),
             possible_families=["gameplay_balance"],
         )
 

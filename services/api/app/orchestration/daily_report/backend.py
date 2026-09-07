@@ -53,10 +53,10 @@ class DailyReportBackendV3:
         self,
         session_factory: SessionFactory,
         *,
-        method_assembly: MethodAssembly | None = None,
+        method_assembly: MethodAssembly,
     ) -> None:
         self._session_factory = session_factory
-        self._method_assembly = method_assembly or MethodAssembly()
+        self._method_assembly = method_assembly
 
     def with_method_config(
         self, config: MethodAssemblyConfig
@@ -107,4 +107,3 @@ class DailyReportBackendV3:
             item_count = sum(len(values) for values in domain_sections.values())
             db.commit()
         return DailyPublication(daily_report_id=report_id, item_count=item_count)
-

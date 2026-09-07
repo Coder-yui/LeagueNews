@@ -20,7 +20,8 @@ Frozen datasets → Experiment executor → 同一 methods / 消息图 / 事件�
 ## 代码归属
 
 - `app/methods` 定义可替换方法、输入输出和组装；`app/domain` 包含评分、召回、事件等确定性规则。
-- `app/orchestration/*/graph.py` 描述阶段依赖、审核与恢复。日报图只有窗口、候选读取、方案生成、审核与发布，不嵌入筛选策略。
+- `app/orchestration/*/graph.py` 描述阶段依赖、审核与恢复。日报图严格为
+  `load_window -> select_candidates -> plan -> publish`，不包含审核，也不嵌入图外筛选策略。
 - `app/orchestration/*/backend.py` 准备输入快照并调用共享方法，使用短数据库事务保存检查点和应用结果。
 - `app/services/item_publication.py` 写当前投影、媒体引用、修订与下游队列；不能重写 RawItem 原始证据。
 - `app/services/event_method_support.py` 验证和应用事件成员；`event_candidates.py` 读取候选池，排序由领域方法执行。
@@ -29,12 +30,18 @@ Frozen datasets → Experiment executor → 同一 methods / 消息图 / 事件�
 
 ## 执行身份
 
-PipelineJob 固定消息/事件类型、目标修订、方法配置、重试预算与租约；消息和事件有独立完成状态。
+PipelineJob 的执行身份固定为 `workflow_name + target_entity_type + target_entity_id + target_revision`，
+并保存消息/事件类型、方法配置、重试预算与租约；`raw_item_id` 只是 provenance、所有权、查询和
+RawItem 修订 supersession 字段。消息和事件有独立完成状态。
 ProcessingRun/EventAggregationRun 保存业务执行状态。业务 checkpoint 保留阶段输入输出的审计证据；
 LangGraph checkpoint 保存恢复位置。审核决定记录与消费分别记账，避免提交决定后崩溃导致丢失或重新审批。
 
 人工和自动入口共用 V3 流程。创建运行时使用短事务串行检查活动运行；数据库约束为最后一道并发防线。
 远端模型调用之前结束持锁事务，结果落库时验证执行所有权。发布投影、修订和下游任务在同一事务内提交。
+
+日报 scheduler 只检查上海自然日窗口、基础资格和 late update 重生成条件，然后触发 Daily Graph；
+它不调用 selection method，也不与 `select_candidates`/`plan` 重复选择。当前 `media` 阶段承载按需
+图片 OCR 与结构化解析；`image_ocr` 仅保留为旧运行和旧审核记录的读取兼容名。
 
 ## 迭代范围
 

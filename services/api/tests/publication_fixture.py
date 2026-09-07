@@ -1,6 +1,7 @@
 """Exercise canonical publication from an already-reviewed fixture proposal."""
 
 from sqlalchemy.orm import sessionmaker
+from app.methods import MethodAssembly
 from app.orchestration.contracts import (
     ItemProcessingRequest,
     RunMode,
@@ -32,7 +33,10 @@ async def publish_reviewed_fixture(db, review, *, note=None):
     importance["calculation"] = importance.pop("importance_calculation", {})
     review.status = "approved"
     db.commit()
-    backend = ItemProcessingBackendV3(sessionmaker(db.bind, expire_on_commit=False))
+    backend = ItemProcessingBackendV3(
+        sessionmaker(db.bind, expire_on_commit=False),
+        method_assembly=MethodAssembly(),
+    )
     evidence = await backend.load_evidence(request)
     await backend.publish(
         request,

@@ -14,6 +14,7 @@ from app.api.routes.daily_reports import (
     withdraw_daily_report,
 )
 from app.core.database import Base
+from app.methods import MethodAssembly
 from app.models.daily_report import DailyReport, DailyReportItem
 from app.models.event import Event, EventMention
 from app.models.normalized_item import NormalizedItem
@@ -181,14 +182,15 @@ def test_daily_report_generation_is_replaceable_for_the_same_date() -> None:
         )
         db.commit()
 
-        first = generate_daily_report(db, date(2026, 8, 13))
+        assembly = MethodAssembly()
+        first = generate_daily_report(db, date(2026, 8, 13), assembly=assembly)
         db.commit()
         first_id = first.id
         first_items = list(
             db.scalars(select(DailyReportItem).where(DailyReportItem.report_id == first.id))
         )
         payload = get_daily_report(date(2026, 8, 13), db)
-        second = generate_daily_report(db, date(2026, 8, 13))
+        second = generate_daily_report(db, date(2026, 8, 13), assembly=assembly)
         db.commit()
 
         assert second.id == first_id

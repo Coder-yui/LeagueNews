@@ -10,9 +10,10 @@ from app.domain.event_admission import minimal_event_filter
 from app.domain.event_types import AGGREGATION_POLICY_VERSION
 from app.models.event import EventAggregationRun
 from app.models.normalized_item import NormalizedItem
-from app.orchestration.contracts import ReviewMode, RunMode
+from app.orchestration.contracts import RunMode
 from app.methods import MethodAssembly, MethodAssemblyConfig
 from app.orchestration.event_aggregation.graph import (
+    EVENT_AGGREGATION_GRAPH,
     EVENT_AGGREGATION_GRAPH_VERSION,
     EventAdmissionProposal,
     EventAggregationRequest,
@@ -204,7 +205,7 @@ class EventAggregationBackendV3:
                 if isinstance(metadata, dict):
                     run.model_call_count = int(metadata.get("retry_count") or 0) + 1
             run.decision_draft = draft
-            run.current_stage = _legacy_stage(stage)
+            run.current_stage = stage.value
             if stage == EventAggregationStage.MINIMAL_FILTER:
                 run.admission_decision = str(output.get("decision") or "process")
             elif stage == EventAggregationStage.CANDIDATE_RETRIEVAL:
@@ -278,26 +279,11 @@ class EventAggregationBackendV3:
             db.commit()
 
 
-def _legacy_stage(stage: EventAggregationStage) -> str:
-    if stage in {
-        EventAggregationStage.LOAD_MESSAGE,
-        EventAggregationStage.MINIMAL_FILTER,
-    }:
-        return "minimal_filter"
-    if stage in {
-        EventAggregationStage.CANDIDATE_RETRIEVAL,
-        EventAggregationStage.SEMANTIC_DECISION,
-    }:
-        return "model_decision"
-    return "apply_membership"
-
-
 def create_event_aggregation_run(
     session_factory: SessionFactory,
     *,
     normalized_item_id: int,
     normalized_item_revision: int,
-    review_mode: ReviewMode = ReviewMode.AUTOMATIC,
     method_config: MethodAssemblyConfig | None = None,
     execution_guard: PipelineExecutionGuard | None = None,
 ) -> EventAggregationRequest:
@@ -313,27 +299,45 @@ def create_event_aggregation_run(
                 normalized_item_id=item.id,
                 normalized_item_revision=item.current_revision,
                 status="running",
-                current_stage="minimal_filter",
+                current_stage=EventAggregationStage.LOAD_MESSAGE.value,
                 aggregation_policy_version=AGGREGATION_POLICY_VERSION,
                 idempotency_key=event_run_key(item),
-                decision_draft={
-                    "graph_version": EVENT_AGGREGATION_GRAPH_VERSION,
-                    "review_mode": review_mode.value,
-                    "method_config": (
-                        method_config or MethodAssembly().config
-                    ).model_dump(mode="json"),
-                    "stage_checkpoints": {},
-                },
+                graph_name=EVENT_AGGREGATION_GRAPH,
+                graph_version=EVENT_AGGREGATION_GRAPH_VERSION,
+                state_version=1,
+                method_config=(method_config or MethodAssembly().config).model_dump(mode="json"),
+                decision_draft={"stage_checkpoints": {}},
             )
             db.add(existing)
+            db.flush()
+            existing.thread_id = EventAggregationRequest(
+                workflow_run_id=existing.id,
+                normalized_item_id=item.id,
+                normalized_item_revision=item.current_revision,
+                run_mode=RunMode.PRODUCTION,
+            ).thread_id
             assert_execution_owned(db, execution_guard)
             db.commit()
             db.refresh(existing)
+        elif existing.graph_name != EVENT_AGGREGATION_GRAPH or existing.thread_id is None:
+            # Complete the V3 execution metadata for runs created before the
+            # explicit Event graph identity columns were introduced.
+            existing.graph_name = EVENT_AGGREGATION_GRAPH
+            existing.graph_version = EVENT_AGGREGATION_GRAPH_VERSION
+            existing.state_version = 1
+            if method_config is not None:
+                existing.method_config = method_config.model_dump(mode="json")
+            existing.thread_id = EventAggregationRequest(
+                workflow_run_id=existing.id,
+                normalized_item_id=item.id,
+                normalized_item_revision=item.current_revision,
+                run_mode=RunMode.PRODUCTION,
+            ).thread_id
+            assert_execution_owned(db, execution_guard)
+            db.commit()
         return EventAggregationRequest(
             workflow_run_id=existing.id,
             normalized_item_id=item.id,
             normalized_item_revision=item.current_revision,
             run_mode=RunMode.PRODUCTION,
-            review_mode=review_mode,
         )
-

@@ -11,9 +11,7 @@ from app.core.config import settings
 from app.models.event import EventAggregationRun
 from app.models.normalized_item import NormalizedItem
 from app.orchestration.checkpointing import open_postgres_checkpointer
-from app.orchestration.contracts import ReviewMode
 from app.orchestration.event_aggregation.graph import (
-    EVENT_AGGREGATION_GRAPH_VERSION,
     EventAggregationRequest,
 )
 from app.orchestration.event_aggregation.backend import create_event_aggregation_run
@@ -101,18 +99,13 @@ async def publish_normalized_item_downstream(
     if existing is not None and existing.status == "completed":
         return existing
     resolved_method_config = method_config or MethodAssemblyConfig.model_validate(
-        (existing.decision_draft if existing is not None else {}).get("method_config") or {}
+        existing.method_config if existing is not None else {}
     )
-    resume_existing = bool(
-        existing is not None
-        and existing.decision_draft.get("graph_version")
-        == EVENT_AGGREGATION_GRAPH_VERSION
-    )
+    resume_existing = existing is not None and existing.status != "completed"
     request = create_event_aggregation_run(
         session_factory,
         normalized_item_id=item.id,
         normalized_item_revision=item.current_revision,
-        review_mode=ReviewMode.AUTOMATIC,
         method_config=resolved_method_config,
         execution_guard=execution_guard,
     )

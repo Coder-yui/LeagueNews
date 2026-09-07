@@ -100,6 +100,7 @@ def _final_manual_review(
         status="awaiting_review",
         current_stage="importance",
         execution_mode="manual",
+        graph_name="item_processing",
         correction_id=correction.id,
         context={
             "approved_translation_proposal": {
@@ -270,7 +271,7 @@ async def test_manual_publish_commits_message_and_queues_event_downstream(
     )
     assert job is not None
     assert job.status == "queued"
-    assert job.current_stage == "event_aggregation"
+    assert job.current_stage == "load_message"
 
 
 @pytest.mark.anyio
@@ -288,7 +289,7 @@ async def test_manual_publish_queues_event_even_when_automatic_ingestion_is_disa
         select(PipelineJob).where(PipelineJob.raw_item_id == item.raw_item_id)
     )
     assert job is not None
-    assert job.current_stage == "event_aggregation"
+    assert job.current_stage == "load_message"
 
 
 @pytest.mark.anyio
@@ -358,8 +359,9 @@ async def test_event_job_does_not_advance_manual_processing_run(db: Session) -> 
     item = _published_item(db, suffix=" event job manual fence")
     job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="queued",
-        current_stage="event_aggregation",
+        current_stage="load_message",
     )
     db.add(job)
     correction, review = _final_manual_review(db, item)
@@ -400,8 +402,9 @@ async def test_correction_cancels_old_event_job_and_new_publish_queues_fresh_job
     item = _published_item(db, suffix=" event job supersession")
     old_job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="failed",
-        current_stage="event_aggregation",
+        current_stage="load_message",
         next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
         error_message="event downstream unavailable",
         completed_at=datetime.now(UTC),
@@ -445,7 +448,7 @@ async def test_correction_cancels_old_event_job_and_new_publish_queues_fresh_job
     new_job = jobs[-1]
     assert new_job.id != old_job.id
     assert new_job.status == "queued"
-    assert new_job.current_stage == "event_aggregation"
+    assert new_job.current_stage == "load_message"
     assert item.current_revision == 2
 
     async def run_downstream(_db: Session, published: NormalizedItem):
@@ -476,8 +479,9 @@ async def test_failed_event_job_recovery_requeues_without_message_correction(
     item = _published_item(db, suffix=" event retry")
     job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="failed",
-        current_stage="event_aggregation",
+        current_stage="load_message",
         error_message="event downstream unavailable",
         completed_at=datetime.now(UTC),
     )
@@ -532,8 +536,9 @@ async def test_manual_recover_resets_exhausted_event_job_attempts(db: Session) -
     item = _published_item(db, suffix=" exhausted event retry")
     job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="failed",
-        current_stage="event_aggregation",
+        current_stage="load_message",
         attempts=automatic_pipeline.settings.pipeline_worker_max_attempts,
         error_message="event downstream unavailable",
         completed_at=datetime.now(UTC),
@@ -568,8 +573,9 @@ async def test_manual_recover_rejects_job_already_scheduled_for_retry(db: Sessio
     next_attempt_at = datetime.now(UTC) + timedelta(minutes=5)
     job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="failed",
-        current_stage="event_aggregation",
+        current_stage="load_message",
         next_attempt_at=next_attempt_at,
         error_message="temporary downstream failure",
     )
@@ -599,8 +605,9 @@ async def test_event_recovery_cancels_job_when_publication_is_withdrawn(db: Sess
     item.publication_status = "withdrawn"
     job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="failed",
-        current_stage="event_aggregation",
+        current_stage="load_message",
     )
     db.add(job)
     db.commit()
@@ -626,13 +633,15 @@ async def test_event_recovery_cancels_old_job_when_active_job_exists(db: Session
     item = _published_item(db, suffix=" active event retry")
     old_event_job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="failed",
-        current_stage="event_aggregation",
+        current_stage="load_message",
     )
     current_event_job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        job_type="event",
         status="queued",
-        current_stage="event_aggregation",
+        current_stage="load_message",
     )
     db.add_all([old_event_job, current_event_job])
     db.commit()
@@ -817,6 +826,9 @@ def test_pipeline_job_enqueue_reuses_retry_pending_job(db: Session) -> None:
     item = _published_item(db, suffix=" retry pending enqueue")
     retry_job = PipelineJob(
         raw_item_id=item.raw_item_id,
+        target_entity_type="raw_item",
+        target_entity_id=item.raw_item_id,
+        target_revision=item.raw_item.revision,
         status="failed",
         current_stage="relevance",
         next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -834,7 +846,11 @@ def test_pipeline_job_enqueue_reuses_retry_pending_job(db: Session) -> None:
 
 def test_pipeline_job_stale_lease_is_reclaimed_with_provenance(db: Session) -> None:
     item = _published_item(db)
-    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued")
+    job = PipelineJob(
+        raw_item_id=item.raw_item_id,
+        status="queued",
+        max_attempts=2,
+    )
     db.add(job)
     db.commit()
 
@@ -928,7 +944,7 @@ async def test_pipeline_job_failure_alert_is_sent_only_after_attempts_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     item = _published_item(db)
-    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued")
+    job = PipelineJob(raw_item_id=item.raw_item_id, status="queued", max_attempts=2)
     db.add(job)
     db.commit()
     notifications: list[dict[str, object]] = []

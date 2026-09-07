@@ -277,7 +277,12 @@ class EventAggregationRun(Base):
     normalized_item_revision: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
     outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    current_stage: Mapped[str] = mapped_column(String(40), default="minimal_filter")
+    current_stage: Mapped[str] = mapped_column(String(40), default="load_message")
+    graph_name: Mapped[str] = mapped_column(String(80), default="event_aggregation")
+    graph_version: Mapped[str] = mapped_column(String(80), default="v3.0.0-dev2")
+    state_version: Mapped[int] = mapped_column(Integer, default=1)
+    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    method_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     admission_decision: Mapped[str | None] = mapped_column(String(30), nullable=True)
     aggregation_policy_version: Mapped[str] = mapped_column(
         String(80), default=AGGREGATION_POLICY_VERSION
@@ -308,7 +313,8 @@ class EventAggregationRun(Base):
             name="ck_event_runs_outcome",
         ),
         CheckConstraint(
-            "current_stage IN ('minimal_filter', 'model_decision', 'apply_membership')",
+            "current_stage IN ('load_message', 'minimal_filter', 'candidate_retrieval', "
+            "'semantic_decision', 'apply_membership', 'refresh_projection')",
             name="ck_event_runs_stage",
         ),
         CheckConstraint(

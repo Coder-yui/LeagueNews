@@ -72,7 +72,7 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
     monkeypatch.setenv("MIGRATIONS_DIR", str(MIGRATIONS))
     files = migration_files()
     assert files[0].name == "001_initial_schema.sql"
-    assert files[-1].name == "078_retire_legacy_execution.sql"
+    assert files[-1].name == "079_finalize_v3_execution_identity.sql"
 
     taxonomy = (MIGRATIONS / "056_add_message_taxonomy_v1.sql").read_text()
     for column in ("products", "message_type", "topics", "classification_version"):
@@ -183,6 +183,21 @@ def test_migration_ledger_and_current_compatibility_contract(monkeypatch) -> Non
         assert column in reliable_execution
     assert "uq_pipeline_jobs_active_target" in reliable_execution
     assert "'077_add_reliable_execution_boundaries'" in reliable_execution
+
+    v3_finalization = (MIGRATIONS / "079_finalize_v3_execution_identity.sql").read_text()
+    assert "uq_pipeline_jobs_active_execution_identity" in v3_finalization
+    for stage in (
+        "load_message",
+        "minimal_filter",
+        "candidate_retrieval",
+        "semantic_decision",
+        "apply_membership",
+        "refresh_projection",
+    ):
+        assert f"'{stage}'" in v3_finalization
+    for column in ("graph_name", "graph_version", "state_version", "thread_id", "method_config"):
+        assert column in v3_finalization
+    assert "'079_finalize_v3_execution_identity'" in v3_finalization
 
     event_schema = (MIGRATIONS / "063_replace_event_system_with_v1.sql").read_text()
     assert "DROP TABLE IF EXISTS event_messages" in event_schema

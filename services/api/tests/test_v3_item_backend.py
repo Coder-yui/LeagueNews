@@ -271,6 +271,6 @@ def test_v2_baseline_publishes_through_v3_graph_with_stage_checkpoints() -> None
         ]
         assert all(checkpoint.graph_name == "item_processing" for checkpoint in checkpoints)
         event_job = db.scalar(
-            select(PipelineJob).where(PipelineJob.current_stage == "event_aggregation")
+            select(PipelineJob).where(PipelineJob.job_type == "event")
         )
         assert event_job is not None

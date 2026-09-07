@@ -10,30 +10,19 @@ from urllib.parse import urlsplit
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
-from app.domain.importance import (
-    AudienceRegion,
-    CompetitionRegion,
-    ImportanceScale,
-    Prominence,
-    SkinTier,
-)
 from app.domain.message_taxonomy import (
-    CLASSIFICATION_VERSION,
-    ContentForm as MessageContentForm,
-    MessageType,
-    Product,
     SourceKind,
-    Topic,
-    TOPIC_ORDER,
     classification_catalog,
     classification_error,
     content_analysis_catalog,
-    message_content_error,
 )
-from app.domain.message_entities import EntityType
+from app.methods.contracts import (
+    MessageClassificationImportanceResult,
+    MessageContentAnalysisResult,
+)
 from app.prompts import prompt_registry
 from app.prompts.registry import (
     CLASSIFICATION_OPERATION,
@@ -52,56 +41,6 @@ class LLMConfigurationError(RuntimeError):
 
 class LLMAnalysisError(RuntimeError):
     """Raised when a provider response cannot be used as a news analysis."""
-
-
-class ExtractedEntity(BaseModel):
-    name: str = Field(min_length=1)
-    type: EntityType
-    canonical_name: str | None = None
-
-
-class MessageContentAnalysisResult(BaseModel):
-    title: str = Field(default="", max_length=500)
-    summary: str
-    entities: list[ExtractedEntity] = Field(default_factory=list, max_length=8)
-    products: list[Product] = Field(min_length=1, max_length=3)
-    content_form: MessageContentForm
-    classification_version: Literal[CLASSIFICATION_VERSION] = CLASSIFICATION_VERSION
-
-    @model_validator(mode="after")
-    def validate_controlled_classification(self) -> "MessageContentAnalysisResult":
-        self.title = self.title.strip()
-        if self.content_form in {"media_only", "link_only"}:
-            self.summary = ""
-            self.entities = []
-        error = message_content_error(
-            products=list(self.products),
-            content_form=self.content_form,
-            title=self.title,
-            summary=self.summary,
-            entities=list(self.entities),
-        )
-        if error:
-            raise ValueError(error)
-        return self
-
-
-class MessageClassificationImportanceResult(BaseModel):
-    message_type: MessageType
-    topics: list[Topic] = Field(min_length=1)
-    scale: ImportanceScale
-    audience_region: AudienceRegion
-    competition_region: CompetitionRegion
-    prominence: Prominence
-    skin_tier: SkinTier
-    is_bulk_update: bool
-    evidence: list[str] = Field(min_length=1, max_length=6)
-
-    @model_validator(mode="after")
-    def normalize_topic_order(self) -> "MessageClassificationImportanceResult":
-        selected = set(self.topics)
-        self.topics = [topic for topic in TOPIC_ORDER if topic in selected]
-        return self
 
 
 class RelevanceResult(BaseModel):

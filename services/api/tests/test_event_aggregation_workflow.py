@@ -654,7 +654,7 @@ def test_superseded_worker_cannot_apply_old_revision_membership() -> None:
         assert event is not None
         assert first.normalized_item_revision == 1
         first.status = "running"
-        first.current_stage = "model_decision"
+        first.current_stage = "semantic_decision"
         first.outcome = None
         first.completed_at = None
         db.commit()

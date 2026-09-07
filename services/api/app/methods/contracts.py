@@ -1,13 +1,87 @@
 """Serializable inputs, method selection and result contracts."""
 
 from dataclasses import dataclass
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.domain.importance import (
+    AudienceRegion,
+    CompetitionRegion,
+    ImportanceScale,
+    Prominence,
+    SkinTier,
+)
+from app.domain.message_entities import EntityType
+from app.domain.message_taxonomy import (
+    CLASSIFICATION_VERSION,
+    ContentForm as MessageContentForm,
+    MessageType,
+    Product,
+    TOPIC_ORDER,
+    Topic,
+    message_content_error,
+)
 
 
 class FrozenMethodInput(BaseModel):
     """Serializable method input; it cannot be changed after assembly."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class ExtractedEntity(BaseModel):
+    name: str = Field(min_length=1)
+    type: EntityType
+    canonical_name: str | None = None
+
+
+class MessageContentAnalysisResult(BaseModel):
+    """Stable domain output for the message-content analysis method."""
+
+    title: str = Field(default="", max_length=500)
+    summary: str
+    entities: list[ExtractedEntity] = Field(default_factory=list, max_length=8)
+    products: list[Product] = Field(min_length=1, max_length=3)
+    content_form: MessageContentForm
+    classification_version: Literal[CLASSIFICATION_VERSION] = CLASSIFICATION_VERSION
+
+    @model_validator(mode="after")
+    def validate_controlled_classification(self) -> "MessageContentAnalysisResult":
+        self.title = self.title.strip()
+        if self.content_form in {"media_only", "link_only"}:
+            self.summary = ""
+            self.entities = []
+        error = message_content_error(
+            products=list(self.products),
+            content_form=self.content_form,
+            title=self.title,
+            summary=self.summary,
+            entities=list(self.entities),
+        )
+        if error:
+            raise ValueError(error)
+        return self
+
+
+class MessageClassificationImportanceResult(BaseModel):
+    """Stable domain output for message classification and importance inputs."""
+
+    message_type: MessageType
+    topics: list[Topic] = Field(min_length=1)
+    scale: ImportanceScale
+    audience_region: AudienceRegion
+    competition_region: CompetitionRegion
+    prominence: Prominence
+    skin_tier: SkinTier
+    is_bulk_update: bool
+    evidence: list[str] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def normalize_topic_order(self) -> "MessageClassificationImportanceResult":
+        selected = set(self.topics)
+        self.topics = [topic for topic in TOPIC_ORDER if topic in selected]
+        return self
 
 
 class MessageAnalysisInput(FrozenMethodInput):

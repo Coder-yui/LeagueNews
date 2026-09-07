@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import Any
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.models.workflow import ProcessingRun, ReviewTask, KnowledgeRule, GlossaryTerm
 from app.models.pipeline import PipelineCorrection
@@ -21,8 +22,24 @@ def reject_review(
     *,
     payload: ReviewRejection,
 ) -> ProcessingRun:
-    _require_pending_review(review)
-    _validate_rejection(review.stage, payload)
+    locked_review = db.scalar(
+        select(ReviewTask)
+        .where(ReviewTask.id == review.id)
+        .with_for_update()
+    )
+    if locked_review is None:
+        raise ValueError("review task not found")
+    if locked_review.status == "rejected" and locked_review.delivery_status in {
+        "recorded",
+        "consumed",
+    }:
+        run = db.get(ProcessingRun, locked_review.processing_run_id)
+        if run is None:
+            raise ValueError("processing run not found")
+        return run
+    _require_pending_review(locked_review)
+    _validate_rejection(locked_review.stage, payload)
+    review = locked_review
     now = datetime.now(UTC)
     review.status = "rejected"
     review.feedback = payload.model_dump(mode="json")

@@ -4,10 +4,9 @@ from typing import Annotated, Any, Literal, Protocol, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
 from pydantic import BaseModel, Field, model_validator
 
-from app.orchestration.contracts import ReviewDecision, ReviewMode, RunMode
+from app.orchestration.contracts import RunMode
 from app.schemas.event_aggregation import EventAggregationResult
 
 
@@ -33,7 +32,6 @@ class EventAggregationRequest(BaseModel):
     normalized_item_id: int = Field(ge=1)
     normalized_item_revision: int = Field(ge=1)
     run_mode: RunMode
-    review_mode: ReviewMode = ReviewMode.AUTOMATIC
     batch_id: int | None = Field(default=None, ge=1)
     graph_version: str = EVENT_AGGREGATION_GRAPH_VERSION
     state_version: int = EVENT_AGGREGATION_STATE_VERSION
@@ -80,7 +78,6 @@ class EventDecisionProposal(BaseModel):
     result: EventAggregationResult
     suppressed_mentions: list[dict[str, Any]] = Field(default_factory=list)
     execution_metadata: dict[str, Any] = Field(default_factory=dict)
-    requires_manual_review: bool = False
 
 
 class EventMembershipResult(BaseModel):
@@ -99,7 +96,6 @@ class EventAggregationState(TypedDict, total=False):
     admission: dict[str, object]
     candidate_retrieval: dict[str, object]
     semantic_decision: dict[str, object]
-    review_decision: dict[str, object]
     membership: dict[str, object]
     projection: dict[str, object]
     outcome: str
@@ -200,46 +196,13 @@ def build_event_aggregation_graph(
         )
         return {"semantic_decision": value.model_dump(mode="json"), "trace": ["semantic_decision"]}
 
-    def review_node(state: EventAggregationState) -> EventAggregationState:
-        request = EventAggregationRequest.model_validate(state["request"])
-        proposal = EventDecisionProposal.model_validate(state["semantic_decision"])
-        if request.review_mode == ReviewMode.MANUAL or proposal.requires_manual_review:
-            review = ReviewDecision.model_validate(
-                interrupt(
-                    {
-                        "kind": "event_aggregation_review",
-                        "request": state["request"],
-                        "proposal": state["semantic_decision"],
-                    }
-                )
-            )
-            source = "manual"
-        else:
-            review = ReviewDecision(action="approve", note="automatic policy approval")
-            source = "automatic"
-        result: EventAggregationState = {
-            "review_decision": review.model_dump(mode="json"),
-            "trace": [f"review_{source}"],
-        }
-        if review.replacement is not None:
-            result["semantic_decision"] = EventDecisionProposal.model_validate(
-                review.replacement
-            ).model_dump(mode="json")
-        return result
-
     async def checkpoint_decision(state: EventAggregationState) -> EventAggregationState:
         request = EventAggregationRequest.model_validate(state["request"])
-        output = {
-            **dict(state["semantic_decision"]),
-            "review_decision": dict(state["review_decision"]),
-        }
+        output = dict(state["semantic_decision"])
         await backend.save_stage(request, EventAggregationStage.SEMANTIC_DECISION, output)
         return {"trace": ["checkpoint_semantic_decision"]}
 
-    def route_review(state: EventAggregationState) -> str:
-        review = ReviewDecision.model_validate(state["review_decision"])
-        if review.action == "reject":
-            return "reject"
+    def route_after_decision(state: EventAggregationState) -> str:
         request = EventAggregationRequest.model_validate(state["request"])
         return "apply" if request.run_mode == RunMode.PRODUCTION else "preview"
 
@@ -288,13 +251,11 @@ def build_event_aggregation_graph(
     builder.add_node("minimal_filter", minimal_filter_node)
     builder.add_node("candidate_retrieval", candidates_node)
     builder.add_node("semantic_decision", decision_node)
-    builder.add_node("review", review_node)
     builder.add_node("checkpoint_decision", checkpoint_decision)
     builder.add_node("apply_membership", membership_node)
     builder.add_node("refresh_projection", projection_node)
     builder.add_node("complete_skipped", terminal("skipped_by_minimal_filter"))
     builder.add_node("complete_preview", terminal("preview_completed"))
-    builder.add_node("complete_rejected", terminal("review_rejected"))
     builder.add_edge(START, "load_message")
     builder.add_edge("load_message", "minimal_filter")
     builder.add_conditional_edges(
@@ -303,20 +264,17 @@ def build_event_aggregation_graph(
         {"process": "candidate_retrieval", "skip": "complete_skipped"},
     )
     builder.add_edge("candidate_retrieval", "semantic_decision")
-    builder.add_edge("semantic_decision", "review")
-    builder.add_edge("review", "checkpoint_decision")
+    builder.add_edge("semantic_decision", "checkpoint_decision")
     builder.add_conditional_edges(
         "checkpoint_decision",
-        route_review,
+        route_after_decision,
         {
             "apply": "apply_membership",
             "preview": "complete_preview",
-            "reject": "complete_rejected",
         },
     )
     builder.add_edge("apply_membership", "refresh_projection")
     builder.add_edge("refresh_projection", END)
     builder.add_edge("complete_skipped", END)
     builder.add_edge("complete_preview", END)
-    builder.add_edge("complete_rejected", END)
     return builder.compile(checkpointer=checkpointer)

@@ -12,4 +12,7 @@ from app.methods.contracts import (
     MethodAssemblyConfig as MethodAssemblyConfig,
     MethodCallRecord as MethodCallRecord,
     MethodSelection as MethodSelection,
+    ExtractedEntity as ExtractedEntity,
+    MessageContentAnalysisResult as MessageContentAnalysisResult,
+    MessageClassificationImportanceResult as MessageClassificationImportanceResult,
 )

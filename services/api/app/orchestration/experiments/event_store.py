@@ -65,7 +65,6 @@ class ExperimentEventStore:
         from pathlib import Path
         from langgraph.checkpoint.memory import InMemorySaver
         from app.models import MediaAsset, KnowledgeRule, GlossaryTerm
-        from app.orchestration.contracts import ReviewMode
         from app.orchestration.item_processing.backend import (
             ItemProcessingBackendV3,
             create_item_processing_run,
@@ -130,7 +129,6 @@ class ExperimentEventStore:
             request = create_item_processing_run(
                 db,
                 raw_item_id=raw.id,
-                review_mode=ReviewMode.AUTOMATIC,
                 method_config=assembly.config,
             )
             request = request.model_copy(update={"run_mode": RunMode.EXPERIMENT, "batch_id": 1})

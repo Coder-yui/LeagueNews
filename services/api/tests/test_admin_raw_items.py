@@ -229,9 +229,13 @@ def test_manual_retry_returns_conflict_while_automatic_retry_is_pending() -> Non
             workflow_type="item",
             status="failed",
             current_stage="importance",
+            graph_name="item_processing",
         )
         job = PipelineJob(
             raw_item_id=raw.id,
+            target_entity_type="raw_item",
+            target_entity_id=raw.id,
+            target_revision=raw.revision,
             status="failed",
             current_stage="importance",
             next_attempt_at=datetime.now(UTC) + timedelta(minutes=5),

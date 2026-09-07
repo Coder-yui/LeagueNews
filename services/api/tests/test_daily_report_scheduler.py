@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, date, datetime
 
 from sqlalchemy import create_engine, select
@@ -14,6 +15,10 @@ from app.services.daily_report_scheduler import (
     generate_due_daily_report,
     scheduled_generation_at,
 )
+
+
+def _generate_due(db: Session, *, now: datetime) -> DailyReport | None:
+    return asyncio.run(generate_due_daily_report(db, now=now))
 
 
 def test_daily_report_is_due_for_previous_date_at_shanghai_midnight() -> None:
@@ -58,17 +63,17 @@ def test_due_daily_report_is_generated_once_after_shanghai_midnight() -> None:
         db.commit()
 
         assert (
-            generate_due_daily_report(
+            _generate_due(
                 db,
                 now=datetime(2026, 8, 13, 15, 59, tzinfo=UTC),
             )
             is None
         )
-        report = generate_due_daily_report(
+        report = _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 0, tzinfo=UTC),
         )
-        repeated = generate_due_daily_report(
+        repeated = _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 30, tzinfo=UTC),
         )
@@ -113,7 +118,7 @@ def test_scheduler_requires_daily_report_eligible_content() -> None:
         )
         db.commit()
 
-        assert generate_due_daily_report(
+        assert _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 0, tzinfo=UTC),
         ) is None
@@ -153,7 +158,7 @@ def test_scheduler_regenerates_for_a_late_eligible_message_within_grace_period()
         db.add(first_item)
         db.commit()
 
-        first_report = generate_due_daily_report(
+        first_report = _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 0, tzinfo=UTC),
         )
@@ -187,7 +192,7 @@ def test_scheduler_regenerates_for_a_late_eligible_message_within_grace_period()
         )
         db.commit()
 
-        regenerated = generate_due_daily_report(
+        regenerated = _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 3, tzinfo=UTC),
         )
@@ -201,7 +206,7 @@ def test_scheduler_does_not_create_an_empty_report() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        report = generate_due_daily_report(
+        report = _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 0, tzinfo=UTC),
         )
@@ -249,7 +254,7 @@ def test_scheduler_does_not_republish_a_withdrawn_report() -> None:
         db.add(report)
         db.commit()
 
-        generated = generate_due_daily_report(
+        generated = _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 30, tzinfo=UTC),
         )

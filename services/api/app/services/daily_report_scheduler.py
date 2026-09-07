@@ -15,7 +15,6 @@ from app.services.daily_reports import (
     DAILY_REPORT_TIMEZONE,
     selected_daily_ids,
     daily_report_window,
-    generate_daily_report as generate_daily_report_sync,
 )
 
 
@@ -99,28 +98,7 @@ def _due_generation(
     return report_date, current
 
 
-def generate_due_daily_report(
-    db: Session,
-    *,
-    now: datetime | None = None,
-) -> DailyReport | None:
-    """Synchronous compatibility helper for unit tests and one-off scripts.
-
-    The live scheduler uses ``generate_due_daily_report_v3`` below.
-    """
-
-    due = _due_generation(db, now=now)
-    if due is None:
-        return None
-    report_date, current = due
-    report = generate_daily_report_sync(db, report_date)
-    report.updated_at = current.astimezone(UTC)
-    db.commit()
-    db.refresh(report)
-    return report
-
-
-async def generate_due_daily_report_v3(
+async def generate_due_daily_report(
     db: Session,
     *,
     now: datetime | None = None,
@@ -129,7 +107,6 @@ async def generate_due_daily_report_v3(
     if due is None:
         return None
     report_date, current = due
-
     db.commit()
     report = await generate_daily_report(db, report_date)
     report.updated_at = current.astimezone(UTC)
@@ -140,7 +117,7 @@ async def generate_due_daily_report_v3(
 
 async def process_due_daily_report(now: datetime | None = None) -> bool:
     with SessionLocal() as db:
-        return await generate_due_daily_report_v3(db, now=now) is not None
+        return await generate_due_daily_report(db, now=now) is not None
 
 
 async def daily_report_scheduler_loop() -> None:

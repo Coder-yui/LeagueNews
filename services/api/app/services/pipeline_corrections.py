@@ -96,7 +96,7 @@ def _supersede_active_work(db: Session, *, raw_item_id: int) -> None:
                     PipelineJob.next_attempt_at.is_not(None),
                 ),
             ),
-            PipelineJob.current_stage == "event_aggregation",
+            PipelineJob.job_type == "event",
         )
     ):
         job.status = "cancelled"
@@ -230,7 +230,7 @@ async def recover_failed_job(
     raw_item = db.get(RawItem, job.raw_item_id)
     if raw_item is None:
         raise ValueError("raw item no longer exists")
-    if job.current_stage == "event_aggregation":
+    if job.job_type == "event":
         item = raw_item.normalized_item
         if not is_latest_raw_item(db, raw_item) or item is None or item.publication_status != "published":
             job.status = "cancelled"

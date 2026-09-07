@@ -4,15 +4,17 @@ import re
 from typing import Any
 from app.domain.event_types import EVENT_FAMILIES
 from app.domain.importance import ImportanceScale
-from app.methods.contracts import MethodSelection
+from app.methods.contracts import (
+    MethodSelection,
+    MessageClassificationImportanceResult,
+    MessageContentAnalysisResult,
+)
 
 
 async def _message_analysis_heuristic(
     *, payload: dict[str, Any], selection: "MethodSelection", **_context: Any
 ) -> Any:
     """Example candidate: extract controlled fields from frozen text."""
-
-    from app.services.llm import MessageContentAnalysisResult
 
     title = str(payload.get("title") or "").strip()
     content = str(payload.get("content") or "").strip()
@@ -52,8 +54,6 @@ async def _importance_scoring_rule_v2(
     """Example candidate: deterministic evidence-weighted classification."""
 
     del selection
-    from app.services.llm import MessageClassificationImportanceResult
-
     content = str(payload.get("content") or "")
     facts = payload.get("extracted_facts") or {}
     text = f"{content} {facts}".casefold()

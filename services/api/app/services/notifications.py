@@ -265,7 +265,7 @@ def enqueue_pipeline_failure(
         return False
     source = raw_item.source if raw_item is not None else None
     stage = job.current_stage
-    if stage != "event_aggregation" and job.processing_run_id is not None:
+    if job.job_type != "event" and job.processing_run_id is not None:
         processing_run = db.get(ProcessingRun, job.processing_run_id)
         if processing_run is not None:
             stage = processing_run.current_stage

@@ -8,7 +8,7 @@ import time
 from datetime import UTC, datetime
 from datetime import timedelta
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -114,6 +114,7 @@ def _active_item_run(db: Session, raw_item_id: int) -> ProcessingRun | None:
         select(ProcessingRun)
         .where(
             ProcessingRun.raw_item_id == raw_item_id,
+            ProcessingRun.graph_name == ITEM_PROCESSING_GRAPH,
             ProcessingRun.status.in_(["running", "awaiting_review"]),
         )
         .order_by(ProcessingRun.id.desc())
@@ -127,6 +128,7 @@ def _failed_item_run(db: Session, job: PipelineJob) -> ProcessingRun | None:
         if (
             run is not None
             and run.workflow_type == "item"
+            and run.graph_name == ITEM_PROCESSING_GRAPH
             and run.execution_mode == "automatic"
             and run.status in {"failed", "completed"}
         ):
@@ -135,6 +137,7 @@ def _failed_item_run(db: Session, job: PipelineJob) -> ProcessingRun | None:
     statement = select(ProcessingRun).where(
         ProcessingRun.raw_item_id == job.raw_item_id,
         ProcessingRun.workflow_type == "item",
+        ProcessingRun.graph_name == ITEM_PROCESSING_GRAPH,
         ProcessingRun.execution_mode == "automatic",
         ProcessingRun.status == "failed",
     )
@@ -181,7 +184,7 @@ async def execute_pipeline_job(
         job.completed_at = datetime.now(UTC)
         return
 
-    if job.job_type == "event" or job.current_stage == "event_aggregation":
+    if job.job_type == "event":
         item = raw_item.normalized_item
         if item is None or item.publication_status != "published":
             job.status = "cancelled"
@@ -217,12 +220,6 @@ async def execute_pipeline_job(
         job.error_message = "manual processing run owns this RawItem"
         job.completed_at = datetime.now(UTC)
         return
-    if item_run is not None and item_run.graph_name != ITEM_PROCESSING_GRAPH:
-        if item_run.status in {"running", "awaiting_review"}:
-            raise ValueError(
-                "unsupported legacy execution; apply migration 078 before starting workers"
-            )
-        item_run = None  # terminal history stays intact; new work starts at source evidence
     if item_run is None and (
         raw_item.normalized_item is None
         or raw_item.normalized_item.publication_status == "withdrawn"
@@ -315,11 +312,7 @@ def _finalize_expired_exhausted_job(db: Session, now: datetime) -> bool:
         select(PipelineJob)
         .where(
             PipelineJob.status == "running",
-            PipelineJob.attempts
-            >= case(
-                (PipelineJob.workflow_version.is_not(None), PipelineJob.max_attempts),
-                else_=settings.pipeline_worker_max_attempts,
-            ),
+            PipelineJob.attempts >= PipelineJob.max_attempts,
             or_(
                 PipelineJob.lease_expires_at.is_(None),
                 PipelineJob.lease_expires_at <= now,
@@ -342,7 +335,7 @@ def _finalize_expired_exhausted_job(db: Session, now: datetime) -> bool:
     job.worker_id = None
     checkpoint = _latest_checkpoint(db, job.raw_item_id)
     job.last_checkpoint_id = checkpoint.id if checkpoint else None
-    if job.correction_id and job.current_stage != "event_aggregation":
+    if job.correction_id and job.job_type != "event":
         correction = db.get(PipelineCorrection, job.correction_id)
         if correction is not None:
             correction.status = "failed"
@@ -366,14 +359,7 @@ def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob
                 (
                     (PipelineJob.status == "queued")
                     & (
-                        PipelineJob.attempts
-                        < case(
-                            (
-                                PipelineJob.workflow_version.is_not(None),
-                                PipelineJob.max_attempts,
-                            ),
-                            else_=settings.pipeline_worker_max_attempts,
-                        )
+                        PipelineJob.attempts < PipelineJob.max_attempts
                     )
                 ),
                 (
@@ -381,14 +367,7 @@ def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob
                     & PipelineJob.next_attempt_at.is_not(None)
                     & (PipelineJob.next_attempt_at <= now)
                     & (
-                        PipelineJob.attempts
-                        < case(
-                            (
-                                PipelineJob.workflow_version.is_not(None),
-                                PipelineJob.max_attempts,
-                            ),
-                            else_=settings.pipeline_worker_max_attempts,
-                        )
+                        PipelineJob.attempts < PipelineJob.max_attempts
                     )
                 ),
                 (
@@ -398,14 +377,7 @@ def _claim_next_job(db: Session, *, worker_id: str | None = None) -> PipelineJob
                         | (PipelineJob.lease_expires_at <= now)
                     )
                     & (
-                        PipelineJob.attempts
-                        < case(
-                            (
-                                PipelineJob.workflow_version.is_not(None),
-                                PipelineJob.max_attempts,
-                            ),
-                            else_=settings.pipeline_worker_max_attempts,
-                        )
+                        PipelineJob.attempts < PipelineJob.max_attempts
                     )
                 ),
             )
@@ -527,7 +499,7 @@ async def process_next_job() -> bool:
             job.lease_token = None
             job.lease_expires_at = None
             job.worker_id = None
-            if job.correction_id and job.current_stage != "event_aggregation":
+            if job.correction_id and job.job_type != "event":
                 correction = db.get(PipelineCorrection, job.correction_id)
                 item_run = (
                     db.get(ProcessingRun, job.processing_run_id)
@@ -563,11 +535,7 @@ async def process_next_job() -> bool:
             job.lease_token = None
             job.lease_expires_at = None
             job.worker_id = None
-            can_retry = job.attempts < (
-                job.max_attempts
-                if job.workflow_version is not None
-                else settings.pipeline_worker_max_attempts
-            ) and _is_retryable_pipeline_error(exc)
+            can_retry = job.attempts < job.max_attempts and _is_retryable_pipeline_error(exc)
             if can_retry:
                 job.completed_at = None
                 job.next_attempt_at = now + timedelta(seconds=_retry_delay_seconds(job.attempts))
@@ -580,7 +548,7 @@ async def process_next_job() -> bool:
                 )
             else:
                 job.next_attempt_at = None
-                if job.correction_id and job.current_stage != "event_aggregation":
+                if job.correction_id and job.job_type != "event":
                     correction = db.get(PipelineCorrection, job.correction_id)
                     if correction is not None:
                         correction.status = "failed"

@@ -5,10 +5,9 @@ from typing import Annotated, Any, Protocol, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
 from pydantic import BaseModel, Field, model_validator
 
-from app.orchestration.contracts import ReviewDecision, ReviewMode, RunMode
+from app.orchestration.contracts import RunMode
 
 
 DAILY_REPORT_GRAPH = "daily_report_generation"
@@ -30,7 +29,6 @@ class DailyReportRequest(BaseModel):
     workflow_run_id: int = Field(ge=1)
     report_date: date
     run_mode: RunMode
-    review_mode: ReviewMode = ReviewMode.AUTOMATIC
     batch_id: int | None = Field(default=None, ge=1)
     graph_version: str = DAILY_REPORT_GRAPH_VERSION
     state_version: int = DAILY_REPORT_STATE_VERSION
@@ -99,7 +97,6 @@ class DailyReportState(TypedDict, total=False):
     window: dict[str, object]
     selected: dict[str, object]
     ranked: dict[str, object]
-    review_decision: dict[str, object]
     publication: dict[str, object]
     outcome: str
     trace: Annotated[list[str], operator.add]
@@ -141,35 +138,7 @@ def build_daily_report_graph(
         value = await backend.plan(DailyCandidateSet.model_validate(state["selected"]))
         return {"ranked": value.model_dump(mode="json"), "trace": ["plan"]}
 
-    def review(state: DailyReportState) -> DailyReportState:
-        request = DailyReportRequest.model_validate(state["request"])
-        if request.review_mode == ReviewMode.MANUAL:
-            decision = ReviewDecision.model_validate(
-                interrupt(
-                    {
-                        "kind": "daily_report_review",
-                        "request": state["request"],
-                        "proposal": state["ranked"],
-                    }
-                )
-            )
-            source = "manual"
-        else:
-            decision = ReviewDecision(action="approve", note="automatic policy approval")
-            source = "automatic"
-        result: DailyReportState = {
-            "review_decision": decision.model_dump(mode="json"),
-            "trace": [f"review_{source}"],
-        }
-        if decision.replacement is not None:
-            result["ranked"] = DailySections.model_validate(
-                decision.replacement
-            ).model_dump(mode="json")
-        return result
-
-    def route_review(state: DailyReportState) -> str:
-        if ReviewDecision.model_validate(state["review_decision"]).action == "reject":
-            return "reject"
+    def route_after_plan(state: DailyReportState) -> str:
         request = DailyReportRequest.model_validate(state["request"])
         return "publish" if request.run_mode == RunMode.PRODUCTION else "preview"
 
@@ -194,24 +163,16 @@ def build_daily_report_graph(
     builder.add_node("load_window", load_window)
     builder.add_node("select_candidates", select_candidates)
     builder.add_node("plan", plan)
-    builder.add_node("review", review)
     builder.add_node("publish", publish)
     builder.add_node("complete_preview", terminal("preview_completed"))
-    builder.add_node("complete_rejected", terminal("review_rejected"))
     builder.add_edge(START, "load_window")
     builder.add_edge("load_window", "select_candidates")
     builder.add_edge("select_candidates", "plan")
-    builder.add_edge("plan", "review")
     builder.add_conditional_edges(
-        "review",
-        route_review,
-        {
-            "publish": "publish",
-            "preview": "complete_preview",
-            "reject": "complete_rejected",
-        },
+        "plan",
+        route_after_plan,
+        {"publish": "publish", "preview": "complete_preview"},
     )
     builder.add_edge("publish", END)
     builder.add_edge("complete_preview", END)
-    builder.add_edge("complete_rejected", END)
     return builder.compile(checkpointer=checkpointer)

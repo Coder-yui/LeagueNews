@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import app.orchestration.item_processing.service as item_processing_service
@@ -14,9 +15,11 @@ from app.models.pipeline import ProcessingCheckpoint
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
-from app.models.workflow import ReviewTask
+from app.models.workflow import ProcessingRun, ReviewTask
 from app.orchestration.item_processing.service import (
     approve_review,
+    claim_review_delivery,
+    resume_rejected_review,
     start_item_processing,
 )
 from app.methods import MethodAssemblyConfig
@@ -25,6 +28,8 @@ from app.services.llm import (
     MessageContentAnalysisResult,
     RelevanceResult,
 )
+from app.services.review_actions import reject_review
+from app.schemas.workflow import ReviewRejection
 
 
 class BaselineLLM:
@@ -193,7 +198,6 @@ def test_run_snapshots_method_configuration_before_execution() -> None:
             )
         )
         assert run.method_config == config.model_dump(mode="json")
-        assert run.context["method_config"] == config.model_dump(mode="json")
 
 
 def test_review_decision_survives_crash_before_graph_resume(
@@ -293,3 +297,155 @@ def test_review_decision_survives_crash_before_graph_resume(
             )
             is not None
         )
+
+
+def test_rejected_review_uses_the_same_crash_safe_delivery_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    saver = InMemorySaver()
+    llm = BaselineLLM()
+    with factory() as db:
+        source = Source(name="V3 rejected review source", connector_type="manual")
+        db.add(source)
+        db.flush()
+        raw_item = RawItem(
+            source_id=source.id,
+            external_id="v3-rejected-review",
+            content_blocks=[{"type": "paragraph", "text": "需要退回的消息"}],
+        )
+        db.add(raw_item)
+        db.commit()
+        run = asyncio.run(
+            start_item_processing(
+                db,
+                raw_item,
+                execution_mode="manual",
+                session_factory=factory,
+                llm_factory=lambda: llm,
+                checkpointer=saver,
+            )
+        )
+        review = db.scalar(
+            select(ReviewTask).where(
+                ReviewTask.processing_run_id == run.id,
+                ReviewTask.status == "pending",
+            )
+        )
+        assert review is not None
+
+        original_invoke = item_processing_service.invoke_item_processing
+
+        async def crash_before_resume(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise RuntimeError("simulated reject delivery crash")
+
+        monkeypatch.setattr(item_processing_service, "invoke_item_processing", crash_before_resume)
+        reject_review(
+            db,
+            review,
+            payload=ReviewRejection(
+                feedback_type="analysis_correction",
+                reason="消息分析不准确",
+            ),
+        )
+        with pytest.raises(RuntimeError, match="simulated reject delivery crash"):
+            asyncio.run(
+                resume_rejected_review(
+                    db,
+                    review,
+                    session_factory=factory,
+                    llm_factory=lambda: llm,
+                    checkpointer=saver,
+                )
+            )
+
+        db.expire_all()
+        recorded = db.get(ReviewTask, review.id)
+        assert recorded is not None
+        assert recorded.status == "rejected"
+        assert recorded.delivery_status == "recorded"
+        assert recorded.delivery_attempts == 1
+
+        monkeypatch.setattr(item_processing_service, "invoke_item_processing", original_invoke)
+        asyncio.run(
+            resume_rejected_review(
+                db,
+                recorded,
+                session_factory=factory,
+                llm_factory=lambda: llm,
+                checkpointer=saver,
+            )
+        )
+        db.expire_all()
+        delivered = db.get(ReviewTask, review.id)
+        assert delivered is not None
+        assert delivered.delivery_status == "consumed"
+        attempts = delivered.delivery_attempts
+
+        async def fail_if_redelivered(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("a consumed review command was delivered again")
+
+        monkeypatch.setattr(item_processing_service, "invoke_item_processing", fail_if_redelivered)
+        asyncio.run(
+            resume_rejected_review(
+                db,
+                delivered,
+                session_factory=factory,
+                llm_factory=lambda: llm,
+                checkpointer=saver,
+            )
+        )
+        assert db.get(ReviewTask, review.id).delivery_attempts == attempts
+
+
+def test_review_delivery_claim_recovers_after_lease_expiry() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as db:
+        source = Source(name="V3 delivery lease source", connector_type="manual")
+        db.add(source)
+        db.flush()
+        raw_item = RawItem(
+            source_id=source.id,
+            external_id="v3-delivery-lease",
+            content_blocks=[{"type": "paragraph", "text": "lease"}],
+        )
+        db.add(raw_item)
+        db.flush()
+        run = ProcessingRun(
+            raw_item_id=raw_item.id,
+            workflow_type="item",
+            status="awaiting_review",
+            current_stage="relevance",
+            execution_mode="manual",
+            graph_name="item_processing",
+        )
+        db.add(run)
+        db.flush()
+        review = ReviewTask(
+            processing_run_id=run.id,
+            stage="relevance",
+            status="approved",
+            delivery_status="recorded",
+        )
+        db.add(review)
+        db.commit()
+
+        token = claim_review_delivery(factory, review.id)
+        assert token
+        with pytest.raises(ValueError, match="already in progress"):
+            claim_review_delivery(factory, review.id)
+
+        review = db.get(ReviewTask, review.id)
+        assert review is not None
+        review.delivery_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+        recovered = claim_review_delivery(factory, review.id)
+        assert recovered and recovered != token

@@ -26,15 +26,12 @@ from app.methods import (
     MessageAnalysisInput,
     MethodAssembly,
     MethodAssemblyConfig,
+    MessageClassificationImportanceResult,
+    MessageContentAnalysisResult,
 )
 from app.schemas.event_aggregation import EventAggregationResult
 from app.domain.daily_report import DailyReportCandidate
-from app.services.llm import (
-    MessageClassificationImportanceResult,
-    MessageContentAnalysisResult,
-    RelevanceResult,
-    TranslationResult,
-)
+from app.services.llm import RelevanceResult, TranslationResult
 
 
 class FixtureExecutionError(RuntimeError):

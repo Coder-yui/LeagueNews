@@ -683,7 +683,7 @@ class ItemProcessingBackendV3:
             enqueue_pipeline_job(
                 db,
                 raw_item_id=raw_item.id,
-                current_stage="event_aggregation",
+                current_stage="load_message",
                 job_type="event",
                 target_entity_type="normalized_item",
                 target_entity_id=item.id,
@@ -764,11 +764,7 @@ def create_item_processing_run(
         graph_name=ITEM_PROCESSING_GRAPH,
         graph_version=ITEM_PROCESSING_GRAPH_VERSION,
         state_version=ITEM_PROCESSING_STATE_VERSION,
-        context={
-            "method_config": (
-                method_config or MethodAssembly().config
-            ).model_dump(mode="json")
-        },
+        context={},
         method_config=(method_config or MethodAssembly().config).model_dump(mode="json"),
     )
     db.add(run)

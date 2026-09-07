@@ -275,8 +275,9 @@ def test_event_aggregation_failure_keeps_pipeline_job_stage(
     job = PipelineJob(
         raw_item_id=raw.id,
         processing_run_id=processing_run.id,
+        job_type="event",
         status="failed",
-        current_stage="event_aggregation",
+        current_stage="load_message",
         error_message="event aggregation failed",
         completed_at=datetime.now(UTC),
     )
@@ -286,7 +287,7 @@ def test_event_aggregation_failure_keeps_pipeline_job_stage(
     assert enqueue_pipeline_failure(db, job=job, raw_item=raw) is True
     notification = db.scalar(select(NotificationOutbox))
     assert notification is not None
-    assert notification.payload["stage"] == "event_aggregation"
+    assert notification.payload["stage"] == "load_message"
 
 
 @pytest.mark.parametrize(

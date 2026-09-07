@@ -9,8 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.database import SessionLocal
 from app.models.daily_report import DailyReport
-from app.orchestration.checkpointing import open_postgres_checkpointer
-from app.orchestration.contracts import ReviewMode, RunMode
+from app.orchestration.contracts import RunMode
 from app.orchestration.daily_report.graph import DailyReportRequest
 from app.orchestration.runtime import LeagueNewsWorkflowRuntime
 
@@ -39,7 +38,6 @@ async def generate_daily_report(
         workflow_run_id=workflow_run_id or _run_id(),
         report_date=report_date,
         run_mode=RunMode.PRODUCTION,
-        review_mode=ReviewMode.AUTOMATIC,
     )
     if checkpointer is not None:
         runtime = LeagueNewsWorkflowRuntime(
@@ -47,11 +45,11 @@ async def generate_daily_report(
         )
         result = await runtime.invoke_daily_report(request)
     else:
-        async with open_postgres_checkpointer() as saver:
-            runtime = LeagueNewsWorkflowRuntime(
-                session_factory, checkpointer=saver
-            )
-            result = await runtime.invoke_daily_report(request)
+        # Daily reports are short, idempotent work.  A scheduler retry reruns
+        # the graph and relies on the publication advisory lock and database
+        # uniqueness rather than a durable LangGraph thread.
+        runtime = LeagueNewsWorkflowRuntime(session_factory)
+        result = await runtime.invoke_daily_report(request)
     if result.get("outcome") != "published":
         raise RuntimeError("daily report graph did not publish a report")
     publication = result.get("publication")

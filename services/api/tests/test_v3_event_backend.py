@@ -81,6 +81,42 @@ def test_event_resume_rejects_mismatched_run_identity(
             )
 
 
+def test_completed_event_run_with_old_identity_is_returned_without_resume() -> None:
+    factory = _database()
+    item_id, revision = _published_item(factory)
+    request = create_event_aggregation_run(
+        factory,
+        normalized_item_id=item_id,
+        normalized_item_revision=revision,
+        method_config=MethodAssembly().config,
+    )
+    with factory() as db:
+        run = db.get(EventAggregationRun, request.workflow_run_id)
+        assert run is not None
+        run.status = "completed"
+        run.outcome = "applied"
+        run.graph_version = "v2.0.0"
+        run.state_version = 99
+        run.thread_id = "legacy-thread"
+        db.commit()
+
+    with factory() as db:
+        item = db.get(NormalizedItem, item_id)
+        assert item is not None
+        returned = asyncio.run(
+            publish_normalized_item_downstream(
+                db,
+                item,
+                session_factory=factory,
+                llm_factory=EventLLM,
+                checkpointer=InMemorySaver(),
+            )
+        )
+
+    assert returned is not None
+    assert returned.id == request.workflow_run_id
+
+
 class EventLLM:
     async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
         return EventAggregationResult.model_validate(

@@ -96,6 +96,8 @@ async def publish_normalized_item_downstream(
         .order_by(EventAggregationRun.id.desc())
         .limit(1)
     )
+    if existing is not None and existing.status == "completed":
+        return existing
     resolved_method_config = method_config or MethodAssemblyConfig.model_validate(
         existing.method_config if existing is not None else {}
     )
@@ -107,8 +109,6 @@ async def publish_normalized_item_downstream(
         method_config=resolved_method_config,
         execution_guard=execution_guard,
     )
-    if existing is not None and existing.status == "completed":
-        return existing
     if resume_existing:
         with session_factory() as owned_db:
             run = owned_db.get(EventAggregationRun, request.workflow_run_id)

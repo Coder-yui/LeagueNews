@@ -28,9 +28,9 @@
 079 将 PipelineJob 的目标身份收敛为 `workflow_name + target_entity_type + target_entity_id + target_revision`，
 并使 `target_entity_id` 与事件运行 `thread_id` 在 ORM 中与数据库的非空约束一致。`raw_item_id` 保留为
 来源、所有权、查询和 RawItem 修订 supersession 字段；事件失败恢复按完整执行身份和活动状态判断。
-Event run 只有在 `graph_name`、`graph_version`、`state_version`、`thread_id` 全部匹配当前请求时才允许恢复；
-不匹配会明确失败，不做 fallback 或 checkpoint/state 迁移。事件 membership/projection 结果也继续使用严格的
-`extra="forbid"` 图契约。
+未完成 Event run 只有在 `graph_name`、`graph_version`、`state_version`、`thread_id` 全部匹配当前请求时才允许恢复；
+不匹配会明确失败，不做 fallback 或 checkpoint/state 迁移。已完成的旧版本 run 继续作为历史结果直接返回，不会重新执行。
+事件 membership/projection 结果也继续使用严格的 `extra="forbid"` 图契约。
 
 ## 验收方式
 
@@ -49,7 +49,7 @@ Event run 只有在 `graph_name`、`graph_version`、`state_version`、`thread_i
 ## 本轮验证结果
 
 - Ruff、后端完整套件、前端 lint/build 和 `git diff --check` 均在本轮实际执行并通过。
-- 后端完整套件：373 passed，4 skipped；4 个 PostgreSQL 条件测试因本轮未配置
+- 后端完整套件：380 passed，4 skipped；4 个 PostgreSQL 条件测试因本轮未配置
   `PIPELINE_TEST_DATABASE_URL` 而 skipped。
 - 本轮未执行 PostgreSQL 数据库初始化、migration upgrade 或真实模型请求；上述 PostgreSQL/migration
   结果仅属于此前收尾轮次，不能视为本轮新验证。

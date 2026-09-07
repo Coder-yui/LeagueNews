@@ -1,4 +1,4 @@
-# Event Aggregation V2 Contract
+# Event Aggregation Semantic Contract
 
 ## Message Processing → Event Aggregation
 

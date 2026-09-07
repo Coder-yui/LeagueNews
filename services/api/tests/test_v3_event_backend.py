@@ -39,6 +39,48 @@ def test_event_membership_and_projection_contracts_reject_unknown_fields() -> No
         EventProjectionResult(refreshed_event_ids=[], unexpected=True)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("graph_name", "legacy_event_aggregation"),
+        ("graph_version", "v2.0.0"),
+        ("state_version", 99),
+        ("thread_id", "legacy-thread"),
+    ),
+)
+def test_event_resume_rejects_mismatched_run_identity(
+    field: str,
+    value: object,
+) -> None:
+    factory = _database()
+    item_id, revision = _published_item(factory)
+    request = create_event_aggregation_run(
+        factory,
+        normalized_item_id=item_id,
+        normalized_item_revision=revision,
+        method_config=MethodAssembly().config,
+    )
+    with factory() as db:
+        run = db.get(EventAggregationRun, request.workflow_run_id)
+        assert run is not None
+        setattr(run, field, value)
+        db.commit()
+
+    with factory() as db:
+        item = db.get(NormalizedItem, item_id)
+        assert item is not None
+        with pytest.raises(ValueError, match="identity mismatch"):
+            asyncio.run(
+                publish_normalized_item_downstream(
+                    db,
+                    item,
+                    session_factory=factory,
+                    llm_factory=EventLLM,
+                    checkpointer=InMemorySaver(),
+                )
+            )
+
+
 class EventLLM:
     async def aggregate_events(self, **_payload: object) -> EventAggregationResult:
         return EventAggregationResult.model_validate(

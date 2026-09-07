@@ -8,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
 from app.main import app
 from app.models.media_asset import MediaAsset
+from app.models.normalized_item import NormalizedItem
 from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
@@ -102,6 +103,76 @@ def test_raw_item_list_projects_repaired_media_path() -> None:
     assert response.json()[0]["content_blocks"][0]["storage_path"] == (
         "/api/v1/media-assets/files/manual/image.jpg"
     )
+
+
+def test_raw_item_admin_ignores_event_failure_for_message_status() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Source(name="Published event failure source", connector_type="manual")
+        raw = RawItem(
+            source=source,
+            native_title="Published message",
+            content_blocks=[{"type": "paragraph", "text": "Published message"}],
+        )
+        db.add_all([source, raw])
+        db.flush()
+        item = NormalizedItem(
+            raw_item_id=raw.id,
+            normalized_title="Published message",
+            normalized_text="Published message",
+            summary="Published summary",
+            products=["lol_pc"],
+            message_type="game_announcement",
+            topics=["gameplay"],
+            content_form="original",
+            importance_score=0.8,
+            analysis_model="test",
+            translation_status="not_required",
+            publication_status="published",
+        )
+        db.add(item)
+        db.flush()
+        db.add(
+            PipelineJob(
+                raw_item_id=raw.id,
+                job_type="event",
+                target_entity_type="normalized_item",
+                target_entity_id=item.id,
+                target_revision=item.current_revision,
+                workflow_name="event_aggregation",
+                status="failed",
+                current_stage="semantic_decision",
+                error_message="event model failed",
+            )
+        )
+        db.commit()
+
+    def override_get_db():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        failed_response = TestClient(app).get(
+            "/api/v1/raw-items/admin-page?process_status=failed"
+        )
+        completed_response = TestClient(app).get(
+            "/api/v1/raw-items/admin-page?process_status=completed"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert failed_response.status_code == 200
+    assert failed_response.json()["total"] == 0
+    assert completed_response.status_code == 200
+    assert completed_response.json()["total"] == 1
+    payload = completed_response.json()["items"][0]
+    assert payload["current_pipeline_job_status"] is None
 
 
 def test_raw_item_admin_queries_exclude_superseded_revisions() -> None:

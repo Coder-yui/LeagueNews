@@ -28,7 +28,9 @@
 079 将 PipelineJob 的目标身份收敛为 `workflow_name + target_entity_type + target_entity_id + target_revision`，
 并使 `target_entity_id` 与事件运行 `thread_id` 在 ORM 中与数据库的非空约束一致。`raw_item_id` 保留为
 来源、所有权、查询和 RawItem 修订 supersession 字段；事件失败恢复按完整执行身份和活动状态判断。
-事件 membership/projection 结果也继续使用严格的 `extra="forbid"` 图契约。
+Event run 只有在 `graph_name`、`graph_version`、`state_version`、`thread_id` 全部匹配当前请求时才允许恢复；
+不匹配会明确失败，不做 fallback 或 checkpoint/state 迁移。事件 membership/projection 结果也继续使用严格的
+`extra="forbid"` 图契约。
 
 ## 验收方式
 
@@ -38,7 +40,7 @@
 - 连续事件验证 create → attach、迟到消息不回退最新投影、重复 case 隔离。
 - 完整 raw_to_daily 样例走真实消息图和真实评分公式。
 - PostgreSQL 验证并发启动、任务 claim、真实 checkpointer、人工审核与独立事件任务。
-- 临时 PostgreSQL 库验证全量 001～078 初始化，以及含旧运行/任务/审核记录的 076 → 078 升级，核对 RawItem 证据不变。
+- 此前收尾轮次曾在临时 PostgreSQL 库验证 001～078 初始化，以及含旧运行/任务/审核记录的 076 → 078 升级；这不是本轮新执行的结果。
 - 保留原有业务测试并迁移到共享服务；删除只针对已删除 V2 私有阶段调度函数的测试。
   阶段顺序/审核/恢复由 V3 graph/service/backend 测试覆盖，没有保留一份 V2 引擎来满足旧测试。
 
@@ -46,10 +48,9 @@
 
 ## 本轮验证结果
 
-- Ruff、git diff --check 通过。
-- 后端完整套件：373 passed，4 skipped；PostgreSQL 测试仍需在显式指定的可销毁独立测试库中执行。
-- 前端 lint 与生产构建通过。
-- 临时 PostgreSQL 全量初始化、含历史数据的顺序升级均通过；未修改既有迁移。
-- raw_to_daily CLI 的 baseline 与替代方法组合各完成 1 个完整案例；模型使用 fixture，无真实模型请求。
-- 应用 Python 代码由接手本轮时的 29,297 行减少到 27,294 行（物理行数，不含测试、文档和实验数据）。
-  旧演示生成的 7,331 行报告/产物另行移除，原始案例与实验计划保留。
+- Ruff、后端完整套件、前端 lint/build 和 `git diff --check` 均在本轮实际执行并通过。
+- 后端完整套件：373 passed，4 skipped；4 个 PostgreSQL 条件测试因本轮未配置
+  `PIPELINE_TEST_DATABASE_URL` 而 skipped。
+- 本轮未执行 PostgreSQL 数据库初始化、migration upgrade 或真实模型请求；上述 PostgreSQL/migration
+  结果仅属于此前收尾轮次，不能视为本轮新验证。
+- 本轮未修改既有 migration；当前 migration ledger 已到 079。

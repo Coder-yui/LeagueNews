@@ -350,9 +350,16 @@ async def restart_raw_item_from_beginning(
         resume_mode="automatic",
         reason="admin restart from beginning",
     )
+    item_job_identity = (
+        PipelineJob.workflow_name == ITEM_PROCESSING_GRAPH,
+        PipelineJob.job_type == "message",
+        PipelineJob.target_entity_type == "raw_item",
+        PipelineJob.target_entity_id == raw_item.id,
+        PipelineJob.target_revision == raw_item.revision,
+    )
     failed_job = db.scalar(
         select(PipelineJob)
-        .where(PipelineJob.raw_item_id == raw_item.id, PipelineJob.status == "failed")
+        .where(*item_job_identity, PipelineJob.status == "failed")
         .order_by(PipelineJob.id.desc())
         .limit(1)
     )
@@ -364,7 +371,7 @@ async def restart_raw_item_from_beginning(
         raise ValueError("raw item has no failed processing run to restart")
     active_job = db.scalar(
         select(PipelineJob).where(
-            PipelineJob.raw_item_id == raw_item.id,
+            *item_job_identity,
             PipelineJob.status.in_(["queued", "running", "paused"]),
         )
     )

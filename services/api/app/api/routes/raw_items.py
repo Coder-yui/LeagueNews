@@ -10,6 +10,7 @@ from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import ProcessingRun
+from app.orchestration.contracts import ITEM_PROCESSING_GRAPH
 from app.schemas.raw_item import RawItemAdminPageRead, RawItemRead
 from app.schemas.pipeline import PipelineCorrectionRead, PipelineJobRead
 from app.schemas.workflow import ProcessingRunRead
@@ -35,7 +36,15 @@ def _raw_item_payloads(
         list(
             db.scalars(
                 select(PipelineJob)
-                .where(PipelineJob.raw_item_id.in_(raw_item_ids))
+                .join(RawItem, RawItem.id == PipelineJob.raw_item_id)
+                .where(
+                    PipelineJob.raw_item_id.in_(raw_item_ids),
+                    PipelineJob.workflow_name == ITEM_PROCESSING_GRAPH,
+                    PipelineJob.job_type == "message",
+                    PipelineJob.target_entity_type == "raw_item",
+                    PipelineJob.target_entity_id == RawItem.id,
+                    PipelineJob.target_revision == RawItem.revision,
+                )
                 .order_by(PipelineJob.raw_item_id, PipelineJob.id.desc())
             )
         )
@@ -132,6 +141,14 @@ def list_raw_items_admin_page(
             PipelineJob.raw_item_id,
             func.max(PipelineJob.id).label("latest_job_id"),
         )
+        .join(RawItem, RawItem.id == PipelineJob.raw_item_id)
+        .where(
+            PipelineJob.workflow_name == ITEM_PROCESSING_GRAPH,
+            PipelineJob.job_type == "message",
+            PipelineJob.target_entity_type == "raw_item",
+            PipelineJob.target_entity_id == RawItem.id,
+            PipelineJob.target_revision == RawItem.revision,
+        )
         .group_by(PipelineJob.raw_item_id)
         .subquery()
     )
@@ -140,6 +157,7 @@ def list_raw_items_admin_page(
             ProcessingRun.raw_item_id,
             func.max(ProcessingRun.id).label("latest_run_id"),
         )
+        .where(ProcessingRun.workflow_type == "item")
         .group_by(ProcessingRun.raw_item_id)
         .subquery()
     )
@@ -293,6 +311,7 @@ async def process_raw_item(item_id: int, db: Session = Depends(get_db)) -> objec
     active = db.scalar(
         select(ProcessingRun).where(
             ProcessingRun.raw_item_id == item_id,
+            ProcessingRun.workflow_type == "item",
             ProcessingRun.status.in_(["running", "awaiting_review"]),
         )
     )

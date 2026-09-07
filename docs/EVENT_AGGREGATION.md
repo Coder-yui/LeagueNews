@@ -1,6 +1,6 @@
 # Event Aggregation
 
-> Status: V3 Event Graph using the V2 semantic baseline
+> Status: Current V3 Event Graph semantic contract
 >
 > Policy version: `event-aggregation-v6.1-recall60-latest-evidence`
 
@@ -8,7 +8,7 @@ Event aggregation answers one question for each meaningful mention in a publishe
 `NormalizedItem`: attach it to a recalled `Event`, create a new `Event`, or ignore it.
 
 The current membership contract and validation boundary are documented in
-[EVENT_AGGREGATION_V2.md](EVENT_AGGREGATION_V2.md); filter and recall details are in
+[EVENT_AGGREGATION_SEMANTIC_CONTRACT.md](EVENT_AGGREGATION_SEMANTIC_CONTRACT.md); filter and recall details are in
 [EVENT_ADMISSION_AND_GRANULARITY.md](EVENT_ADMISSION_AND_GRANULARITY.md). Real-data evaluation is
 performed through the current versioned experiment runner.
 

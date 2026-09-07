@@ -862,6 +862,53 @@ async def test_restart_from_beginning_recovers_failed_job_automatically(
     assert replacement.current_stage == "relevance"
 
 
+@pytest.mark.anyio
+async def test_restart_from_beginning_ignores_event_job_for_same_raw_item(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _published_item(db, suffix="restart ignores event job")
+    failed_run = ProcessingRun(
+        raw_item_id=item.raw_item_id,
+        workflow_type="item",
+        graph_name="item_processing",
+        status="failed",
+        current_stage="importance",
+        execution_mode="automatic",
+    )
+    event_job = _job_for_item(
+        item,
+        job_type="event",
+        status="failed",
+        current_stage="load_message",
+    )
+    db.add_all([failed_run, event_job])
+    db.commit()
+
+    async def fake_start_item(_db: Session, _raw: RawItem, **_kwargs: object):
+        return object()
+
+    monkeypatch.setattr(correction_service, "start_item_processing", fake_start_item)
+    correction = await restart_raw_item_from_beginning(
+        db,
+        raw_item_id=item.raw_item_id,
+    )
+
+    assert isinstance(correction, PipelineCorrection)
+    assert event_job.status == "failed"
+    item_job = db.scalar(
+        select(PipelineJob).where(
+            PipelineJob.correction_id == correction.id,
+            PipelineJob.job_type == "message",
+        )
+    )
+    assert item_job is not None
+    assert item_job.workflow_name == "item_processing"
+    assert item_job.target_entity_type == "raw_item"
+    assert item_job.target_entity_id == item.raw_item_id
+    assert item_job.target_revision == item.raw_item.revision
+
+
 def test_manual_rejection_cancels_correction(db: Session) -> None:
     item = _published_item(db, suffix=" rejected correction")
     correction, review = _final_manual_review(db, item)

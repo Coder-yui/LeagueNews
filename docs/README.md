@@ -30,7 +30,7 @@
 ## 事件聚合
 
 - [`EVENT_AGGREGATION.md`](EVENT_AGGREGATION.md)：当前 Event Graph 的 membership 流程和不变量。
-- [`EVENT_AGGREGATION_V2.md`](EVENT_AGGREGATION_V2.md)：V3 采用的 membership 语义基线、验证边界和评测边界。
+- [`EVENT_AGGREGATION_SEMANTIC_CONTRACT.md`](EVENT_AGGREGATION_SEMANTIC_CONTRACT.md)：当前 Event Graph 的 membership 语义基线、验证边界和评测边界。
 - [`EVENT_ADMISSION_AND_GRANULARITY.md`](EVENT_ADMISSION_AND_GRANULARITY.md)：零调用准入、事件粒度、候选召回和单次结构化调用。
 - [`EVENT_IMPORTANCE.md`](EVENT_IMPORTANCE.md)：事件自身影响的确定性评分。
 - [`EVENT_CREDIBILITY.md`](EVENT_CREDIBILITY.md)：来源角色、独立证据和确认/否认规则。

@@ -13,7 +13,7 @@ from app.models.raw_item import RawItem
 from app.orchestration.daily_report.service import generate_daily_report
 from app.services.daily_reports import (
     DAILY_REPORT_TIMEZONE,
-    daily_report_scheduler_eligibility_conditions,
+    daily_report_eligibility_conditions,
     daily_report_window,
 )
 
@@ -65,7 +65,7 @@ def _due_generation(
         select(NormalizedItem.id)
         .join(NormalizedItem.raw_item)
         .where(
-            *daily_report_scheduler_eligibility_conditions(),
+            *daily_report_eligibility_conditions(),
             RawItem.published_at >= window_start,
             RawItem.published_at < window_end,
         )
@@ -94,7 +94,7 @@ def _due_generation(
                 select(NormalizedItem.id)
                 .join(NormalizedItem.raw_item)
                 .where(
-                    *daily_report_scheduler_eligibility_conditions(),
+                    *daily_report_eligibility_conditions(),
                     NormalizedItem.updated_at > updated_at,
                     RawItem.published_at >= window_start,
                     RawItem.published_at < window_end,

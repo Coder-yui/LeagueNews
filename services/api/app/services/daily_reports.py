@@ -37,16 +37,6 @@ def daily_report_eligibility_conditions():
     )
 
 
-def daily_report_scheduler_eligibility_conditions():
-    """Return SQL-safe eligibility without running report selection methods."""
-
-    return (
-        *daily_report_eligibility_conditions(),
-        NormalizedItem.content_form == "original",
-        NormalizedItem.importance_score >= DAILY_REPORT_MIN_IMPORTANCE,
-    )
-
-
 def generate_daily_report(
     db: Session, report_date: date, *, assembly: MethodAssembly
 ) -> DailyReport:

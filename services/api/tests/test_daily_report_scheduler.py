@@ -85,7 +85,7 @@ def test_due_daily_report_is_generated_once_after_shanghai_midnight() -> None:
         assert db.scalar(select(DailyReportItem).where(DailyReportItem.report_id == report.id))
 
 
-def test_scheduler_requires_daily_report_eligible_content() -> None:
+def test_scheduler_does_not_apply_daily_selection_rules() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -118,11 +118,12 @@ def test_scheduler_requires_daily_report_eligible_content() -> None:
         )
         db.commit()
 
-        assert _generate_due(
+        report = _generate_due(
             db,
             now=datetime(2026, 8, 13, 16, 0, tzinfo=UTC),
-        ) is None
-        assert db.scalar(select(DailyReport)) is None
+        )
+        assert report is not None
+        assert report.items == []
 
 
 def test_scheduler_regenerates_for_a_late_eligible_message_within_grace_period() -> None:

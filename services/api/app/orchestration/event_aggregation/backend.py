@@ -15,6 +15,7 @@ from app.methods import MethodAssembly, MethodAssemblyConfig
 from app.orchestration.event_aggregation.graph import (
     EVENT_AGGREGATION_GRAPH,
     EVENT_AGGREGATION_GRAPH_VERSION,
+    EVENT_AGGREGATION_STATE_VERSION,
     EventAdmissionProposal,
     EventAggregationRequest,
     EventAggregationStage,
@@ -322,25 +323,36 @@ def create_event_aggregation_run(
             assert_execution_owned(db, execution_guard)
             db.commit()
             db.refresh(existing)
-        elif existing.graph_name != EVENT_AGGREGATION_GRAPH or existing.thread_id is None:
-            # Complete the V3 execution metadata for runs created before the
-            # explicit Event graph identity columns were introduced.
-            existing.graph_name = EVENT_AGGREGATION_GRAPH
-            existing.graph_version = EVENT_AGGREGATION_GRAPH_VERSION
-            existing.state_version = 1
-            if method_config is not None:
-                existing.method_config = method_config.model_dump(mode="json")
-            existing.thread_id = EventAggregationRequest(
+        else:
+            request = EventAggregationRequest(
                 workflow_run_id=existing.id,
                 normalized_item_id=item.id,
                 normalized_item_revision=item.current_revision,
                 run_mode=RunMode.PRODUCTION,
-            ).thread_id
-            assert_execution_owned(db, execution_guard)
-            db.commit()
+                graph_version=EVENT_AGGREGATION_GRAPH_VERSION,
+                state_version=EVENT_AGGREGATION_STATE_VERSION,
+            )
+            mismatches: list[str] = []
+            if existing.graph_name != EVENT_AGGREGATION_GRAPH:
+                mismatches.append("graph_name")
+            if existing.graph_version != EVENT_AGGREGATION_GRAPH_VERSION:
+                mismatches.append("graph_version")
+            if existing.state_version != EVENT_AGGREGATION_STATE_VERSION:
+                mismatches.append("state_version")
+            if existing.thread_id != request.thread_id:
+                mismatches.append("thread_id")
+            if mismatches:
+                fields = ", ".join(mismatches)
+                raise ValueError(
+                    "event aggregation run identity mismatch; refusing to resume "
+                    f"run {existing.id}: {fields}"
+                )
+            return request
         return EventAggregationRequest(
             workflow_run_id=existing.id,
             normalized_item_id=item.id,
             normalized_item_revision=item.current_revision,
             run_mode=RunMode.PRODUCTION,
+            graph_version=EVENT_AGGREGATION_GRAPH_VERSION,
+            state_version=EVENT_AGGREGATION_STATE_VERSION,
         )

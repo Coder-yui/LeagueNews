@@ -16,7 +16,7 @@ from app.services.raw_item_versions import is_latest_raw_item
 from app.services.review_actions import (
     IMPORTANCE_STAGE,
     MESSAGE_ANALYSIS_STAGE,
-    OCR_STAGE,
+    MEDIA_STAGE,
     RELEVANCE_STAGE,
     TRANSLATION_STAGE,
 )
@@ -48,7 +48,7 @@ def _graph_restart(
 
     stage = {
         RELEVANCE_STAGE: ProcessingStage.RELEVANCE,
-        OCR_STAGE: ProcessingStage.MEDIA,
+        MEDIA_STAGE: ProcessingStage.MEDIA,
         TRANSLATION_STAGE: ProcessingStage.TRANSLATION,
         MESSAGE_ANALYSIS_STAGE: ProcessingStage.MESSAGE_ANALYSIS,
         IMPORTANCE_STAGE: ProcessingStage.IMPORTANCE,
@@ -65,8 +65,8 @@ def _checkpoint_before(
     restart_from_stage: str,
 ) -> ProcessingCheckpoint | None:
     predecessor = {
-        OCR_STAGE: RELEVANCE_STAGE,
-        TRANSLATION_STAGE: OCR_STAGE,
+        MEDIA_STAGE: RELEVANCE_STAGE,
+        TRANSLATION_STAGE: MEDIA_STAGE,
         MESSAGE_ANALYSIS_STAGE: TRANSLATION_STAGE,
         IMPORTANCE_STAGE: MESSAGE_ANALYSIS_STAGE,
     }.get(restart_from_stage)
@@ -143,8 +143,8 @@ async def create_and_start_correction(
         raw_item_id=item.raw_item_id,
         restart_from_stage=payload.restart_from_stage,
     )
-    if payload.restart_from_stage == OCR_STAGE and not is_patch_preview(item.raw_item):
-        raise ValueError("image_ocr is not applicable to this raw item; restart from translation")
+    if payload.restart_from_stage == MEDIA_STAGE and not is_patch_preview(item.raw_item):
+        raise ValueError("media OCR is not applicable to this raw item; restart from translation")
     graph_stage, replay_from_run_id = _graph_restart(
         source_run, payload.restart_from_stage
     )
@@ -277,8 +277,8 @@ async def recover_failed_job(
         raw_item_id=raw_item.id,
         restart_from_stage=payload.restart_from_stage,
     )
-    if payload.restart_from_stage == OCR_STAGE and not is_patch_preview(raw_item):
-        raise ValueError("image_ocr is not applicable to this raw item; restart from translation")
+    if payload.restart_from_stage == MEDIA_STAGE and not is_patch_preview(raw_item):
+        raise ValueError("media OCR is not applicable to this raw item; restart from translation")
     graph_stage, replay_from_run_id = _graph_restart(
         source_run, payload.restart_from_stage
     )

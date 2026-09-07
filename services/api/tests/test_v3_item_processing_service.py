@@ -16,6 +16,7 @@ from app.models.pipeline import PipelineJob
 from app.models.raw_item import RawItem
 from app.models.source import Source
 from app.models.workflow import ProcessingRun, ReviewTask
+from app.orchestration.contracts import ITEM_PROCESSING_GRAPH
 from app.orchestration.item_processing.service import (
     approve_review,
     claim_review_delivery,
@@ -332,6 +333,8 @@ def test_rejected_review_uses_the_same_crash_safe_delivery_claim(
                 checkpointer=saver,
             )
         )
+        run.execution_mode = "automatic"
+        db.commit()
         review = db.scalar(
             select(ReviewTask).where(
                 ReviewTask.processing_run_id == run.id,
@@ -339,6 +342,20 @@ def test_rejected_review_uses_the_same_crash_safe_delivery_claim(
             )
         )
         assert review is not None
+        job = PipelineJob(
+            raw_item_id=raw_item.id,
+            job_type="message",
+            target_entity_type="raw_item",
+            target_entity_id=raw_item.id,
+            target_revision=raw_item.revision,
+            workflow_name=ITEM_PROCESSING_GRAPH,
+            status="paused",
+            processing_run_id=run.id,
+            worker_id="worker-1",
+            lease_token="lease-1",
+        )
+        db.add(job)
+        db.commit()
 
         original_invoke = item_processing_service.invoke_item_processing
 
@@ -386,6 +403,13 @@ def test_rejected_review_uses_the_same_crash_safe_delivery_claim(
         delivered = db.get(ReviewTask, review.id)
         assert delivered is not None
         assert delivered.delivery_status == "consumed"
+        completed_job = db.get(PipelineJob, job.id)
+        assert completed_job is not None
+        assert completed_job.status == "completed"
+        assert completed_job.worker_id is None
+        assert completed_job.lease_token is None
+        assert completed_job.lease_expires_at is None
+        assert completed_job.heartbeat_at is None
         attempts = delivered.delivery_attempts
 
         async def fail_if_redelivered(*_args: object, **_kwargs: object) -> dict[str, object]:

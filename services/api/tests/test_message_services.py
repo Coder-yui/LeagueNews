@@ -771,13 +771,13 @@ def test_ocr_rejection_does_not_grow_knowledge_or_glossary() -> None:
             raw_item_id=raw.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="image_ocr",
+            current_stage="media",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="image_ocr",
+            stage="media",
             status="pending",
             proposal={"translated_title": "OCR 后的译文"},
         )
@@ -858,13 +858,13 @@ def test_manual_ocr_correction_without_note_creates_revision_and_regenerates_ocr
             raw_item_id=raw.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="image_ocr",
+            current_stage="media",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="image_ocr",
+            stage="media",
             status="pending",
             proposal={"approved_media_extraction_ids": [original.id]},
         )
@@ -981,7 +981,6 @@ def test_relevance_rejection_stops_run_without_creating_analysis_rule() -> None:
 
         assert run.status == "rejected"
         assert db.scalar(select(KnowledgeRule)) is None
-
 
 
 

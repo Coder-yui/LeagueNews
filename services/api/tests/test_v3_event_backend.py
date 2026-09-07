@@ -12,7 +12,7 @@ from app.models.event import Event, EventAggregationRun, EventMention
 from app.models.normalized_item import NormalizedItem
 from app.models.raw_item import RawItem
 from app.models.source import Source
-from app.orchestration.contracts import ReviewMode, RunMode
+from app.orchestration.contracts import RunMode
 from app.orchestration.event_aggregation import (
     EventAggregationBackendV3,
     EventAggregationRequest,
@@ -120,8 +120,7 @@ def test_event_graph_reuses_v2_semantics_without_experiment_writes() -> None:
                     normalized_item_id=item_id,
                     normalized_item_revision=revision,
                     run_mode=RunMode.EXPERIMENT,
-                    review_mode=ReviewMode.AUTOMATIC,
-                    batch_id=7,
+                        batch_id=7,
                 ).model_dump(mode="json")
             }
         )

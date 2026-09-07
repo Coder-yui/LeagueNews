@@ -6,10 +6,11 @@ import type { ReviewQueueItem } from "@/lib/types";
 import { PaginationControls } from "@/components/admin/PaginationControls";
 import { PipelineOCRReviewCard } from "@/components/admin/PipelineOCRReviewCard";
 import { ReviewCard } from "@/components/admin/ReviewCard";
+import { canonicalStage } from "@/components/admin/admin-utils";
 
 const pipelineStages = [
   "relevance",
-  "image_ocr",
+  "media",
   "translation",
   "message_analysis",
   "importance",
@@ -17,26 +18,25 @@ const pipelineStages = [
 
 const stageLabels: Record<string, string> = {
   relevance: "相关性",
-  image_ocr: "图片 OCR",
+  media: "图片 OCR / 媒体",
   translation: "翻译",
   message_analysis: "消息分析",
   importance: "重要性",
 };
 
 function ReviewProgress({ item }: { item: ReviewQueueItem }) {
-  const currentIndex = pipelineStages.indexOf(
-    item.current_stage as (typeof pipelineStages)[number],
-  );
-  const completed = new Set(item.completed_stages);
+  const currentStage = canonicalStage(item.current_stage);
+  const currentIndex = pipelineStages.indexOf(currentStage);
+  const completed = new Set(item.completed_stages.map((stage) => canonicalStage(stage)));
   return (
     <div
       className="review-queue-progress"
-      aria-label={`当前待审阶段：${stageLabels[item.current_stage] ?? item.current_stage}`}
+      aria-label={`当前待审阶段：${stageLabels[currentStage] ?? item.current_stage}`}
     >
       {pipelineStages.map((stage, index) => {
         const status = completed.has(stage)
           ? "done"
-          : stage === item.current_stage
+          : stage === currentStage
             ? "review"
             : currentIndex >= 0 && index < currentIndex
               ? "done"

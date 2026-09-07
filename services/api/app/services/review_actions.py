@@ -10,7 +10,7 @@ from app.models.media_extraction import MediaExtraction
 from app.schemas.workflow import ReviewRejection, OCRReviewCorrection
 
 RELEVANCE_STAGE = "relevance"
-OCR_STAGE = "image_ocr"
+MEDIA_STAGE = "media"
 TRANSLATION_STAGE = "translation"
 MESSAGE_ANALYSIS_STAGE = "message_analysis"
 IMPORTANCE_STAGE = "importance"
@@ -48,7 +48,7 @@ def reject_review(
     run = review.processing_run
     run.status = "rejected"
     run.outcome = "review_rejected"
-    run.current_stage = review.stage
+    run.current_stage = _canonical_review_stage(review.stage)
     run.completed_at = now
     _set_correction_terminal(db, run, status="cancelled", completed_at=now)
 
@@ -99,8 +99,8 @@ async def correct_ocr_review(
     payload: OCRReviewCorrection,
 ) -> ProcessingRun:
     _require_pending_review(review)
-    if review.stage not in {OCR_STAGE, "media"}:
-        raise ValueError("OCR correction is only available during image OCR review")
+    if _canonical_review_stage(review.stage) != MEDIA_STAGE:
+        raise ValueError("OCR correction is only available during media review")
     run = review.processing_run
     approved_ids = _extraction_ids(review.proposal)
     if payload.extraction_id not in approved_ids:
@@ -157,7 +157,7 @@ async def correct_ocr_review(
     _replace_pending_review(
         db,
         run=run,
-        stage=review.stage,
+        stage=_canonical_review_stage(review.stage),
         proposal={
             **review.proposal,
             "extraction_ids": replacement_ids,
@@ -195,10 +195,10 @@ def _replace_pending_review(
 
 
 def _validate_rejection(stage: str, payload: ReviewRejection) -> None:
+    stage = _canonical_review_stage(stage)
     allowed = {
         RELEVANCE_STAGE: {"analysis_correction"},
-        OCR_STAGE: {"ocr_error"},
-        "media": {"ocr_error"},
+        MEDIA_STAGE: {"ocr_error"},
         MESSAGE_ANALYSIS_STAGE: {"analysis_correction"},
         IMPORTANCE_STAGE: {"analysis_correction"},
         TRANSLATION_STAGE: {"translation_term", "translation_correction"},
@@ -219,6 +219,12 @@ def _extraction_ids(payload: dict[str, Any]) -> list[int]:
         for value in payload.get("approved_media_extraction_ids", [])
         if isinstance(value, int)
     ]
+
+
+def _canonical_review_stage(stage: str) -> str:
+    """Map the retired OCR stage only when reading historical review rows."""
+
+    return MEDIA_STAGE if stage == "image_ocr" else stage
 
 
 def _require_pending_review(review: ReviewTask) -> None:

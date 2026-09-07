@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal, Protocol, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.orchestration.contracts import RunMode
 from app.schemas.event_aggregation import EventAggregationResult
@@ -27,7 +27,11 @@ class EventAggregationStage(StrEnum):
 EVENT_AGGREGATION_STAGE_ORDER = tuple(EventAggregationStage)
 
 
-class EventAggregationRequest(BaseModel):
+class StrictGraphModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EventAggregationRequest(StrictGraphModel):
     workflow_run_id: int = Field(ge=1)
     normalized_item_id: int = Field(ge=1)
     normalized_item_revision: int = Field(ge=1)
@@ -54,7 +58,7 @@ class EventAggregationRequest(BaseModel):
         )
 
 
-class EventMessageSnapshot(BaseModel):
+class EventMessageSnapshot(StrictGraphModel):
     normalized_item_id: int = Field(ge=1)
     normalized_item_revision: int = Field(ge=1)
     message: dict[str, Any]
@@ -62,7 +66,7 @@ class EventMessageSnapshot(BaseModel):
     evidence_fingerprint: str = Field(min_length=1)
 
 
-class EventAdmissionProposal(BaseModel):
+class EventAdmissionProposal(StrictGraphModel):
     decision: Literal["process", "skip"]
     reasons: list[str] = Field(default_factory=list)
     products: list[str] = Field(default_factory=list)
@@ -70,11 +74,11 @@ class EventAdmissionProposal(BaseModel):
     entity_hints: dict[str, Any] = Field(default_factory=dict)
 
 
-class EventCandidateProposal(BaseModel):
+class EventCandidateProposal(StrictGraphModel):
     candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=24)
 
 
-class EventDecisionProposal(BaseModel):
+class EventDecisionProposal(StrictGraphModel):
     result: EventAggregationResult
     suppressed_mentions: list[dict[str, Any]] = Field(default_factory=list)
     execution_metadata: dict[str, Any] = Field(default_factory=dict)

@@ -2,7 +2,7 @@ import type { PipelineJob, ProcessingRun, RawAdminItem } from "@/lib/types";
 
 export const PIPELINE_STAGES = [
   "relevance",
-  "image_ocr",
+  "media",
   "translation",
   "message_analysis",
   "importance",
@@ -14,13 +14,14 @@ export type StageView = { name: PipelineStageName; status: StageStatus; detail?:
 
 export const STAGE_LABELS: Record<PipelineStageName, string> = {
   relevance: "相关性",
-  image_ocr: "图片 OCR",
+  media: "图片 OCR / 媒体",
   translation: "翻译",
   message_analysis: "消息分析",
   importance: "重要性",
 };
 
 export function canonicalStage(stage: string | null | undefined): PipelineStageName {
+  if (stage === "image_ocr") return "media";
   return PIPELINE_STAGES.includes(stage as PipelineStageName)
     ? (stage as PipelineStageName)
     : "relevance";
@@ -29,7 +30,7 @@ export function canonicalStage(stage: string | null | undefined): PipelineStageN
 function summarizeContext(context: Record<string, unknown>, stage: PipelineStageName): string {
   const contextKeys: Record<PipelineStageName, string[]> = {
     relevance: ["relevance_decision"],
-    image_ocr: ["approved_media_extraction_ids"],
+    media: ["approved_media_extraction_ids"],
     translation: ["approved_translation_proposal", "translation"],
     message_analysis: ["approved_message_analysis_proposal", "message_analysis"],
     importance: ["approved_importance_proposal", "importance"],

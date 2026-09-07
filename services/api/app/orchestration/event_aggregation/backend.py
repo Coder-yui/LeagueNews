@@ -123,7 +123,6 @@ class EventAggregationBackendV3:
                 products=list(admission.event_space.products),
                 possible_event_families=list(admission.event_space.possible_families),
                 entity_hints=admission.entity_hints,
-                assembly=self._method_assembly,
             )
 
     async def retrieve_candidates(

@@ -291,6 +291,7 @@ def enqueue_pipeline_failure(
 
 STAGE_LABELS = {
     "relevance": "相关性",
+    "media": "图片 OCR / 媒体",
     "image_ocr": "OCR",
     "translation": "翻译",
     "message_analysis": "消息分析",

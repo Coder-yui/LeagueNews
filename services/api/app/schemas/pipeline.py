@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 PipelineStage = Literal[
     "relevance",
-    "image_ocr",
+    "media",
     "translation",
     "message_analysis",
     "importance",

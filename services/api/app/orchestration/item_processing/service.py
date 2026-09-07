@@ -133,12 +133,14 @@ def _sync_pipeline_job_after_review(session_factory: SessionFactory, run_id: int
         )
         if run is None or job is None or job.status not in {"paused", "running"}:
             return
-        job.status = "completed" if run.status == "completed" else "paused"
+        job.status = "completed" if run.status in {"completed", "rejected"} else "paused"
         if job.status == "completed":
             job.completed_at = datetime.now(UTC)
+            job.next_attempt_at = None
         job.lease_token = None
         job.lease_expires_at = None
         job.worker_id = None
+        job.heartbeat_at = None
         owned_db.commit()
 
 

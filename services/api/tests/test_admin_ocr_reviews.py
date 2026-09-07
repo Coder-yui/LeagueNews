@@ -87,13 +87,13 @@ def test_ocr_review_queue_exposes_reviewable_extraction_details() -> None:
             raw_item_id=raw_item.id,
             workflow_type="item",
             status="awaiting_review",
-            current_stage="image_ocr",
+            current_stage="media",
         )
         db.add(run)
         db.flush()
         review = ReviewTask(
             processing_run_id=run.id,
-            stage="image_ocr",
+            stage="media",
             status="pending",
             proposal={
                 "approved_media_extraction_ids": [extraction.id],
@@ -148,6 +148,6 @@ def test_ocr_review_queue_exposes_reviewable_extraction_details() -> None:
     assert len(queue) == 1
     assert queue[0]["raw_item_id"] == raw_item_id
     assert queue[0]["canonical_url"] == "https://example.com/post/249"
-    assert queue[0]["current_stage"] == "image_ocr"
+    assert queue[0]["current_stage"] == "media"
     assert queue[0]["review_kind"] == "ocr"
     assert queue[0]["ocr_review"]["review_id"] == review_id

@@ -11,7 +11,7 @@ from app.domain.message_taxonomy import content_analysis_error
 
 SUPPORTED_TASKS = {
     "relevance",
-    "image_ocr",
+    "media",
     "translation",
     "message_analysis",
     "importance",

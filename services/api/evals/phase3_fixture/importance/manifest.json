@@ -1,6 +1,6 @@
 {
   "name": "phase3-importance-synthetic",
-  "version": "2026-09-07-v1",
+  "version": "2026-09-11-v2",
   "target": "importance_scoring",
   "input_schema_version": "importance-input-v1",
   "shape": "independent",
@@ -11,5 +11,5 @@
   "group_strategy": "story-group",
   "cases_file": "cases.jsonl",
   "case_count": 2,
-  "fingerprint": "e76a9ba2c566d98cee478ee764fbc88bd6308cf74516714f719673a1782cb560"
+  "fingerprint": "158bd5b30efe61bed91d06d8855b362d6318ac161fc235f916cce93d5031fa32"
 }

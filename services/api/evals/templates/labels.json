@@ -1,0 +1,13 @@
+{
+  "message_analysis": {"products": ["lol_pc"], "content_form": "original"},
+  "importance_scoring": {"message_type": "game_patch_notes", "topics": ["balance_gameplay"], "scale": "major", "importance_score": 0.8},
+  "event_aggregation": {
+    "steps": {
+      "step-1": {"mentions": [{"mention_index": 0, "event_key": "story-A", "action": "create"}]},
+      "step-2": {"mentions": [{"mention_index": 0, "event_key": "story-A", "action": "attach"}, {"mention_index": 1, "event_key": "story-B", "action": "create"}]}
+    }
+  },
+  "featured_selection": {"selected_item_ids": [1]},
+  "daily_report": {"required_message_ids": [1]},
+  "end_to_end": {"messages": {"1": {"message_analysis": {"products": ["lol_pc"]}, "mentions": [{"mention_index": 0, "event_key": "story-A", "action": "create"}]}}}
+}

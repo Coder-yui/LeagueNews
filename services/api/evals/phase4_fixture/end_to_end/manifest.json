@@ -1,6 +1,6 @@
 {
   "name": "phase4-end-to-end-synthetic",
-  "version": "2026-09-07-v2",
+  "version": "2026-09-11-v2",
   "target": "end_to_end",
   "input_schema_version": "end-to-end-input-v1",
   "shape": "candidate_collection",
@@ -11,5 +11,5 @@
   "group_strategy": "story-group",
   "cases_file": "cases.jsonl",
   "case_count": 1,
-  "fingerprint": "34d98442f5d4a13b90cf367f902dddaf0117b1f944f21cb953b3a197d0b382fa"
+  "fingerprint": "fffabd89026b87a87c78b598068eb4c654fd33eb9803a13783ca43ef6513edbc"
 }

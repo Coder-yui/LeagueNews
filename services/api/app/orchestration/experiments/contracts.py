@@ -114,6 +114,8 @@ class ExperimentCase(BaseModel):
     def for_execution(self) -> "ExperimentCase":
         """Return a copy with all answer/label fields removed from execution."""
 
+        for value in (self.input, self.initial_state, self.candidates, [step.input for step in self.steps]):
+            _reject_embedded_labels(value)
         return ExperimentCase.model_validate(
             {
                 "case_id": self.case_id,
@@ -164,6 +166,12 @@ class ExperimentDataset(BaseModel):
 
     @model_validator(mode="after")
     def validate_case_ids(self) -> "ExperimentDataset":
+        groups: dict[str, set[str]] = {}
+        for case in self.cases:
+            if case.group_id:
+                groups.setdefault(case.group_id, set()).add(case.split)
+        if any(len(splits) > 1 for splits in groups.values()):
+            raise ValueError("group_id crosses data splits")
         case_ids = [case.case_id for case in self.cases]
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("dataset case_id values must be unique")
@@ -253,7 +261,7 @@ class ExperimentPlan(BaseModel):
     code_version: str = "workspace"
     prompt_version: str = "unspecified"
     model_version: str = "fixture-or-configured"
-    evaluator_version: str = "phase3-v1"
+    evaluator_version: str = "frozen-v2"
 
     @model_validator(mode="after")
     def validate_candidates(self) -> "ExperimentPlan":
@@ -317,3 +325,15 @@ class ExperimentReport(BaseModel):
     shape: ExperimentShape = ExperimentShape.INDEPENDENT
     generated_at: str | None = None
     run_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def _reject_embedded_labels(value):
+    if isinstance(value, dict):
+        forbidden = {"expected", "labels", "gold_labels", "tags"} & value.keys()
+        if forbidden:
+            raise ValueError(f"execution input contains reserved annotation fields: {sorted(forbidden)}")
+        for nested in value.values():
+            _reject_embedded_labels(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            _reject_embedded_labels(nested)

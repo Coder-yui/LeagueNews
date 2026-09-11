@@ -1,6 +1,6 @@
 # LeagueNews 当前架构
 
-更新时间：2026-09-07
+更新时间：2026-09-11
 
 ## 当前主链路
 
@@ -69,6 +69,10 @@ Registry 静默选择其他版本，也不在本轮提供跨版本 checkpoint ad
 
 日报图的唯一阶段顺序是 `load_window -> select_candidates -> plan -> publish`，日报没有人工 review
 阶段。查询和通知使用与图相同的 assembly/config，方法替换因此在实验、在线读取和入队之间保持一致。
+
+方法、异步检索与逐次调用账本的运行时边界见
+[V3_LANGGRAPH_ARCHITECTURE.md](V3_LANGGRAPH_ARCHITECTURE.md#2026-09-11-方法与计量边界收敛)。
+检索等待发生在业务事务之外，返回快照需通过既有校验及事件版本复核；默认 prompt 与排序政策保持基线。
 
 ### 媒体与 OCR
 

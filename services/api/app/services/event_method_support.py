@@ -324,6 +324,22 @@ def apply_event_membership_transaction(
         result, candidates, item_products=item.products
     )
     _validate_product_family_compatibility(result, resolved_products)
+    # Lock referenced events in a consistent order and validate each snapshot once,
+    # before any mention updates can advance that event's revision in this transaction.
+    attached_ids = sorted({int(row.event_id) for row in result.mentions if row.action == "attach"})
+    if attached_ids:
+        current_events = {event.id: event for event in db.scalars(
+            select(Event).where(Event.id.in_(attached_ids)).order_by(Event.id)
+            .with_for_update().execution_options(populate_existing=True)
+        )}
+        for candidate in candidates:
+            event_id = int(candidate["event_id"])
+            if event_id in attached_ids:
+                current = current_events.get(event_id)
+                if current is None:
+                    raise SupersededEventAggregationError("candidate event disappeared")
+                if candidate.get("revision") is not None and candidate["revision"] != current.current_revision:
+                    raise SupersededEventAggregationError("candidate event revision changed after retrieval")
     applied_count = 0
     affected_event_ids: set[int] = set()
     independence_group = _independence_group(item)

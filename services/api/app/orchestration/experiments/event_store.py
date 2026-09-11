@@ -24,8 +24,13 @@ def _time(value):
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
+class ExperimentManualReviewRequired(RuntimeError):
+    pass
+
+
 class ExperimentEventStore:
     def __init__(self, initial_state=None, *, visible_at=None):
+        self.distribution_candidates = []
         if visible_at:
             cutoff = _time(visible_at)
             for row in (initial_state or {}).get("candidates", []):
@@ -144,7 +149,7 @@ class ExperimentEventStore:
         )
         if result.get("__interrupt__"):
             # A case awaiting OCR/manual review is not a completed experiment.
-            raise ValueError(
+            raise ExperimentManualReviewRequired(
                 "frozen item requires manual review; curate the evidence before evaluation"
             )
         return result
@@ -232,7 +237,10 @@ class ExperimentEventStore:
                 db, affected, as_of=_time(message.get("received_at") or timestamp.isoformat())
             )
             db.commit()
+            bindings = [{"event_id": row.event_id, "mention_index": row.mention_index}
+                        for row in db.scalars(select(EventMention).where(EventMention.normalized_item_id == item_id))]
         return {
+            "event_memberships": bindings,
             "event_decision": proposal.result.model_dump(mode="json"),
             "event_ids": sorted(affected),
             "recalled_candidates": candidates.candidates,

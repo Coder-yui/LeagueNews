@@ -31,20 +31,23 @@ from app.methods import (
 )
 from app.schemas.event_aggregation import EventAggregationResult
 from app.domain.daily_report import DailyReportCandidate
-from app.services.llm import RelevanceResult, TranslationResult
+from app.services.llm import RelevanceResult, TranslationResult, LLMClient
+from app.services.call_metering import CallAttempt, call_identity, digest
+from types import SimpleNamespace
+from uuid import uuid4
 
 
 class FixtureExecutionError(RuntimeError):
     pass
 
 
-class _FixtureClient:
+class _FixtureClient(LLMClient):
     def __init__(self, input_payload: dict[str, Any]) -> None:
         self._outputs = (
             input_payload.get("fixture_outputs") or input_payload.get("mock_responses") or {}
         )
 
-    def response(self, method: str, implementation: str) -> Any:
+    def _response(self, method: str, implementation: str) -> Any:
         value = self._outputs.get(method, {}) if isinstance(self._outputs, dict) else {}
         if not isinstance(value, dict):
             raise FixtureExecutionError(f"fixture output for {method} must be an object")
@@ -69,23 +72,48 @@ class _FixtureClient:
             return EventAggregationResult.model_validate(selected)
         raise FixtureExecutionError(f"unsupported fixture method: {method}")
 
-    def configured(self, **_parameters):
-        return self
+    def response(self, method: str, implementation: str) -> Any:
+        meter = CallAttempt(logical_call_id=str(uuid4()), attempt=1, provider="synthetic_fixture",
+                            model="fixture", operation=method, parameters={},
+                            prompt_hash=None, schema_hash=None, input_hash=digest(self._outputs))
+        meter.response(SimpleNamespace(usage={"prompt_tokens": 11, "completion_tokens": 7}, model="fixture"))
+        meter.row["measurement_kind"] = "synthetic_fixture"
+        try:
+            value = self._response(method, implementation)
+        except Exception as exc:
+            meter.emit("invalid", error_type=type(exc).__name__)
+            raise
+        meter.emit("succeeded")
+        return value
+
+    async def _validated_json_completion(self, *, prompt, payload, max_tokens, schema, operation,
+                                         business_validator=None, final_fallback=None):
+        methods = {MessageContentAnalysisResult: "message_analysis",
+                   MessageClassificationImportanceResult: "importance_scoring",
+                   EventAggregationResult: "event_aggregation"}
+        method = methods[schema]
+        meter = CallAttempt(logical_call_id=str(uuid4()), attempt=1, provider="synthetic_fixture",
+                            model="fixture", operation=method, parameters={},
+                            prompt_hash=digest(prompt), schema_hash=digest(schema.model_json_schema()),
+                            input_hash=digest(payload))
+        meter.response(SimpleNamespace(usage={"prompt_tokens": 11, "completion_tokens": 7}, model="fixture"))
+        meter.row["measurement_kind"] = "synthetic_fixture"
+        try:
+            result = self._response(method, "baseline")
+            error = business_validator(result) if business_validator else None
+            if error:
+                raise FixtureExecutionError(error)
+        except Exception as exc:
+            meter.emit("invalid", error_type=type(exc).__name__)
+            raise
+        meter.emit("succeeded")
+        return result
 
     async def judge_relevance(self, **_payload):
         return self.response("relevance", "baseline")
 
     async def translate(self, **_payload):
         return self.response("translation", "baseline")
-
-    async def analyze_message_content(self, **_payload):
-        return self.response("message_analysis", "baseline")
-
-    async def classify_and_score_importance(self, **_payload):
-        return self.response("importance_scoring", "baseline")
-
-    async def aggregate_events(self, **_payload):
-        return self.response("event_aggregation", "baseline")
 
 
 class FrozenExperimentExecutor:
@@ -119,7 +147,7 @@ class FrozenExperimentExecutor:
             raise FixtureExecutionError("explicit fixture failure")
 
         if target == ExperimentTarget.END_TO_END:
-            return await self._execute_end_to_end(payload=payload, assembly=assembly)
+            return await self._execute_end_to_end(payload=payload, assembly=assembly, event_store=event_store)
 
         if target == ExperimentTarget.ITEM_PROCESSING:
             if "raw_item" not in payload:
@@ -184,7 +212,10 @@ class FrozenExperimentExecutor:
             store = event_store or ExperimentEventStore(
                 payload.get("state")
                 or case.initial_state
-                or {"candidates": payload.get("candidates", [])}
+                or {"candidates": payload.get("candidates", [])},
+                visible_at=case.visible_until or case.received_at
+                or (payload.get("message") or payload.get("evidence") or {}).get("received_at")
+                or (payload.get("message") or payload.get("evidence") or {}).get("published_at"),
             )
             try:
                 actual = await store.process(
@@ -210,14 +241,20 @@ class FrozenExperimentExecutor:
 
         raise FixtureExecutionError(f"unsupported experiment target: {target}")
 
-    async def _execute_end_to_end(self, *, payload, assembly):
-        store = ExperimentEventStore(payload.get("initial_state"))
+    async def _execute_end_to_end(self, *, payload, assembly, event_store=None):
+        messages = payload.get("messages") or []
+        received = [_message_received_at(message) for message in messages]
+        if any(right < left for left, right in zip(received, received[1:])):
+            raise ValueError("end-to-end messages must follow received_at order")
+        store = event_store or ExperimentEventStore(payload.get("initial_state"),
+                                     visible_at=received[0].isoformat() if received else None)
         try:
             return await self._execute_message_to_daily(
                 payload=payload, assembly=assembly, store=store
             )
         finally:
-            store.close()
+            if event_store is None:
+                store.close()
 
     async def _execute_message_to_daily(
         self, *, payload: dict[str, Any], assembly: MethodAssembly, store: ExperimentEventStore
@@ -226,113 +263,113 @@ class FrozenExperimentExecutor:
         if not isinstance(messages, list) or not messages:
             raise FixtureExecutionError("end_to_end fixture requires messages")
         message_results: list[dict[str, Any]] = []
-        featured_rows: list[FeaturedCandidate] = []
-        daily_rows: list[DailyReportCandidate] = []
+        daily_rows: list[DailyReportCandidate] = store.distribution_candidates
         for message in messages:
-            if not isinstance(message, dict):
-                raise FixtureExecutionError("end_to_end messages must be objects")
-            message_payload = dict(message)
-            if isinstance(message.get("evidence"), dict):
-                message_payload["evidence"] = dict(message["evidence"])
-            if "raw_item" in message:
-                item_state = await store.process_item(
-                    message_payload, assembly=assembly, client=self._client_factory(message_payload)
-                )
-                if item_state.get("outcome") != "preview_completed":
-                    message_results.append(
-                        {"message_id": message["message_id"], "outcome": item_state.get("outcome")}
+            with call_identity(step_id=str(message.get("message_id", "unknown"))):
+                if not isinstance(message, dict):
+                    raise FixtureExecutionError("end_to_end messages must be objects")
+                message_payload = dict(message)
+                if isinstance(message.get("evidence"), dict):
+                    message_payload["evidence"] = dict(message["evidence"])
+                if "raw_item" in message:
+                    item_state = await store.process_item(
+                        message_payload, assembly=assembly, client=self._client_factory(message_payload)
                     )
-                    continue
-                analysis = MessageContentAnalysisResult.model_validate(
+                    if item_state.get("outcome") != "preview_completed":
+                        message_results.append(
+                            {"message_id": message["message_id"], "outcome": item_state.get("outcome")}
+                        )
+                        continue
+                    analysis = MessageContentAnalysisResult.model_validate(
+                        {
+                            key: value
+                            for key, value in item_state["message_analysis"].items()
+                            if key in MessageContentAnalysisResult.model_fields
+                        }
+                    )
+                    from app.services.item_processing_context import analysis_content
+
+                    calculated = item_state["importance"]
+                    importance = None
+                    importance_payload = {"content": analysis_content(item_state["translation"])}
+                    score = calculated["importance_score"]
+                    message_payload["source"] = message_payload.get("source", {})
+                    message["published_at"] = message["raw_item"]["published_at"]
+                else:
+                    analysis = await assembly.invoke(
+                        "message_analysis",
+                        client=self._client_factory(message_payload),
+                        payload=_message_input(message_payload).model_dump(mode="json"),
+                    )
+                    importance_payload = {
+                        **message_payload,
+                        "products": analysis.products,
+                        "content_form": analysis.content_form,
+                    }
+                    importance_payload["extracted_facts"] = {
+                        **dict(message.get("extracted_facts") or {}),
+                        **analysis.model_dump(mode="json"),
+                    }
+                    importance = await assembly.invoke(
+                        "importance_scoring",
+                        client=self._client_factory(message_payload),
+                        payload=_importance_input(importance_payload).model_dump(mode="json"),
+                    )
+                    calculated = assembly.calculate_importance(
+                        result=importance,
+                        content_form=analysis.content_form,
+                        scoring_content="\n".join(
+                            filter(
+                                None, [analysis.title, _importance_input(importance_payload).content]
+                            )
+                        ),
+                    )
+                    score = calculated["importance_score"]
+                event_message = {
+                    **message_payload.get("evidence", {}),
+                    **analysis.model_dump(mode="json"),
+                    "source": message_payload.get("source", {}),
+                    "content": _importance_input(importance_payload).content,
+                    "message_id": message["message_id"],
+                    "published_at": message["published_at"],
+                    "message_type": calculated["message_type"],
+                    "topics": calculated["topics"],
+                    "importance_score": score,
+                    "importance_calculation": calculated["calculation"],
+                }
+                event = await store.process(
+                    event_message, assembly=assembly, client=self._client_factory(message_payload)
+                )
+                message_id = int(message["message_id"])
+                published_at = str(message["published_at"])
+                daily_rows.append(
+                    DailyReportCandidate(
+                        message_id=message_id,
+                        importance_score=score,
+                        published_at=datetime.fromisoformat(published_at),
+                        content_form=str(analysis.content_form),
+                        products=tuple(str(value) for value in analysis.products),
+                        event_ids=tuple(event["event_ids"]),
+                    )
+                )
+                message_results.append(
                     {
-                        key: value
-                        for key, value in item_state["message_analysis"].items()
-                        if key in MessageContentAnalysisResult.model_fields
+                        "message_id": message_id,
+                        "message_analysis": analysis.model_dump(mode="json"),
+                        "importance": importance.model_dump(mode="json")
+                        if importance is not None
+                        else calculated,
+                        "importance_score": score,
+                        "event_decision": event["event_decision"],
+                        "event_memberships": event.get("event_memberships", []),
+                        "recalled_candidates": event.get("recalled_candidates", []),
                     }
                 )
-                from app.services.item_processing_context import analysis_content
-
-                calculated = item_state["importance"]
-                importance = None
-                importance_payload = {"content": analysis_content(item_state["translation"])}
-                score = calculated["importance_score"]
-                message_payload["source"] = message_payload.get("source", {})
-                message["published_at"] = message["raw_item"]["published_at"]
-            else:
-                analysis = await assembly.invoke(
-                    "message_analysis",
-                    client=self._client_factory(message_payload),
-                    payload=_message_input(message_payload).model_dump(mode="json"),
-                )
-                importance_payload = {
-                    **message_payload,
-                    "products": analysis.products,
-                    "content_form": analysis.content_form,
-                }
-                importance_payload["extracted_facts"] = {
-                    **dict(message.get("extracted_facts") or {}),
-                    **analysis.model_dump(mode="json"),
-                }
-                importance = await assembly.invoke(
-                    "importance_scoring",
-                    client=self._client_factory(message_payload),
-                    payload=_importance_input(importance_payload).model_dump(mode="json"),
-                )
-                calculated = assembly.calculate_importance(
-                    result=importance,
-                    content_form=analysis.content_form,
-                    scoring_content="\n".join(
-                        filter(
-                            None, [analysis.title, _importance_input(importance_payload).content]
-                        )
-                    ),
-                )
-                score = calculated["importance_score"]
-            event_message = {
-                **message_payload.get("evidence", {}),
-                **analysis.model_dump(mode="json"),
-                "source": message_payload.get("source", {}),
-                "content": _importance_input(importance_payload).content,
-                "message_id": message["message_id"],
-                "published_at": message["published_at"],
-                "message_type": calculated["message_type"],
-                "topics": calculated["topics"],
-                "importance_score": score,
-                "importance_calculation": calculated["calculation"],
-            }
-            event = await store.process(
-                event_message, assembly=assembly, client=self._client_factory(message_payload)
-            )
-            message_id = int(message["message_id"])
-            published_at = str(message["published_at"])
-            featured_rows.append(
-                FeaturedCandidate(
-                    normalized_item_id=message_id,
-                    importance_score=score,
-                    content_form=str(analysis.content_form),
-                )
-            )
-            daily_rows.append(
-                DailyReportCandidate(
-                    message_id=message_id,
-                    importance_score=score,
-                    published_at=datetime.fromisoformat(published_at),
-                    content_form=str(analysis.content_form),
-                    products=tuple(str(value) for value in analysis.products),
-                    event_ids=tuple(event["event_ids"]),
-                )
-            )
-            message_results.append(
-                {
-                    "message_id": message_id,
-                    "message_analysis": analysis.model_dump(mode="json"),
-                    "importance": importance.model_dump(mode="json")
-                    if importance is not None
-                    else calculated,
-                    "importance_score": score,
-                    "event_decision": event["event_decision"],
-                }
-            )
+        from zoneinfo import ZoneInfo
+        day = daily_rows[-1].published_at.astimezone(ZoneInfo("Asia/Shanghai")).date() if daily_rows else None
+        daily_rows = [row for row in daily_rows if row.published_at.astimezone(ZoneInfo("Asia/Shanghai")).date() == day]
+        featured_rows = [FeaturedCandidate(normalized_item_id=row.message_id,
+                         importance_score=row.importance_score, content_form=row.content_form) for row in daily_rows]
         featured = assembly.select_featured(featured_rows)
         daily = assembly.plan_daily_report(daily_rows)
         return _with_metadata(
@@ -379,22 +416,34 @@ class FrozenExperimentExecutor:
         total_cost = 0.0
         method_calls: list[dict[str, Any]] = []
         online_business_writes = 0
+        previous_received = None
+        for step in case.steps:
+            received = step.received_at or step.input.get("message", {}).get("received_at") or step.occurred_at
+            if received:
+                instant = datetime.fromisoformat(received)
+                if previous_received is not None and instant < previous_received:
+                    raise ValueError("scenario steps must follow received_at order")
+                if step.visible_until:
+                    visible = datetime.fromisoformat(step.visible_until)
+                    if visible > instant or (previous_received is not None and visible < previous_received):
+                        raise ValueError("visible_until must include earlier steps and not exceed received_at")
+                previous_received = instant
         for index, step in enumerate(case.steps):
             step_input = {**step.input, "state": state}
             message = dict(step_input.get("message") or step_input.get("evidence") or {})
-            if not message.get("published_at"):
-                message["received_at"] = step.received_at or step.occurred_at
+            if step.received_at:
+                message["received_at"] = step.received_at
+            elif not message.get("published_at"):
+                message["received_at"] = step.occurred_at
             step_input["message"] = message
             step_case = case.model_copy(
                 update={"input": step_input, "steps": [], "initial_state": state}
             )
             try:
-                result = await self.execute(
-                    case=step_case,
-                    candidate=candidate,
-                    context=context,
-                    event_store=store,
-                )
+                with call_identity(step_id=step.step_id, scenario_step_id=step.step_id):
+                    result = await self.execute(
+                        case=step_case, candidate=candidate, context=context, event_store=store,
+                    )
             except Exception as exc:
                 results.append(
                     {
@@ -534,3 +583,13 @@ def _with_metadata(
         metadata["artifact_scope"] = artifact_scope
     metadata.update(extra_metadata or {})
     return {**actual, "_experiment_metadata": metadata}
+
+
+def _message_received_at(message):
+    from datetime import UTC
+    raw = message.get("raw_item") or {}
+    timestamp = message.get("received_at") or raw.get("received_at") or message.get("published_at") or raw.get("published_at")
+    if timestamp is None:
+        raise ValueError("frozen messages require published_at or received_at")
+    value = datetime.fromisoformat(timestamp)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

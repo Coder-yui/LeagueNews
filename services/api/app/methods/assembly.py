@@ -2,6 +2,14 @@
 
 from collections.abc import Callable, Awaitable, Mapping, Sequence
 from typing import Any
+import time
+import inspect
+from copy import deepcopy
+from app.services.call_metering import call_identity, record_method_call, digest
+from app.methods.retrieval import EventRetriever
+from app.methods.model_client import DomainModelClient
+from app.methods.contracts import MessageContentAnalysisResult, MessageClassificationImportanceResult
+from app.schemas.event_aggregation import EventAggregationResult
 from app.domain.daily_report import DailyReportCandidate, DAILY_REPORT_SECTION_LIMITS
 from app.methods.contracts import (
     MethodAssemblyConfig,
@@ -39,13 +47,15 @@ class MethodAssembly:
         self,
         config: MethodAssemblyConfig | None = None,
         *,
+        event_retriever: EventRetriever | None = None,
         implementations: Mapping[str, Mapping[str, MethodImplementation]] | None = None,
     ) -> None:
         if config is None:
             from app.core.config import settings
 
             config = MethodAssemblyConfig.model_validate(settings.processing_method_config)
-        self.config = config
+        self.config = config.model_copy(deep=True)
+        self.event_retriever = event_retriever
         self._implementations: dict[str, dict[str, MethodImplementation]] = {
             "message_analysis": {
                 "baseline": _message_analysis_baseline,
@@ -68,6 +78,10 @@ class MethodAssembly:
             self._implementations.setdefault(method, {}).update(values)
         self._calls: list[MethodCallRecord] = []
 
+    def with_config(self, config: MethodAssemblyConfig) -> "MethodAssembly":
+        return MethodAssembly(config, implementations=self._implementations,
+                              event_retriever=self.event_retriever)
+
     def model_identifier(self, method: str) -> str:
         selection = self.select(method)
         if selection.implementation != "baseline":
@@ -84,8 +98,8 @@ class MethodAssembly:
             method=method,
             implementation=implementation,
             prompt_ref=self.config.prompt_refs.get(method),
-            model_parameters=dict(self.config.model_parameters.get(method) or {}),
-            strategy_parameters=dict(self.config.strategy_parameters.get(method) or {}),
+            model_parameters=deepcopy(self.config.model_parameters.get(method) or {}),
+            strategy_parameters=deepcopy(self.config.strategy_parameters.get(method) or {}),
             prompt_contents=dict(self.config.prompt_contents),
         )
 
@@ -107,27 +121,33 @@ class MethodAssembly:
                 strategy_parameters=selection.strategy_parameters,
             )
         )
-        return await implementation(
-            client=client,
-            payload=payload,
-            selection=selection,
-        )
+        started = time.perf_counter()
+        status = "failed"
+        with call_identity(method=method, implementation=selection.implementation,
+                           implementation_version=_implementation_version(implementation)):
+            try:
+                result = await implementation(client=client, payload=payload, selection=selection)
+                status = "succeeded"
+                return result
+            finally:
+                record_method_call({"method": method, "implementation": selection.implementation,
+                                    "status": status, "duration_ms": (time.perf_counter() - started) * 1000})
 
-    async def analyze_message(self, value: MessageAnalysisInput, *, client: Any) -> Any:
+    async def analyze_message(self, value: MessageAnalysisInput, *, client: DomainModelClient) -> MessageContentAnalysisResult:
         return await self.invoke(
             "message_analysis",
             client=client,
             payload=value.model_dump(mode="json"),
         )
 
-    async def score_importance(self, value: ImportanceScoringInput, *, client: Any) -> Any:
+    async def score_importance(self, value: ImportanceScoringInput, *, client: DomainModelClient) -> MessageClassificationImportanceResult:
         return await self.invoke(
             "importance_scoring",
             client=client,
             payload=value.model_dump(mode="json"),
         )
 
-    async def aggregate_events(self, value: EventAggregationInput, *, client: Any) -> Any:
+    async def aggregate_events(self, value: EventAggregationInput, *, client: DomainModelClient) -> EventAggregationResult:
         return await self.invoke(
             "event_aggregation",
             client=client,
@@ -157,6 +177,8 @@ class MethodAssembly:
                 strategy_parameters=selection.strategy_parameters,
             )
         )
+        record_method_call({"method": method, "implementation": selection.implementation,
+                            "status": "selected", "duration_ms": None})
         return selection
 
     def calculate_importance(self, **payload):
@@ -198,3 +220,10 @@ class MethodAssembly:
         ):
             raise ValueError("daily plan must assign unique input candidates to valid sections")
         return plan
+
+
+def _implementation_version(implementation):
+    try:
+        return digest(inspect.getsource(implementation))
+    except (OSError, TypeError):
+        return "source-unavailable"

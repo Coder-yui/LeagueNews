@@ -23,6 +23,7 @@ from app.orchestration.contracts import (
     ItemProcessingRequest,
 )
 from app.services.llm import LLMClient
+from app.services.call_metering import measured_run
 from app.services.pipeline_execution import PipelineExecutionGuard
 
 
@@ -69,6 +70,7 @@ class LeagueNewsWorkflowRuntime:
             method_assembly=self._method_assembly,
         )
 
+    @measured_run
     async def invoke_item(
         self,
         request: ItemProcessingRequest,
@@ -93,6 +95,7 @@ class LeagueNewsWorkflowRuntime:
             config=_config(request.thread_id),
         )
 
+    @measured_run
     async def invoke_event(
         self,
         request: EventAggregationRequest,
@@ -114,6 +117,7 @@ class LeagueNewsWorkflowRuntime:
             config=_config(request.thread_id),
         )
 
+    @measured_run
     async def invoke_daily_report(
         self, request: DailyReportRequest
     ) -> dict[str, Any]:

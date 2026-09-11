@@ -121,6 +121,10 @@ def comparison_payload(report: ExperimentReport) -> dict[str, Any]:
                     "actual": case.actual,
                     "error_type": case.error_type,
                     "cache_hit": case.cache_hit,
+                    "expected": case.metadata.get("expected"),
+                    "label_source": case.metadata.get("label_source"),
+                    "measurement": case.metadata,
+                    "duration_ms": case.duration_ms,
                 }
             )
     regression_cases = []
@@ -179,7 +183,7 @@ def comparison_html(report: ExperimentReport) -> str:
                 f"<td>{_escape(case_id)}</td>"
                 f"<td>{_escape(str(result['candidate']))}</td>"
                 f"<td>{_escape(str(result['status']))}</td>"
-                f"<td><pre>{_escape(json.dumps(result.get('actual'), ensure_ascii=False, indent=2))}</pre></td>"
+                f"<td><pre>{_escape(json.dumps(result, ensure_ascii=False, indent=2))}</pre></td>"
                 "</tr>"
             )
     return (

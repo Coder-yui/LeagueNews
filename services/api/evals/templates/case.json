@@ -1,0 +1,20 @@
+{
+  "case_id": "replace-with-stable-case-id",
+  "input": {
+    "evidence": {
+      "title": "填写冻结标题",
+      "text": "填写冻结原始证据，不填答案或评审备注",
+      "source_context": {"classification_source_kind": "unknown"}
+    }
+  },
+  "split": "unassigned",
+  "group_id": "replace-with-story-id",
+  "received_at": "2026-09-11T00:00:00+00:00",
+  "labels": {
+    "values": {},
+    "source": "unlabeled",
+    "schema_version": "gold-labels-v2",
+    "evidence_basis": [],
+    "ambiguity": []
+  }
+}

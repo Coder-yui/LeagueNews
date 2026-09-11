@@ -208,7 +208,7 @@ def test_nonsemantic_content_forms_are_audited_without_event_model_call(
         db.commit()
         client = StaticClient(_result())
         monkeypatch.setattr(
-            "app.orchestration.event_aggregation.backend.recall_event_candidates",
+            "app.services.event_candidates.RuleEventRetriever.retrieve",
             lambda *args, **kwargs: pytest.fail("nonsemantic content entered candidate recall"),
         )
 

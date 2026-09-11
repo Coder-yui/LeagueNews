@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import time
+from uuid import uuid4
+from app.services.call_metering import AttemptRecorder, MemoryRecorder, measurement_scope, summarize_attempts
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -87,13 +89,18 @@ class ExperimentRunner:
         *,
         evaluators: Mapping[ExperimentTarget, ExperimentEvaluator] | None = None,
         state_store: LocalExperimentRunStore | None = None,
+        attempt_recorder: AttemptRecorder | None = None,
     ) -> None:
         self._executors = dict(executors)
         self._evaluators = dict(evaluators or {})
         self._state_store = state_store
+        self._attempt_recorder = attempt_recorder
         self._state_lock = asyncio.Lock()
 
     async def run(self, plan: ExperimentPlan) -> ExperimentReport:
+        if plan.max_cost_usd is not None:
+            raise ValueError("cost budgets are not implemented; use explicit request-count budgets")
+        run_started = time.perf_counter()
         try:
             executor = self._executors[plan.dataset.target]
         except KeyError as exc:
@@ -138,7 +145,10 @@ class ExperimentRunner:
                 "max_cost_usd": plan.max_cost_usd,
                 "execution_dataset_fingerprint": plan.dataset.execution_fingerprint,
                 "total_calls": budget.calls,
-                "total_cost_usd": budget.cost_usd,
+                "total_cost_usd": sum(case.cost_usd for candidate in candidate_results for case in candidate.cases)
+                if all(case.cost_usd is not None for candidate in candidate_results for case in candidate.cases) else None,
+                "automatic_wall_ms": (time.perf_counter() - run_started) * 1000,
+                "latency_scope": "offline execution; excludes production queue and human wait",
             },
         )
 
@@ -217,16 +227,14 @@ class ExperimentRunner:
             cached = self._state_store.get_cache(cache_key)
             if cached is not None:
                 result = CaseResult.model_validate(cached)
-                result.cache_hit = True
-                return result
+                return _historical_result(result)
         if plan.resume_enabled and self._state_store is not None:
             previous = self._state_store.get_cases(plan_key).get(candidate.candidate_id, {}).get(
                 case.case_id
             )
             if isinstance(previous, dict):
                 result = CaseResult.model_validate(previous)
-                result.cache_hit = True
-                return result
+                return _historical_result(result)
 
         context = ExperimentExecutionContext(
             experiment_id=plan.experiment_id,
@@ -241,28 +249,18 @@ class ExperimentRunner:
             model_version=plan.model_version,
         )
         started = time.perf_counter()
+        recorder = MemoryRecorder(self._attempt_recorder)
+        scope = None
+        reserved = False
         try:
             await budget.reserve_case()
-            async with asyncio.timeout(plan.case_timeout_seconds):
-                if (
-                    plan.dataset.shape == ExperimentShape.STATEFUL_SCENARIO
-                    and hasattr(executor, "execute_scenario")
-                ):
-                    raw_result = await getattr(executor, "execute_scenario")(
-                        case=execution_case,
-                        candidate=candidate,
-                        context=context,
-                    )
-                else:
-                    raw_result = await executor.execute(
-                        case=execution_case,
-                        candidate=candidate,
-                        context=context,
-                    )
+            reserved = True
+            with measurement_scope(recorder, run_id=str(uuid4()), code_version=plan.code_version, candidate_fingerprint=candidate_fingerprint, experiment_id=plan.experiment_id,
+                                   candidate_id=candidate.candidate_id, case_id=case.case_id) as scope:
+                raw_result = await self._execute_case(executor, execution_case, candidate, context, plan)
             actual, metadata = _split_execution_metadata(raw_result)
             call_count = int(metadata.get("call_count") or 0)
             cost_usd = _optional_float(metadata.get("cost_usd"))
-            await budget.record(call_count=call_count, cost_usd=cost_usd)
             result = CaseResult(
                 case_id=case.case_id,
                 status=("invalid" if metadata.get("valid") is False else "succeeded"),
@@ -287,7 +285,25 @@ class ExperimentRunner:
                 error_message=str(exc),
                 metadata={"cache_key": cache_key},
                 duration_ms=(time.perf_counter() - started) * 1000,
+                manual_review_required=type(exc).__name__ == "ExperimentManualReviewRequired",
             )
+        measurements = summarize_attempts(recorder.attempts())
+        result.metadata.update(measurements, attempts=recorder.attempts(), measurement_origin="current",
+                               label_source=str(case.label_source), expected=case.label_values,
+                               outcome="manual_review" if result.manual_review_required else
+                               "budget_stopped" if result.error_type == "ExperimentBudgetExceeded" else result.status)
+        result.metadata["method_timings"] = scope.method_calls if scope else []
+        result.call_count = max(result.call_count, len(scope.method_calls) if scope else 0)
+        if reserved:
+            try:
+                await budget.record(call_count=result.call_count, cost_usd=measurements["cost_usd"])
+            except ExperimentBudgetExceeded as exc:
+                result.status = "failed"
+                result.error_type = type(exc).__name__
+                result.error_message = str(exc)
+                result.metadata["outcome"] = "budget_stopped"
+        result.token_count = measurements["token_count"]
+        result.cost_usd = measurements["cost_usd"]
         if self._state_store is not None:
             payload = result.model_dump(mode="json")
             async with self._state_lock:
@@ -300,6 +316,12 @@ class ExperimentRunner:
                 if plan.cache_enabled and result.status == "succeeded":
                     self._state_store.put_cache(cache_key, payload)
         return result
+
+    async def _execute_case(self, executor, case, candidate, context, plan):
+        async with asyncio.timeout(plan.case_timeout_seconds):
+            if plan.dataset.shape == ExperimentShape.STATEFUL_SCENARIO and hasattr(executor, "execute_scenario"):
+                return await executor.execute_scenario(case=case, candidate=candidate, context=context)
+            return await executor.execute(case=case, candidate=candidate, context=context)
 
 
 def _execution_payload(case: ExperimentCase) -> dict[str, Any]:
@@ -337,3 +359,28 @@ def _optional_int(value: object) -> int | None:
 
 def _optional_float(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _historical_result(result: CaseResult) -> CaseResult:
+    """Reuse predictions, retaining old measurements only as historical evidence."""
+    result.metadata = {
+        **result.metadata,
+        "historical_measurement": {
+            "duration_ms": result.duration_ms,
+            "call_count": result.call_count,
+            "token_count": result.token_count,
+            "cost_usd": result.cost_usd,
+            "attempts": result.metadata.get("attempts", []),
+            "method_timings": result.metadata.get("method_timings", []),
+        },
+        **summarize_attempts([]),
+        "measurement_origin": "cache",
+        "method_timings": [],
+        "attempts": [],
+    }
+    result.cache_hit = True
+    result.duration_ms = None
+    result.call_count = 0
+    result.token_count = 0
+    result.cost_usd = 0.0
+    return result

@@ -52,6 +52,7 @@ async def run(args: argparse.Namespace) -> Path:
     plan = plan.model_copy(
         update={
             "code_version": code.hexdigest(),
+            "evaluator_version": "frozen-v2:" + code.hexdigest(),
             "model_version": args.provider + ":" + plan.model_version,
         }
     )
@@ -101,16 +102,23 @@ async def run(args: argparse.Namespace) -> Path:
             )
         endpoint = hashlib.sha256(settings.openai_base_url.encode()).hexdigest()
         plan = plan.model_copy(
-            update={"candidates": candidates, "model_version": "configured:" + endpoint}
+            update={"candidates": candidates, "model_version": "configured:" + hashlib.sha256(
+                json.dumps({"endpoint": endpoint, "default_model": settings.model_name,
+                            "sdk_retries": settings.llm_max_retries,
+                            "timeout_seconds": settings.llm_timeout_seconds}, sort_keys=True).encode()
+            ).hexdigest()}
         )
 
         def client_factory(_payload):
             return LLMClient(before_request=before_request)
 
     executor = FrozenExperimentExecutor(client_factory=client_factory)
+    from app.services.call_metering import SQLiteAttemptRecorder
+
     runner = ExperimentRunner(
         {target: executor for target in {candidate.target for candidate in plan.candidates}},
         evaluators=default_evaluators(),
+        attempt_recorder=SQLiteAttemptRecorder(args.artifact_root / ".attempts" / f"{plan.experiment_id}.sqlite3"),
         state_store=(
             None
             if args.no_cache and args.no_resume

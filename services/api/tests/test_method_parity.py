@@ -278,6 +278,9 @@ def test_event_scenario_creates_then_attaches_and_preserves_latest_projection():
             _event_step("late", "2026-09-07T02:00:00+00:00", late),
         ],
     )
+    # The third publication is older, but it arrives after the second message.
+    case.steps[2].input["message"]["published_at"] = "2026-09-07T02:00:00+00:00"
+    case.steps[2].received_at = "2026-09-07T04:00:00+00:00"
     executor = FrozenExperimentExecutor()
     candidate = CandidateSpec(candidate_id="baseline", target="event_aggregation")
     first = asyncio.run(

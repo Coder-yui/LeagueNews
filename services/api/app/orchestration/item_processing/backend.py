@@ -138,7 +138,7 @@ class ItemProcessingBackendV3:
             self._session_factory,
             llm_factory=self._llm_factory,
             execution_guard=self._execution_guard,
-            method_assembly=MethodAssembly(config),
+            method_assembly=self._method_assembly.with_config(config),
         )
 
     async def load_evidence(self, request: ItemProcessingRequest) -> EvidenceSnapshot:

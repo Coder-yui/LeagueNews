@@ -63,7 +63,7 @@ class DailyReportBackendV3:
     ) -> "DailyReportBackendV3":
         return DailyReportBackendV3(
             self._session_factory,
-            method_assembly=MethodAssembly(config),
+            method_assembly=self._method_assembly.with_config(config),
         )
 
     async def load_window(self, request: DailyReportRequest) -> DailyWindow:

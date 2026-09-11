@@ -26,7 +26,9 @@ from app.orchestration.event_aggregation.graph import (
     EventProjectionResult,
 )
 from app.repositories.events import event_ids_for_normalized_item
-from app.services.event_candidates import recall_event_candidates
+from app.services.event_candidates import RuleEventRetriever
+from app.methods.retrieval import EventRetrievalQuery
+from app.services.event_semantics import semantic_projection
 from app.services.event_method_support import (
     apply_event_membership_transaction,
     build_event_message_payload,
@@ -35,6 +37,7 @@ from app.services.event_method_support import (
 )
 from app.services.event_metrics import refresh_event_metrics
 from app.services.llm import LLMClient, execution_metadata
+from app.services.call_metering import call_identity
 from app.services.pipeline_execution import (
     PipelineExecutionGuard,
     assert_execution_owned,
@@ -83,7 +86,7 @@ class EventAggregationBackendV3:
             self._session_factory,
             llm_factory=self._llm_factory,
             execution_guard=self._execution_guard,
-            method_assembly=MethodAssembly(config),
+            method_assembly=self._method_assembly.with_config(config),
         )
 
     async def load_message(
@@ -135,14 +138,25 @@ class EventAggregationBackendV3:
             item = _load_item(
                 db, request.normalized_item_id, request.normalized_item_revision
             )
-            candidates = recall_event_candidates(
-                db,
-                item=item,
-                possible_families=admission.possible_event_families,
+            title, content = semantic_projection(item)
+            selection = self._method_assembly.select("event_recall")
+            query = EventRetrievalQuery(
+                title=title, content=content, summary=item.summary or "",
+                products=tuple(item.products),
+                published_at=item.raw_item.published_at or item.raw_item.ingested_at,
+                visible_until=datetime.now(UTC) if request.run_mode != RunMode.EXPERIMENT
+                else item.raw_item.ingested_at,
+                possible_families=tuple(admission.possible_event_families),
                 entity_hints=admission.entity_hints,
-                assembly=self._method_assembly,
+                window_days=selection.strategy_parameters.get("window_days", 60),
+                limit=selection.strategy_parameters.get("total_limit", 12),
             )
-            return EventCandidateProposal(candidates=candidates)
+        # The input transaction is closed before any injected asynchronous I/O.
+        retriever = self._method_assembly.event_retriever or RuleEventRetriever(
+            self._session_factory, self._method_assembly
+        )
+        candidates = await retriever.retrieve(query)
+        return EventCandidateProposal(candidates=[row.model_dump(mode="json") for row in candidates])
 
     async def decide_semantics(
         self,
@@ -151,15 +165,21 @@ class EventAggregationBackendV3:
         admission: EventAdmissionProposal,
         candidates: EventCandidateProposal,
     ) -> EventDecisionProposal:
-        result = await self._method_assembly.invoke(
-            "event_aggregation",
-            client=self._llm_factory(),
-            payload={
-                "message": snapshot.message,
-                "possible_event_families": admission.possible_event_families,
-                "candidates": candidates.candidates,
-            },
-        )
+        with self._session_factory() as db:
+            item = _load_item(db, request.normalized_item_id, request.normalized_item_revision)
+            raw_item_id, raw_item_revision = item.raw_item_id, item.raw_item.revision
+        with call_identity(raw_item_id=raw_item_id, raw_item_revision=raw_item_revision,
+                           event_run_id=request.workflow_run_id,
+                           normalized_item_id=request.normalized_item_id):
+            result = await self._method_assembly.invoke(
+                "event_aggregation",
+                client=self._llm_factory(),
+                payload={
+                    "message": snapshot.message,
+                    "possible_event_families": admission.possible_event_families,
+                    "candidates": [{key: value for key, value in row.items() if key not in {"revision", "retrieval_source"}} for row in candidates.candidates],
+                },
+            )
         from app.domain.event_families import EventSpace
 
         result, suppressed = suppress_out_of_space_mentions(

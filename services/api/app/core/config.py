@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     processing_method_config: dict[str, object] = {}
     llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 1
+    call_metering_path: str = "services/api/.artifacts/call-metering.sqlite3"
     media_root: str = "../../apps/web/public/media"
     media_max_bytes: int = 20 * 1024 * 1024
     connector_user_agent: str = "LoLDailyIntel/0.1 (local development)"
